@@ -43,6 +43,16 @@ class Config:
     verbose: bool = True
     # Additional flags passed verbatim to whisper-cli.
     extra_args: list[str] = field(default_factory=list)
+    # --- Diarization (sherpa-onnx) ---
+    # Enable speaker diarization by default.
+    diarize: bool = False
+    # Known number of speakers (0 => auto-detect via cluster_threshold).
+    num_speakers: int = 0
+    # Clustering threshold when auto-detecting (smaller = more speakers).
+    cluster_threshold: float = 0.5
+    # Explicit paths to diarization models (empty => auto-discover).
+    diarization_segmentation_model: str = ""
+    diarization_embedding_model: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

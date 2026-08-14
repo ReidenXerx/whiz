@@ -4,8 +4,9 @@ A handy CLI wrapper around [whisper-cli](https://github.com/ggerganov/whisper.cp
 
 1. **`failed to open 'large-v3'`** — whiz auto-discovers models across your filesystem and resolves friendly aliases (`turbo`, `large-v3`, `medium`) to the actual `.bin` file.
 2. **whisper-cli choking on `.mov`/`.mp4`** — whiz extracts a 16 kHz mono WAV with ffmpeg and hands *that* to whisper-cli, then cleans up.
+3. **No multi-speaker labels** — `whiz transcribe --speakers` runs true diarization via sherpa-onnx and emits labeled `Speaker A:` / `Speaker B:` output.
 
-Zero runtime dependencies — pure Python 3.11+ stdlib.
+Zero runtime dependencies — pure Python 3.11+ stdlib. Speaker diarization requires the optional `sherpa-onnx` package (see below).
 
 ## Requirements
 
@@ -154,6 +155,40 @@ Because `whisper-cli --model large-v3 -f recording.mov` fails twice — once bec
 `large-v3` isn't a file path, and again because whisper-cli can't demux a `.mov`.
 whiz handles both so you can just say `whiz transcribe recording.mov` and get on
 with your day.
+
+## Speaker diarization (multi-speaker labels)
+
+whiz can label who spoke when on mono recordings (meetings, screen recordings) via [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx), which combines a pyannote segmentation model with speaker-embedding clustering.
+
+### One-time setup
+
+```bash
+# 1. Install the optional dependency into whiz's environment
+pipx inject whiz sherpa-onnx
+
+# 2. Download the diarization models (~90 MB total)
+whiz models download-diarization
+```
+
+### Usage
+
+```bash
+# Auto-detect number of speakers
+whiz transcribe --speakers recording.mov
+
+# Known speaker count (more accurate)
+whiz transcribe --speakers 2 meeting.mp4
+
+# Tune clustering threshold when auto-detecting (smaller = more speakers)
+whiz transcribe --speakers --cluster-threshold 0.8 call.m4a
+```
+
+This produces the normal whisper-cli outputs (SRT, JSON) plus two labeled files alongside the input:
+
+- `*.speakers.srt` — SRT with `Speaker A: ...` per cue
+- `*.speakers.txt` — readable dialogue transcript (`Speaker A (00:01:23): text`), consecutive same-speaker lines merged
+
+When `--speakers` is set, whisper-cli VAD is disabled (sherpa-onnx handles speech segmentation).
 
 ## License
 

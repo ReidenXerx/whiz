@@ -23,6 +23,8 @@ from pathlib import Path
 from whiz import __version__
 from whiz import audio as aud
 from whiz import config as cfg
+from whiz import diarize as D
+from whiz import merge as MR
 from whiz import models as M
 
 # whisper-cli output-format flags.
@@ -59,6 +61,7 @@ def _auto_threads() -> int:
 
 def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list[str]:
     """Assemble the whisper-cli argv."""
+    diarize_enabled = args.speakers is not None
     # Resolve model.
     model_ref = args.model or config.model
     if model_ref:
@@ -102,6 +105,10 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
 
     # Outputs.
     outputs = args.outputs if args.outputs else config.outputs
+    # When diarizing we need a parseable whisper output to merge against.
+    # Force JSON (in addition to any user-requested formats) so we can parse segments.
+    if diarize_enabled and "json" not in outputs and "json-full" not in outputs:
+        outputs = list(outputs) + ["json"]
     out_flags = []
     for o in outputs:
         flag = OUTPUT_FLAGS.get(o)
@@ -111,14 +118,17 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
 
     # Output base path.
     of_flag: list[str] = []
+    of_base = Path(args.output).expanduser() if args.output else wav.with_suffix("")
     if args.output:
-        of_flag = ["-of", str(Path(args.output).expanduser())]
+        of_flag = ["-of", str(of_base)]
 
     # Language.
     lang = args.language or config.language
 
-    # VAD.
-    vad_enabled = args.vad if args.vad is not None else config.vad
+    # VAD. When diarizing, sherpa-onnx handles speech segmentation, so skip whisper-cli VAD.
+    vad_enabled = (args.vad if args.vad is not None else config.vad) and not diarize_enabled
+    if diarize_enabled:
+        print("Diarization enabled; disabling whisper-cli VAD (sherpa-onnx handles segmentation).", file=sys.stderr)
     vad_flags: list[str] = []
     if vad_enabled:
         vad_flags = ["--vad", "-vt", str(args.vad_threshold if args.vad_threshold is not None else config.vad_threshold)]
@@ -159,12 +169,20 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
     if args.extra:
         cmd += args.extra
 
-    return cmd, model_path, wav, in_path, keep_wav
+    return cmd, model_path, wav, in_path, keep_wav, of_base
+
+
+def _output_base_path(args, wav: Path) -> Path:
+    """Determine the whisper-cli output base path (no extension)."""
+    if args.output:
+        return Path(args.output).expanduser()
+    return wav.with_suffix("")
 
 
 def cmd_transcribe(args: argparse.Namespace) -> int:
     config = cfg.load()
-    cmd, model_path, wav, in_path, keep_wav = _build_transcribe_args(args, config)
+    cmd, model_path, wav, in_path, keep_wav, of_base = _build_transcribe_args(args, config)
+    diarize_enabled = args.speakers is not None
 
     print(f"Model:  {model_path}", file=sys.stderr)
     print(f"Input:  {in_path}", file=sys.stderr)
@@ -174,11 +192,49 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     print("-" * 60, file=sys.stderr)
 
     if args.dry_run:
+        if diarize_enabled:
+            num_sp = args.speakers if args.speakers else 0
+            thr = args.cluster_threshold if args.cluster_threshold is not None else config.cluster_threshold
+            D.run_diarization(wav, config, num_speakers=num_sp, threshold=thr, dry_run=True)
         print("\nDRY-RUN: not executing whisper-cli.", file=sys.stderr)
         return 0
 
+    # --- Diarization path ---
+    if diarize_enabled:
+        num_sp = args.speakers if args.speakers else 0
+        thr = args.cluster_threshold if args.cluster_threshold is not None else config.cluster_threshold
+        diar_segments = D.run_diarization(wav, config, num_speakers=num_sp, threshold=thr)
+        if not diar_segments:
+            print("Warning: diarization produced no segments; falling back to unlabeled output.", file=sys.stderr)
+
     proc = subprocess.run(cmd)
     rc = proc.returncode
+
+    # --- Merge diarization with whisper output ---
+    if diarize_enabled and rc == 0:
+        json_path = of_base.with_suffix(".json")
+        if not json_path.exists():
+            # Try json-full suffix shape.
+            json_full = of_base.with_suffix(".json.json")
+            json_path = json_full if json_full.exists() else of_base.with_suffix(".json")
+        if not json_path.exists():
+            print(f"Warning: expected whisper JSON output at {json_path} but it's missing; skipping merge.", file=sys.stderr)
+        else:
+            try:
+                whisper_segs = MR.parse_whisper_json(json_path)
+            except Exception as e:  # noqa: BLE001
+                print(f"Warning: failed to parse {json_path}: {e}", file=sys.stderr)
+                whisper_segs = []
+            if whisper_segs and diar_segments:
+                merged = MR.assign_speakers(whisper_segs, diar_segments)
+                labeled_srt = MR.format_labeled_srt(merged)
+                dialogue = MR.format_dialogue_txt(merged)
+                srt_out = of_base.with_suffix(".speakers.srt")
+                txt_out = of_base.with_suffix(".speakers.txt")
+                srt_out.write_text(labeled_srt + "\n", encoding="utf-8")
+                txt_out.write_text(dialogue + "\n", encoding="utf-8")
+                print(f"Wrote labeled SRT:  {srt_out}", file=sys.stderr)
+                print(f"Wrote dialogue TXT: {txt_out}", file=sys.stderr)
 
     # Clean up the intermediate WAV unless asked to keep it.
     if wav != in_path and not keep_wav and wav.exists():
@@ -240,6 +296,17 @@ def cmd_models_download_vad(args: argparse.Namespace) -> int:
     except FileExistsError as e:
         print(e)
         return 1
+    except Exception as e:  # noqa: BLE001
+        print(f"Download failed: {e}", file=sys.stderr)
+        return 2
+
+
+def cmd_models_download_diarization(args: argparse.Namespace) -> int:
+    dest = Path(args.dest).expanduser() if args.dest else None
+    try:
+        seg, emb = D.download_diarization_models(dest_dir=dest)
+        print("\nDone. Enable with: whiz transcribe --speakers <file>")
+        return 0
     except Exception as e:  # noqa: BLE001
         print(f"Download failed: {e}", file=sys.stderr)
         return 2
@@ -331,6 +398,8 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--print-progress", action="store_true", help="Print progress")
     t.add_argument("--keep-wav", action="store_true", help="Keep the intermediate extracted WAV (default: deleted after)")
     t.add_argument("--no-auto-vad-download", action="store_true", help="Don't auto-download the Silero VAD model when VAD is enabled and missing")
+    t.add_argument("--speakers", type=int, default=None, nargs="?", const=0, help="Enable speaker diarization via sherpa-onnx. Optional integer = known speaker count; omit = auto-detect")
+    t.add_argument("--cluster-threshold", type=float, default=None, help="Diarization clustering threshold when auto-detecting (smaller = more speakers; default 0.5)")
     t.add_argument("--verbose", action="store_true", help="Verbose whisper-cli output")
     t.add_argument("--extra", nargs=argparse.REMAINDER, default=[], help="Extra flags passed verbatim to whisper-cli")
     t.add_argument("--dry-run", action="store_true", help="Print the command without running it")
@@ -349,6 +418,9 @@ def build_parser() -> argparse.ArgumentParser:
     mvd.add_argument("version", nargs="?", default="", help="VAD version, e.g. 'v5.1.2', 'v6.2.0', or full filename (default: v5.1.2)")
     mvd.add_argument("--dest", default="", help="Destination directory (default: ~/.cache/whisper)")
     mvd.set_defaults(func=cmd_models_download_vad)
+    mdiar = msub.add_parser("download-diarization", aliases=["diar"], help="Download diarization models (sherpa-onnx segmentation + embedding)")
+    mdiar.add_argument("--dest", default="", help="Destination directory (default: ~/.cache/whiz/diarization)")
+    mdiar.set_defaults(func=cmd_models_download_diarization)
 
     # config
     cp = sub.add_parser("config", aliases=["c"], help="View or edit configuration")
