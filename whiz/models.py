@@ -17,8 +17,13 @@ from pathlib import Path
 from whiz import config as cfg
 
 HF_BASE = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
-VAD_FILENAME = "ggml-silero-vad.bin"
-VAD_HF_URL = f"{HF_BASE}/{VAD_FILENAME}"
+# VAD models live in a separate repo and are versioned.
+VAD_HF_BASE = "https://huggingface.co/ggml-org/whisper-vad/resolve/main"
+# Preference order: v5.1.2 has broader whisper-cli compatibility; v6.2.0 is newer.
+VAD_MODELS: list[str] = ["ggml-silero-v5.1.2.bin", "ggml-silero-v6.2.0.bin"]
+VAD_DEFAULT = VAD_MODELS[0]
+# Glob pattern for discovering any Silero VAD model on disk.
+VAD_GLOB = "ggml-silero-v*.bin"
 
 # Canonical whisper.cpp models. Order matters for "best" auto-pick (prefer
 # turbo/quantized for speed, then full large).
@@ -190,8 +195,8 @@ def list_known() -> list[str]:
 def find_vad_model(config: cfg.Config) -> Path | None:
     """Find the Silero VAD model file.
 
-    Precedence: explicit config.vad_model path, then any ggml-silero-vad.bin
-    in the model search dirs.
+    Precedence: explicit config.vad_model path, then any ggml-silero-v*.bin
+    in the model search dirs (preferring v5.1.2, then v6.2.0).
     """
     if config.vad_model:
         p = Path(config.vad_model).expanduser()
@@ -200,24 +205,42 @@ def find_vad_model(config: cfg.Config) -> Path | None:
     for d in cfg.model_search_dirs(config):
         if not d.exists():
             continue
-        candidate = d / VAD_FILENAME
-        if candidate.exists():
-            return candidate
+        # Prefer known versions in order, then any other silero-v*.bin.
+        for name in VAD_MODELS:
+            candidate = d / name
+            if candidate.exists():
+                return candidate
+        for p in sorted(d.glob(VAD_GLOB)):
+            return p
     return None
 
 
-def download_vad(config: cfg.Config, dest_dir: Path | None = None) -> Path:
-    """Download ggml-silero-vad.bin from the whisper.cpp HuggingFace repo."""
+def download_vad(config: cfg.Config, dest_dir: Path | None = None, version: str = "") -> Path:
+    """Download a Silero VAD model from the ggml-org/whisper-vad repo.
+
+    `version` may be empty (picks default v5.1.2), 'v5.1.2', 'v6.2.0',
+    or a full filename like 'ggml-silero-v6.2.0.bin'.
+    """
+    if version and version.startswith("ggml-"):
+        filename = version
+    elif version:
+        filename = f"ggml-silero-{version}.bin" if not version.startswith("silero-") else f"ggml-{version}.bin"
+    else:
+        filename = VAD_DEFAULT
+    if not filename.endswith(".bin"):
+        filename += ".bin"
+
     target_dir = dest_dir or (Path.home() / ".cache" / "whisper")
     target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / VAD_FILENAME
+    target = target_dir / filename
     if target.exists():
         raise FileExistsError(f"Already exists: {target}")
-    print(f"Downloading {VAD_FILENAME} from {VAD_HF_URL} ...", flush=True)
-    req = urllib.request.Request(VAD_HF_URL, headers={"User-Agent": "whiz/0.1"})
+    url = f"{VAD_HF_BASE}/{filename}"
+    print(f"Downloading {filename} from {url} ...", flush=True)
+    req = urllib.request.Request(url, headers={"User-Agent": "whiz/0.2"})
     with urllib.request.urlopen(req) as resp:  # noqa: S310 - trusted HF URL
         if resp.status >= 400:
-            raise RuntimeError(f"Download failed: HTTP {resp.status} for {VAD_HF_URL}")
+            raise RuntimeError(f"Download failed: HTTP {resp.status} for {url}")
         with target.open("wb") as fh:
             shutil.copyfileobj(resp, fh, length=1024 * 1024)
     print(f"Saved to {target} ({round(target.stat().st_size / (1024*1024), 1)} MB)", flush=True)

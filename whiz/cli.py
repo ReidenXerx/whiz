@@ -232,8 +232,9 @@ def cmd_models_known(args: argparse.Namespace) -> int:
 def cmd_models_download_vad(args: argparse.Namespace) -> int:
     config = cfg.load()
     dest = Path(args.dest).expanduser() if args.dest else None
+    version = getattr(args, "version", "") or ""
     try:
-        path = M.download_vad(config, dest_dir=dest)
+        path = M.download_vad(config, dest_dir=dest, version=version)
         print(f"\nDone. VAD model at: {path}")
         return 0
     except FileExistsError as e:
@@ -344,7 +345,8 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("--dest", default="", help="Destination directory (default: ~/.cache/whisper)")
     md.set_defaults(func=cmd_models_download)
     msub.add_parser("known", help="List canonical known model names").set_defaults(func=cmd_models_known)
-    mvd = msub.add_parser("download-vad", aliases=["vad"], help="Download the Silero VAD model (ggml-silero-vad.bin)")
+    mvd = msub.add_parser("download-vad", aliases=["vad"], help="Download the Silero VAD model (default: ggml-silero-v5.1.2.bin)")
+    mvd.add_argument("version", nargs="?", default="", help="VAD version, e.g. 'v5.1.2', 'v6.2.0', or full filename (default: v5.1.2)")
     mvd.add_argument("--dest", default="", help="Destination directory (default: ~/.cache/whisper)")
     mvd.set_defaults(func=cmd_models_download_vad)
 
