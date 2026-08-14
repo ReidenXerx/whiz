@@ -179,6 +179,29 @@ def _output_base_path(args, wav: Path) -> Path:
     return wav.with_suffix("")
 
 
+def _find_whisper_json(of_base: Path, wav: Path, of_passed: bool) -> Path | None:
+    """Locate the whisper-cli JSON output.
+
+    whisper-cli names outputs after the *input file stem*. When ``-of`` is NOT
+    passed the input is the ``.wav`` file, so the JSON is ``<wav>.json`` (the
+    ``.wav`` suffix is part of the stem, e.g. ``foo.wav.json``). When ``-of`` IS
+    passed the JSON is ``<of_base>.json``.
+    """
+    candidates: list[Path] = []
+    if of_passed:
+        candidates.append(of_base.with_suffix(".json"))
+        candidates.append(of_base.with_suffix(".json.json"))
+    else:
+        # whisper-cli appends the format extension to the full input path.
+        candidates.append(Path(str(wav) + ".json"))
+        candidates.append(of_base.with_suffix(".json"))
+        candidates.append(of_base.with_suffix(".json.json"))
+    for c in candidates:
+        if c.exists():
+            return c
+    return candidates[0]
+
+
 def cmd_transcribe(args: argparse.Namespace) -> int:
     config = cfg.load()
     cmd, model_path, wav, in_path, keep_wav, of_base = _build_transcribe_args(args, config)
@@ -212,11 +235,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
 
     # --- Merge diarization with whisper output ---
     if diarize_enabled and rc == 0:
-        json_path = of_base.with_suffix(".json")
-        if not json_path.exists():
-            # Try json-full suffix shape.
-            json_full = of_base.with_suffix(".json.json")
-            json_path = json_full if json_full.exists() else of_base.with_suffix(".json")
+        json_path = _find_whisper_json(of_base, wav, of_passed=bool(args.output))
         if not json_path.exists():
             print(f"Warning: expected whisper JSON output at {json_path} but it's missing; skipping merge.", file=sys.stderr)
         else:
@@ -229,8 +248,10 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                 merged = MR.assign_speakers(whisper_segs, diar_segments)
                 labeled_srt = MR.format_labeled_srt(merged)
                 dialogue = MR.format_dialogue_txt(merged)
-                srt_out = of_base.with_suffix(".speakers.srt")
-                txt_out = of_base.with_suffix(".speakers.txt")
+                # Append (not Path.with_suffix) so dots in the stem like
+                # "...16.03.40" aren't treated as a replaceable suffix.
+                srt_out = Path(str(of_base) + ".speakers.srt")
+                txt_out = Path(str(of_base) + ".speakers.txt")
                 srt_out.write_text(labeled_srt + "\n", encoding="utf-8")
                 txt_out.write_text(dialogue + "\n", encoding="utf-8")
                 print(f"Wrote labeled SRT:  {srt_out}", file=sys.stderr)
