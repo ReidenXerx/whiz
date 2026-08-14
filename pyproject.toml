@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "whiz"
+version = "0.1.0"
+description = "A handy CLI wrapper around whisper-cli (whisper.cpp) — auto-finds models, extracts audio from video, sensible defaults."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "ReidenXerx" }]
+requires-python = ">=3.11"
+keywords = ["whisper", "whisper.cpp", "speech-to-text", "transcription", "cli", "ffmpeg"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/ReidenXerx/whiz"
+Repository = "https://github.com/ReidenXerx/whiz"
+Issues = "https://github.com/ReidenXerx/whiz/issues"
+
+[project.scripts]
+whiz = "whiz.cli:main"
+
+[tool.setuptools]
+packages = ["whiz"]
