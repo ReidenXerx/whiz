@@ -118,9 +118,23 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
     lang = args.language or config.language
 
     # VAD.
+    vad_enabled = args.vad if args.vad is not None else config.vad
     vad_flags: list[str] = []
-    if args.vad if args.vad is not None else config.vad:
+    if vad_enabled:
         vad_flags = ["--vad", "-vt", str(args.vad_threshold if args.vad_threshold is not None else config.vad_threshold)]
+        # Resolve the Silero VAD model. Auto-download if missing and not dry-run.
+        vad_model_path = M.find_vad_model(config)
+        if vad_model_path is None and not args.dry_run and not args.no_auto_vad_download:
+            print("VAD enabled but no Silero VAD model found; downloading ggml-silero-vad.bin ...", file=sys.stderr)
+            vad_model_path = M.ensure_vad_model(config, auto_download=True)
+        if vad_model_path is not None:
+            vad_flags += ["--vad-model", str(vad_model_path)]
+        elif not args.dry_run:
+            print("Warning: VAD enabled but no VAD model available; whisper-cli may fail. "
+                  "Run `whiz models download-vad` or disable with --no-vad.", file=sys.stderr)
+        elif args.dry_run and vad_model_path is None:
+            print("DRY-RUN: no VAD model found; would download ggml-silero-vad.bin at run time.", file=sys.stderr)
+            vad_flags += ["--vad-model", "<PATH-TO-VAD-MODEL>"]
 
     cmd = [
         _find_whisper_cli(config.whisper_cli),
@@ -215,6 +229,21 @@ def cmd_models_known(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_models_download_vad(args: argparse.Namespace) -> int:
+    config = cfg.load()
+    dest = Path(args.dest).expanduser() if args.dest else None
+    try:
+        path = M.download_vad(config, dest_dir=dest)
+        print(f"\nDone. VAD model at: {path}")
+        return 0
+    except FileExistsError as e:
+        print(e)
+        return 1
+    except Exception as e:  # noqa: BLE001
+        print(f"Download failed: {e}", file=sys.stderr)
+        return 2
+
+
 # ---------- config ----------
 
 def cmd_config_show(args: argparse.Namespace) -> int:
@@ -299,7 +328,8 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--translate", action="store_true", help="Translate to English instead of transcribing")
     t.add_argument("--no-timestamps", action="store_true", help="Suppress timestamps in output")
     t.add_argument("--print-progress", action="store_true", help="Print progress")
-    t.add_argument("--keep-wav", action="store_true", help="Keep the extracted WAV (default: deleted after)")
+    t.add_argument("--keep-wav", action="store_true", help="Keep the intermediate extracted WAV (default: deleted after)")
+    t.add_argument("--no-auto-vad-download", action="store_true", help="Don't auto-download the Silero VAD model when VAD is enabled and missing")
     t.add_argument("--verbose", action="store_true", help="Verbose whisper-cli output")
     t.add_argument("--extra", nargs=argparse.REMAINDER, default=[], help="Extra flags passed verbatim to whisper-cli")
     t.add_argument("--dry-run", action="store_true", help="Print the command without running it")
@@ -314,6 +344,9 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("--dest", default="", help="Destination directory (default: ~/.cache/whisper)")
     md.set_defaults(func=cmd_models_download)
     msub.add_parser("known", help="List canonical known model names").set_defaults(func=cmd_models_known)
+    mvd = msub.add_parser("download-vad", aliases=["vad"], help="Download the Silero VAD model (ggml-silero-vad.bin)")
+    mvd.add_argument("--dest", default="", help="Destination directory (default: ~/.cache/whisper)")
+    mvd.set_defaults(func=cmd_models_download_vad)
 
     # config
     cp = sub.add_parser("config", aliases=["c"], help="View or edit configuration")

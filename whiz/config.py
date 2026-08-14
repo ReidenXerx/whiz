@@ -33,6 +33,8 @@ class Config:
     language: str = "auto"
     # Enable VAD by default.
     vad: bool = True
+    # Path to Silero VAD model (empty => auto-discover or download ggml-silero-vad.bin).
+    vad_model: str = ""
     # VAD threshold.
     vad_threshold: float = 0.5
     # Output formats to produce by default.

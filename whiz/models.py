@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import sys
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,8 @@ from pathlib import Path
 from whiz import config as cfg
 
 HF_BASE = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
+VAD_FILENAME = "ggml-silero-vad.bin"
+VAD_HF_URL = f"{HF_BASE}/{VAD_FILENAME}"
 
 # Canonical whisper.cpp models. Order matters for "best" auto-pick (prefer
 # turbo/quantized for speed, then full large).
@@ -182,3 +185,56 @@ def download(model: str, config: cfg.Config, dest_dir: Path | None = None) -> Pa
 def list_known() -> list[str]:
     """Return the canonical list of known whisper.cpp model filenames."""
     return list(KNOWN_MODELS)
+
+
+def find_vad_model(config: cfg.Config) -> Path | None:
+    """Find the Silero VAD model file.
+
+    Precedence: explicit config.vad_model path, then any ggml-silero-vad.bin
+    in the model search dirs.
+    """
+    if config.vad_model:
+        p = Path(config.vad_model).expanduser()
+        if p.exists():
+            return p
+    for d in cfg.model_search_dirs(config):
+        if not d.exists():
+            continue
+        candidate = d / VAD_FILENAME
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def download_vad(config: cfg.Config, dest_dir: Path | None = None) -> Path:
+    """Download ggml-silero-vad.bin from the whisper.cpp HuggingFace repo."""
+    target_dir = dest_dir or (Path.home() / ".cache" / "whisper")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / VAD_FILENAME
+    if target.exists():
+        raise FileExistsError(f"Already exists: {target}")
+    print(f"Downloading {VAD_FILENAME} from {VAD_HF_URL} ...", flush=True)
+    req = urllib.request.Request(VAD_HF_URL, headers={"User-Agent": "whiz/0.1"})
+    with urllib.request.urlopen(req) as resp:  # noqa: S310 - trusted HF URL
+        if resp.status >= 400:
+            raise RuntimeError(f"Download failed: HTTP {resp.status} for {VAD_HF_URL}")
+        with target.open("wb") as fh:
+            shutil.copyfileobj(resp, fh, length=1024 * 1024)
+    print(f"Saved to {target} ({round(target.stat().st_size / (1024*1024), 1)} MB)", flush=True)
+    return target
+
+
+def ensure_vad_model(config: cfg.Config, auto_download: bool = True) -> Path | None:
+    """Find the VAD model, optionally downloading it if missing."""
+    found = find_vad_model(config)
+    if found:
+        return found
+    if not auto_download:
+        return None
+    try:
+        return download_vad(config)
+    except FileExistsError:
+        return find_vad_model(config)
+    except Exception as e:  # noqa: BLE001
+        print(f"Warning: could not download VAD model: {e}", file=sys.stderr)
+        return None
