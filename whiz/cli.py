@@ -333,6 +333,80 @@ def cmd_models_download_diarization(args: argparse.Namespace) -> int:
         return 2
 
 
+def cmd_merge(args: argparse.Namespace) -> int:
+    """Re-run only diarization + merge against an existing whisper JSON.
+
+    Lets you tune --speakers / --cluster-threshold without redoing the
+    expensive whisper-cli transcription. The whisper JSON (produced by a
+    prior `whiz transcribe --speakers` or `--outputs json`) is reused.
+    """
+    config = cfg.load()
+    in_path = Path(args.file).expanduser()
+    if not in_path.exists():
+        raise SystemExit(f"Input file not found: {in_path}")
+
+    # Resolve the audio (WAV) to diarize. Reuse an existing sibling WAV if the
+    # transcribe run kept it; otherwise re-extract from the video.
+    if aud.is_audio(in_path):
+        wav = in_path
+    elif aud.needs_extraction(in_path):
+        wav = in_path.with_suffix(".wav")
+        if not wav.exists():
+            print(f"Extracting audio from {in_path} ...", file=sys.stderr)
+            wav = aud.extract_audio(in_path, aud.find_ffmpeg(config.ffmpeg))
+    else:
+        wav = in_path
+
+    # Locate the whisper JSON produced by a prior transcribe run.
+    json_path = Path(args.json).expanduser() if args.json else _find_whisper_json(wav.with_suffix(""), wav, of_passed=False)
+    if not json_path.exists():
+        raise SystemExit(
+            f"No whisper JSON found (looked for {json_path}).\n"
+            "Run `whiz transcribe --speakers <file>` first to produce one, or pass --json <path>."
+        )
+    print(f"Whisper JSON:  {json_path}", file=sys.stderr)
+
+    try:
+        whisper_segs = MR.parse_whisper_json(json_path)
+    except Exception as e:  # noqa: BLE001
+        raise SystemExit(f"Failed to parse {json_path}: {e}")
+    if not whisper_segs:
+        raise SystemExit(f"No segments parsed from {json_path}.")
+    print(f"Whisper segments: {len(whisper_segs)}", file=sys.stderr)
+
+    # Diarization params.
+    num_sp = args.speakers if args.speakers else 0
+    thr = args.cluster_threshold if args.cluster_threshold is not None else config.cluster_threshold
+    print(f"Diarize: num_speakers={num_sp or 'auto'} cluster_threshold={thr}", file=sys.stderr)
+
+    diar_segments = D.run_diarization(wav, config, num_speakers=num_sp, threshold=thr)
+    if not diar_segments:
+        raise SystemExit("Diarization produced no segments; cannot merge.")
+
+    merged = MR.assign_speakers(whisper_segs, diar_segments)
+    labeled_srt = MR.format_labeled_srt(merged)
+    dialogue = MR.format_dialogue_txt(merged)
+
+    of_base = json_path.with_suffix("")  # e.g. ...16.03.40.wav -> ...16.03.40
+    # For the wav.json case, of_base should be the input stem without .json.
+    if json_path.name.endswith(".wav.json"):
+        of_base = json_path.with_name(json_path.name[: -len(".json")])  # ...16.03.40.wav
+        of_base = of_base.with_suffix("")  # ...16.03.40
+    srt_out = Path(str(of_base) + ".speakers.srt")
+    txt_out = Path(str(of_base) + ".speakers.txt")
+    srt_out.write_text(labeled_srt + "\n", encoding="utf-8")
+    txt_out.write_text(dialogue + "\n", encoding="utf-8")
+    # Speaker tally to stderr for quick tuning feedback.
+    from collections import Counter
+    tally = Counter(label for _, label in merged)
+    print(f"Detected speakers: {len(tally)}", file=sys.stderr)
+    for label, n in tally.most_common():
+        print(f"  {label}: {n} segments", file=sys.stderr)
+    print(f"Wrote labeled SRT:  {srt_out}", file=sys.stderr)
+    print(f"Wrote dialogue TXT: {txt_out}", file=sys.stderr)
+    return 0
+
+
 # ---------- config ----------
 
 def cmd_config_show(args: argparse.Namespace) -> int:
@@ -420,11 +494,19 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--keep-wav", action="store_true", help="Keep the intermediate extracted WAV (default: deleted after)")
     t.add_argument("--no-auto-vad-download", action="store_true", help="Don't auto-download the Silero VAD model when VAD is enabled and missing")
     t.add_argument("--speakers", type=int, default=None, nargs="?", const=0, help="Enable speaker diarization via sherpa-onnx. Optional integer = known speaker count; omit = auto-detect")
-    t.add_argument("--cluster-threshold", type=float, default=None, help="Diarization clustering threshold when auto-detecting (smaller = more speakers; default 0.5)")
+    t.add_argument("--cluster-threshold", type=float, default=None, help="Diarization clustering threshold when auto-detecting (larger = fewer speakers; default 0.9)")
     t.add_argument("--verbose", action="store_true", help="Verbose whisper-cli output")
     t.add_argument("--extra", nargs=argparse.REMAINDER, default=[], help="Extra flags passed verbatim to whisper-cli")
     t.add_argument("--dry-run", action="store_true", help="Print the command without running it")
     t.set_defaults(func=cmd_transcribe)
+
+    # merge
+    mg = sub.add_parser("merge", help="Re-run diarization + merge against an existing whisper JSON (skip transcription)")
+    mg.add_argument("file", help="Input audio/video file (used to find the whisper JSON and re-extract WAV if needed)")
+    mg.add_argument("--json", default="", help="Explicit path to the whisper JSON (default: auto-find next to input)")
+    mg.add_argument("--speakers", type=int, default=None, nargs="?", const=0, help="Known speaker count; omit = auto-detect")
+    mg.add_argument("--cluster-threshold", type=float, default=None, help="Clustering threshold when auto-detecting (larger = fewer speakers; default 0.9)")
+    mg.set_defaults(func=cmd_merge)
 
     # models
     mp = sub.add_parser("models", aliases=["m"], help="Manage whisper models")

@@ -194,12 +194,22 @@ def run_diarization(
         )
 
     print("Running speaker diarization ...", file=sys.stderr)
-    result = sd.process(samples).sort_by_start_time()
+    result = sd.process(samples, callback=_progress_callback).sort_by_start_time()
     segments = [
         DiarSegment(start=r.start, end=r.end, speaker=r.speaker) for r in result
     ]
     print(f"Diarization found {len(segments)} segments.", file=sys.stderr)
     return segments
+
+
+def _progress_callback(num_processed: int, num_total: int) -> int:
+    """sherpa-onnx diarization progress hook (prints % to stderr)."""
+    if num_total > 0:
+        pct = num_processed / num_total * 100.0
+        print(f"\rDiarization: {pct:5.1f}% ({num_processed}/{num_total})", end="", file=sys.stderr, flush=True)
+        if num_processed >= num_total:
+            print(file=sys.stderr)  # newline after completion
+    return 0
 
 
 def _read_wav_pcm(path: Path) -> tuple[list[float], int]:

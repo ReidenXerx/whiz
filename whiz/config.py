@@ -48,8 +48,8 @@ class Config:
     diarize: bool = False
     # Known number of speakers (0 => auto-detect via cluster_threshold).
     num_speakers: int = 0
-    # Clustering threshold when auto-detecting (smaller = more speakers).
-    cluster_threshold: float = 0.5
+    # Clustering threshold when auto-detecting (larger = fewer speakers; default 0.9 per sherpa-onnx guidance).
+    cluster_threshold: float = 0.9
     # Explicit paths to diarization models (empty => auto-discover).
     diarization_segmentation_model: str = ""
     diarization_embedding_model: str = ""
