@@ -181,6 +181,9 @@ whiz transcribe --speakers 2 meeting.mp4
 
 # Tune clustering threshold when auto-detecting (smaller = more speakers)
 whiz transcribe --speakers --cluster-threshold 0.8 call.m4a
+
+# Name the speakers interactively after transcription
+whiz transcribe --speakers 4 --name-speakers meeting.mov
 ```
 
 This produces the normal whisper-cli outputs (SRT, JSON) plus two labeled files alongside the input:
@@ -189,6 +192,28 @@ This produces the normal whisper-cli outputs (SRT, JSON) plus two labeled files 
 - `*.speakers.txt` — readable dialogue transcript (`Speaker A (00:01:23): text`), consecutive same-speaker lines merged
 
 When `--speakers` is set, whisper-cli VAD is disabled (sherpa-onnx handles speech segmentation).
+
+### Naming speakers
+
+Pass `--name-speakers` and, after transcription + diarization, whiz shows one
+representative quote per detected speaker and prompts for a real name. The
+quotes are the longest utterance per speaker (most identifying), and blank
+input keeps the default `Speaker A` label. Real names then replace the
+`Speaker A/B/C` labels in both `*.speakers.srt` and `*.speakers.txt`.
+
+### Re-tuning without re-transcribing: `whiz merge`
+
+`whiz merge` re-runs only diarization + the merge against an existing whisper
+JSON, so you can try different speaker counts / thresholds without redoing
+the expensive transcription:
+
+```bash
+# Re-diarize with a known count, reusing the prior whisper JSON
+whiz merge --speakers 4 recording.mov
+
+# Name speakers at merge time too
+whiz merge --speakers 4 --name-speakers recording.mov
+```
 
 ## License
 

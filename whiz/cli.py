@@ -202,6 +202,62 @@ def _find_whisper_json(of_base: Path, wav: Path, of_passed: bool) -> Path | None
     return candidates[0]
 
 
+def _prompt_speaker_names(merged: list[tuple[MR.WhisperSeg, str]]) -> dict[str, str]:
+    """Interactively ask the user to name each detected speaker.
+
+    Shows one representative quote per speaker (the longest utterance) and
+    prompts for a real name. Returns a {"Speaker A": "Enric", ...} map.
+    Blank input keeps the default label.
+    """
+    speakers = MR.speakers_in_order(merged)
+    quotes = MR.representative_quotes(merged)
+    name_map: dict[str, str] = {}
+    print("\n" + "=" * 60, file=sys.stderr)
+    print("Name the speakers", file=sys.stderr)
+    print("=" * 60, file=sys.stderr)
+    print("A representative quote is shown for each. Enter a real name", file=sys.stderr)
+    print("(or press Enter to keep the default label).", file=sys.stderr)
+    for label in speakers:
+        quote = quotes.get(label, "(no quote)")
+        print("\n" + "-" * 60, file=sys.stderr)
+        print(f"{label} said:", file=sys.stderr)
+        print(f'  "{quote}"', file=sys.stderr)
+        try:
+            name = input(f"Name for {label}: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print(file=sys.stderr)
+            break
+        if name:
+            name_map[label] = name
+    print("\n" + "-" * 60, file=sys.stderr)
+    return name_map
+
+
+def _write_labeled_outputs(
+    merged: list[tuple[MR.WhisperSeg, str]],
+    of_base: Path,
+    name_speakers: bool = False,
+) -> tuple[Path, Path, dict[str, str]]:
+    """Optionally relabel speakers, then write .speakers.srt and .speakers.txt.
+
+    Returns the (srt_path, txt_path, name_map) used.
+    """
+    name_map: dict[str, str] = {}
+    if name_speakers and merged:
+        name_map = _prompt_speaker_names(merged)
+        if name_map:
+            merged = MR.relabel(merged, name_map)
+    labeled_srt = MR.format_labeled_srt(merged)
+    dialogue = MR.format_dialogue_txt(merged)
+    # Append (not Path.with_suffix) so dots in the stem like "...16.03.40"
+    # aren't treated as a replaceable suffix.
+    srt_out = Path(str(of_base) + ".speakers.srt")
+    txt_out = Path(str(of_base) + ".speakers.txt")
+    srt_out.write_text(labeled_srt + "\n", encoding="utf-8")
+    txt_out.write_text(dialogue + "\n", encoding="utf-8")
+    return srt_out, txt_out, name_map
+
+
 def cmd_transcribe(args: argparse.Namespace) -> int:
     config = cfg.load()
     cmd, model_path, wav, in_path, keep_wav, of_base = _build_transcribe_args(args, config)
@@ -246,14 +302,9 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                 whisper_segs = []
             if whisper_segs and diar_segments:
                 merged = MR.assign_speakers(whisper_segs, diar_segments)
-                labeled_srt = MR.format_labeled_srt(merged)
-                dialogue = MR.format_dialogue_txt(merged)
-                # Append (not Path.with_suffix) so dots in the stem like
-                # "...16.03.40" aren't treated as a replaceable suffix.
-                srt_out = Path(str(of_base) + ".speakers.srt")
-                txt_out = Path(str(of_base) + ".speakers.txt")
-                srt_out.write_text(labeled_srt + "\n", encoding="utf-8")
-                txt_out.write_text(dialogue + "\n", encoding="utf-8")
+                srt_out, txt_out, name_map = _write_labeled_outputs(
+                    merged, of_base, name_speakers=args.name_speakers
+                )
                 print(f"Wrote labeled SRT:  {srt_out}", file=sys.stderr)
                 print(f"Wrote dialogue TXT: {txt_out}", file=sys.stderr)
 
@@ -384,24 +435,23 @@ def cmd_merge(args: argparse.Namespace) -> int:
         raise SystemExit("Diarization produced no segments; cannot merge.")
 
     merged = MR.assign_speakers(whisper_segs, diar_segments)
-    labeled_srt = MR.format_labeled_srt(merged)
-    dialogue = MR.format_dialogue_txt(merged)
 
     of_base = json_path.with_suffix("")  # e.g. ...16.03.40.wav -> ...16.03.40
     # For the wav.json case, of_base should be the input stem without .json.
     if json_path.name.endswith(".wav.json"):
         of_base = json_path.with_name(json_path.name[: -len(".json")])  # ...16.03.40.wav
         of_base = of_base.with_suffix("")  # ...16.03.40
-    srt_out = Path(str(of_base) + ".speakers.srt")
-    txt_out = Path(str(of_base) + ".speakers.txt")
-    srt_out.write_text(labeled_srt + "\n", encoding="utf-8")
-    txt_out.write_text(dialogue + "\n", encoding="utf-8")
-    # Speaker tally to stderr for quick tuning feedback.
+
+    # Speaker tally to stderr for quick tuning feedback (before relabeling).
     from collections import Counter
     tally = Counter(label for _, label in merged)
     print(f"Detected speakers: {len(tally)}", file=sys.stderr)
     for label, n in tally.most_common():
         print(f"  {label}: {n} segments", file=sys.stderr)
+
+    srt_out, txt_out, name_map = _write_labeled_outputs(
+        merged, of_base, name_speakers=args.name_speakers
+    )
     print(f"Wrote labeled SRT:  {srt_out}", file=sys.stderr)
     print(f"Wrote dialogue TXT: {txt_out}", file=sys.stderr)
     return 0
@@ -495,6 +545,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--no-auto-vad-download", action="store_true", help="Don't auto-download the Silero VAD model when VAD is enabled and missing")
     t.add_argument("--speakers", type=int, default=None, nargs="?", const=0, help="Enable speaker diarization via sherpa-onnx. Optional integer = known speaker count; omit = auto-detect")
     t.add_argument("--cluster-threshold", type=float, default=None, help="Diarization clustering threshold when auto-detecting (larger = fewer speakers; default 0.9)")
+    t.add_argument("--name-speakers", action="store_true", help="After transcription, prompt to name each detected speaker (replaces Speaker A/B/C with real names)")
     t.add_argument("--verbose", action="store_true", help="Verbose whisper-cli output")
     t.add_argument("--extra", nargs=argparse.REMAINDER, default=[], help="Extra flags passed verbatim to whisper-cli")
     t.add_argument("--dry-run", action="store_true", help="Print the command without running it")
@@ -506,6 +557,7 @@ def build_parser() -> argparse.ArgumentParser:
     mg.add_argument("--json", default="", help="Explicit path to the whisper JSON (default: auto-find next to input)")
     mg.add_argument("--speakers", type=int, default=None, nargs="?", const=0, help="Known speaker count; omit = auto-detect")
     mg.add_argument("--cluster-threshold", type=float, default=None, help="Clustering threshold when auto-detecting (larger = fewer speakers; default 0.9)")
+    mg.add_argument("--name-speakers", action="store_true", help="Prompt to name each detected speaker (replaces Speaker A/B/C with real names)")
     mg.set_defaults(func=cmd_merge)
 
     # models

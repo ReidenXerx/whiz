@@ -25,6 +25,51 @@ def speaker_label(speaker_id: int) -> str:
     return f"Speaker {speaker_id}"
 
 
+def speakers_in_order(merged: list[tuple[WhisperSeg, str]]) -> list[str]:
+    """Unique speaker labels in order of first appearance."""
+    seen: list[str] = []
+    for _, label in merged:
+        if label not in seen:
+            seen.append(label)
+    return seen
+
+
+def representative_quotes(
+    merged: list[tuple[WhisperSeg, str]],
+    max_chars: int = 140,
+) -> dict[str, str]:
+    """Pick the longest (most identifying) utterance per speaker.
+
+    Longer utterances with more words are more recognizable than one-word
+    replies like "Yeah", so we maximize word count (ties broken by char length).
+    """
+    best: dict[str, str] = {}
+    best_words: dict[str, int] = {}
+    for seg, label in merged:
+        text = " ".join(seg.text.split())  # collapse whitespace
+        if not text:
+            continue
+        n_words = len(text.split())
+        if label not in best or n_words > best_words[label] or (
+            n_words == best_words[label] and len(text) > len(best[label])
+        ):
+            best[label] = text
+            best_words[label] = n_words
+    # Truncate for display.
+    return {k: (v if len(v) <= max_chars else v[: max_chars - 3] + "...") for k, v in best.items()}
+
+
+def relabel(
+    merged: list[tuple[WhisperSeg, str]],
+    name_map: dict[str, str],
+) -> list[tuple[WhisperSeg, str]]:
+    """Return a new merged list with speaker labels replaced by names.
+
+    Labels absent from name_map are left unchanged.
+    """
+    return [(seg, name_map.get(label, label)) for seg, label in merged]
+
+
 @dataclass
 class WhisperSeg:
     start: float
