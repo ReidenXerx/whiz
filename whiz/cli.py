@@ -203,13 +203,14 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
     # Threads.
     threads = args.threads if args.threads and args.threads > 0 else (config.threads or _auto_threads())
 
-    # Outputs.
-    outputs = args.outputs if args.outputs else config.outputs
+    # Outputs. Normalize to a list (the flag/config may be a comma string).
+    raw_outputs = args.outputs if args.outputs else ",".join(config.outputs)
+    outputs = [o.strip() for o in raw_outputs.split(",") if o.strip()]
     # We need a parseable whisper JSON to merge diarization against AND to
     # drive the per-segment screenshots path (even without diarization). Force
     # JSON (in addition to any user-requested formats) so we can parse segments.
     if (diarize_enabled or screenshots) and "json" not in outputs and "json-full" not in outputs:
-        outputs = list(outputs) + ["json"]
+        outputs = outputs + ["json"]
     out_flags = []
     for o in outputs:
         flag = OUTPUT_FLAGS.get(o)
