@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "whiz"
-version = "0.8.0"
+version = "0.8.1"
 description = "A handy CLI wrapper around whisper-cli (whisper.cpp) — auto-finds models, extracts audio from video, sensible defaults."
 readme = "README.md"
 license = { text = "MIT" }
@@ -25,6 +25,9 @@ classifiers = [
     "Topic :: Multimedia :: Sound/Audio :: Speech",
 ]
 dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
 
 [project.urls]
 Homepage = "https://github.com/ReidenXerx/whiz"

@@ -81,6 +81,7 @@ Transcribe an audio or video file.
 | `--screenshots` | off | For video inputs, extract one on-screen frame per segment into `<stem>.frames/` + write `<stem>.frames.json` (for AI analysis / HTML output) |
 | `--screenshot-width` | `1280` | Frame width in pixels (0 = native resolution) |
 | `--no-voice-profiles` | off | Don't compute voice-profile embeddings or auto-match/save speaker profiles this run |
+| `--resume` | off | Skip whisper-cli transcription if its JSON output already exists and go straight to diarization + merge |
 | `--extra ...` | — | Extra flags passed verbatim to whisper-cli |
 | `--dry-run` | off | Print the command without executing |
 
@@ -400,6 +401,17 @@ Run diarization on the given file and print, for each detected cluster, the cosi
 ```bash
 whiz speakers match recording.mov --speakers 4
 ```
+
+## Testing
+
+whiz ships a pytest suite covering the pure-Python modules (merge, models, screenshots, ai, diarize cache, profiles) — no sherpa-onnx, ffmpeg, or network required. Install the test extras and run:
+
+```bash
+pipx install --force --editable '.[test]'
+pytest tests/
+```
+
+Tests isolate the filesystem (via `monkeypatch` and `tmp_path`) so host-installed models don't leak into model-discovery assertions. The suite runs in under a second.
 
 ## License
 

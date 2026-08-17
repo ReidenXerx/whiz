@@ -481,16 +481,34 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
         print("\nDRY-RUN: not executing whisper-cli.", file=sys.stderr)
         return 0
 
-    # --- Diarization path ---
-    if diarize_enabled:
-        num_sp = args.speakers if args.speakers else 0
-        thr = args.cluster_threshold if args.cluster_threshold is not None else config.cluster_threshold
-        diar_segments = D.run_diarization(wav, config, num_speakers=num_sp, threshold=thr)
-        if not diar_segments:
-            print("Warning: diarization produced no segments; falling back to unlabeled output.", file=sys.stderr)
+    # --- Resumability: skip transcription if a whisper JSON already exists ---
+    # --resume lets you re-run `whiz transcribe` to redo diarization + merge
+    # (e.g. with a different --speakers count) without re-running whisper-cli.
+    # It's an ergonomic alias for `whiz merge` triggered from transcribe.
+    json_path = _find_whisper_json(of_base, wav, of_passed=bool(args.output))
+    resuming = bool(getattr(args, "resume", False) and json_path.exists())
+    if resuming:
+        print(f"--resume: found existing whisper JSON {json_path}; skipping transcription.", file=sys.stderr)
+        rc = 0
+        # Diarization still runs so a new --speakers count / threshold takes
+        # effect against the existing transcription.
+        if diarize_enabled:
+            num_sp = args.speakers if args.speakers else 0
+            thr = args.cluster_threshold if args.cluster_threshold is not None else config.cluster_threshold
+            diar_segments = D.run_diarization(wav, config, num_speakers=num_sp, threshold=thr)
+            if not diar_segments:
+                print("Warning: diarization produced no segments; falling back to unlabeled output.", file=sys.stderr)
+    else:
+        # --- Diarization path ---
+        if diarize_enabled:
+            num_sp = args.speakers if args.speakers else 0
+            thr = args.cluster_threshold if args.cluster_threshold is not None else config.cluster_threshold
+            diar_segments = D.run_diarization(wav, config, num_speakers=num_sp, threshold=thr)
+            if not diar_segments:
+                print("Warning: diarization produced no segments; falling back to unlabeled output.", file=sys.stderr)
 
-    proc = _run_whisper_streaming(cmd)
-    rc = proc.returncode
+        proc = _run_whisper_streaming(cmd)
+        rc = proc.returncode
 
     # --- Merge diarization with whisper output ---
     if diarize_enabled and rc == 0:
@@ -1040,6 +1058,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--screenshots", action="store_true", help="For video inputs, extract one on-screen frame per transcribed segment into <stem>.frames/ and write <stem>.frames.json (for AI analysis / HTML output)")
     t.add_argument("--screenshot-width", type=int, default=None, help="Frame width in pixels (default 1280; 0 = native resolution)")
     t.add_argument("--no-voice-profiles", dest="no_voice_profiles", action="store_true", help="Don't compute voice-profile embeddings or auto-match/save speaker profiles this run")
+    t.add_argument("--resume", action="store_true", help="Skip whisper-cli transcription if its JSON output already exists and go straight to diarization + merge (ergonomic alias for `whiz merge`)"),
     t.add_argument("--verbose", action="store_true", help="Verbose whisper-cli output")
     t.add_argument("--extra", nargs=argparse.REMAINDER, default=[], help="Extra flags passed verbatim to whisper-cli")
     t.add_argument("--dry-run", action="store_true", help="Print the command without running it")
