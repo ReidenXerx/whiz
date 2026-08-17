@@ -106,10 +106,86 @@ CLASSIFY_PROMPT = (
     "- PLAN — people discussing building, implementing, fixing, or changing a "
     "specific feature, bug, product, or technical task, where the output should "
     "be an actionable implementation plan rather than meeting notes.\n\n"
-    "Reply with EXACTLY ONE token: MEETING or PLAN. No other text, no "
+"Reply with EXACTLY ONE token: MEETING or PLAN. No other text, no "
     "punctuation.\n\n"
     "Transcript:\n{transcript}\n\nClassification:"
 )
+
+
+# Chunked map-reduce prompts. For long transcripts (or many frames) the input is
+# split into contiguous chunks; each chunk is analyzed independently (map) and
+# the partial results are merged into one final answer (reduce). Chunking keeps
+# each model call focused on a small, coherent window so the model isn't
+# overwhelmed by one giant blob — this measurably improves analysis quality.
+MAP_PROMPT = (
+    "You are analyzing one contiguous chunk (part {k} of {n}) of a longer recorded "
+    "transcript. Your job: {task}\n\n"
+    "Analyze ONLY the transcript chunk below. Be specific to this chunk — keep "
+    "speaker labels and timestamps. Do not invent anything that isn't in this "
+    "chunk, and do not try to summarize the whole recording. Produce a partial "
+    "result for THIS chunk only; later parts will be combined separately.\n\n"
+    "Transcript chunk ({k}/{n}):\n{transcript}"
+)
+
+SYNTH_PROMPT = (
+    "You are combining {n} partial analyses of a long recorded transcript into "
+    "one final answer. Your job: {task}\n\n"
+    "Below are the {n} partial analyses, one per contiguous chunk, in time order. "
+    "Merge them into a single coherent answer: remove duplicates, reconcile "
+    "conflicts, keep the chronological order, and preserve specific speaker/time "
+    "references. Produce the final answer in the exact format the task expects.\n\n"
+    "Partial analyses:\n{partials}"
+)
+
+# Used only for custom --prompt: the user's prompt is applied per chunk (map),
+# then the per-chunk answers are merged with this generic reduce prompt.
+_CUSTOM_REDUCE_PROMPT = (
+    "Below are {n} partial answers, one per contiguous chunk of a long "
+    "transcript, in time order. Merge them into one final answer: remove "
+    "duplicates, reconcile conflicts, and preserve specific speaker/time "
+    "references. Do not add anything not supported by the partials.\n\n"
+    "Partial answers:\n{partials}"
+)
+
+# Human-readable task description per built-in prompt, used to fill {task} in
+# MAP_PROMPT / SYNTH_PROMPT. Looked up by identity (the constants are module
+# globals, so `is` is safe and avoids matching user prompts by accident).
+_BUILT_IN_TASKS: list[tuple[str, str]] = [
+    (SUMMARY_PROMPT,
+     "produce a concise meeting summary — a 2-3 sentence overview, key topics as "
+     "bullet points, and any decisions made"),
+    (ACTIONS_PROMPT,
+     "extract action items — one bullet per item as '- [owner] action "
+     "(by deadline if mentioned)'; owner = the speaker who committed to it, '?' "
+     "if unclear; only concrete tasks"),
+    (SUMMARY_AND_ACTIONS_PROMPT,
+     "produce a meeting summary (overview + key topics + decisions) followed by "
+     "action items (one bullet per item as '- [owner] action (by deadline)')"),
+    (PLAN_PROMPT,
+     "produce a structured implementation plan with sections: Overview, Goal, "
+     "Proposed approach, Steps (each with Owner + Effort S/M/L), Risks, Open "
+     "questions, Acceptance criteria"),
+]
+
+
+def _task_label(prompt_template: str) -> str:
+    """Human-readable description of what ``prompt_template`` asks for.
+
+    Built-in prompts get a tailored label (so MAP_PROMPT/SYNTH_PROMPT reproduce
+    the same output structure the non-chunked path would). Custom ``--prompt``
+    text falls back to a generic description; the user's prompt is applied per
+    chunk verbatim in that case (see ``analyze``).
+    """
+    for prompt, label in _BUILT_IN_TASKS:
+        if prompt_template is prompt:
+            return label
+    return ("answer the user's question about the transcript (the user's prompt "
+            "is applied to each chunk verbatim)")
+
+
+def _is_built_in_prompt(prompt_template: str) -> bool:
+    """True when ``prompt_template`` is one of the module-level presets."""
+    return any(prompt_template is prompt for prompt, _ in _BUILT_IN_TASKS)
 
 
 def resolve_prompt(args) -> str:
@@ -304,6 +380,190 @@ def chat_vision(
             })
     messages = [{"role": "user", "content": content}]
     return _post_chat(base_url, model, messages, api_key)
+
+
+def chunk_entries(entries: list, chunk_size: int = 8) -> list[list]:
+    """Split a list into contiguous sublists of at most ``chunk_size`` items."""
+    if chunk_size <= 1:
+        chunk_size = 1
+    if not entries:
+        return []
+    return [entries[i:i + chunk_size] for i in range(0, len(entries), chunk_size)]
+
+
+def _chunk_text(text: str, target_chars: int = 6000) -> list[str]:
+    """Split ``text`` into contiguous chunks near ``target_chars`` on line breaks.
+
+    The transcript text uses ``\n`` line breaks (one per segment), so we split
+    on line boundaries to keep each chunk coherent (a whole set of segments).
+    """
+    if target_chars <= 0 or len(text) <= target_chars:
+        return [text] if text.strip() else []
+    lines = text.splitlines()
+    chunks: list[str] = []
+    buf: list[str] = []
+    size = 0
+    for line in lines:
+        line_len = len(line) + 1  # +1 for the '\n' we re-add on join
+        if buf and size + line_len > target_chars:
+            chunks.append("\n".join(buf))
+            buf = []
+            size = 0
+        buf.append(line)
+        size += line_len
+    if buf:
+        chunks.append("\n".join(buf))
+    return [c for c in chunks if c.strip()]
+
+
+def analyze(
+    prompt_template: str,
+    transcript: str,
+    *,
+    base_url: str,
+    model: str,
+    api_key: str = "",
+    entries: list | None = None,
+    frames_dir=None,
+    use_vision: bool = False,
+    max_frames: int = 50,
+    chunk_size: int = 8,
+    chunk_chars: int = 6000,
+    on_progress=None,
+) -> str:
+    """Run an analysis, chunking long inputs with map-reduce for quality.
+
+    Short inputs (one chunk) use a single ``chat_text`` / ``chat_vision`` call —
+    identical to the old behavior, so existing single-call tests keep passing.
+
+    Long inputs are split into contiguous chunks; each chunk is analyzed
+    independently (the *map* step) and the partial results are merged into one
+    final answer (the *reduce* step). With frames, each chunk carries only the
+    frames for its own segments, so the vision model sees a small, coherent
+    window of "these frames + this text" instead of one giant blob.
+
+    Built-in prompts (summary / actions / summary+actions / plan) route through
+    ``MAP_PROMPT`` + ``SYNTH_PROMPT`` so the final answer has the same structure
+    the non-chunked path would produce. Custom ``--prompt`` text is applied per
+    chunk verbatim and the per-chunk answers are merged with a generic reduce.
+
+    ``on_progress(msg)``, if given, is called with a short status string before
+    each map call and the reduce call so callers can surface progress.
+    """
+    built_in = _is_built_in_prompt(prompt_template)
+    task = _task_label(prompt_template)
+
+    # --- Vision path: chunk by entries so each chunk's frames stay local ---
+    if use_vision and entries:
+        chunks = chunk_entries(entries, chunk_size)
+        # One chunk (or none): single call, preserves prior behavior.
+        if len(chunks) <= 1:
+            frame_paths = _frames_for_entries(entries, frames_dir)
+            return chat_vision(
+                prompt_template, transcript, frame_paths,
+                base_url=base_url, model=model, api_key=api_key, max_frames=max_frames,
+            )
+        return _map_reduce_vision(
+            chunks, task, built_in, prompt_template, max_frames,
+            base_url=base_url, model=model, api_key=api_key,
+            frames_dir=frames_dir, on_progress=on_progress,
+        )
+
+    # --- Text path: chunk the transcript string ---
+    chunks = _chunk_text(transcript, target_chars=chunk_chars)
+    if len(chunks) <= 1:
+        return chat_text(
+            prompt_template, transcript,
+            base_url=base_url, model=model, api_key=api_key,
+        )
+    return _map_reduce_text(
+        chunks, task, built_in, prompt_template,
+        base_url=base_url, model=model, api_key=api_key, on_progress=on_progress,
+    )
+
+
+def _frames_for_entries(entries, frames_dir) -> list[Path]:
+    """Resolve the frame image paths for a chunk of manifest entries."""
+    if frames_dir is None:
+        return []
+    out: list[Path] = []
+    for e in entries:
+        frame = getattr(e, "frame", "")
+        if frame:
+            out.append(Path(frames_dir) / frame)
+    return out
+
+
+def _map_reduce_vision(
+    chunks, task, built_in, prompt_template, max_frames, *,
+    base_url, model, api_key, frames_dir, on_progress=None,
+) -> str:
+    n = len(chunks)
+    partials: list[str] = []
+    for k, chunk in enumerate(chunks, start=1):
+        chunk_transcript = transcript_text(chunk)
+        frames = _frames_for_entries(chunk, frames_dir)
+        if on_progress:
+            on_progress(f"analyzing chunk {k}/{n} ({len(chunk)} segments, {len(frames)} frames)")
+        if built_in:
+            mp = (MAP_PROMPT
+                  .replace("{task}", task)
+                  .replace("{k}", str(k))
+                  .replace("{n}", str(n))
+                  .replace("{transcript}", chunk_transcript))
+        else:
+            mp = prompt_template.replace("{transcript}", chunk_transcript)
+        partial = chat_vision(
+            mp, chunk_transcript, frames,
+            base_url=base_url, model=model, api_key=api_key, max_frames=max_frames,
+        )
+        partials.append(f"### Part {k} of {n}\n{partial}")
+    if on_progress:
+        on_progress(f"synthesizing {n} partial analyses")
+    reduce_prompt = (SYNTH_PROMPT if built_in else _CUSTOM_REDUCE_PROMPT)
+    synth_prompt = (reduce_prompt
+                    .replace("{task}", task)
+                    .replace("{n}", str(n))
+                    .replace("{partials}", "\n\n".join(partials)))
+    return chat_text(
+        synth_prompt, "",  # transcript placeholder not used by SYNTH_PROMPT
+        base_url=base_url, model=model, api_key=api_key,
+    )
+
+
+def _map_reduce_text(
+    chunks, task, built_in, prompt_template, *,
+    base_url, model, api_key, on_progress=None,
+) -> str:
+    n = len(chunks)
+    partials: list[str] = []
+    for k, chunk in enumerate(chunks, start=1):
+        if on_progress:
+            on_progress(f"analyzing chunk {k}/{n}")
+        if built_in:
+            mp = (MAP_PROMPT
+                  .replace("{task}", task)
+                  .replace("{k}", str(k))
+                  .replace("{n}", str(n))
+                  .replace("{transcript}", chunk))
+        else:
+            mp = prompt_template.replace("{transcript}", chunk)
+        partial = chat_text(
+            mp, chunk,
+            base_url=base_url, model=model, api_key=api_key,
+        )
+        partials.append(f"### Part {k} of {n}\n{partial}")
+    if on_progress:
+        on_progress(f"synthesizing {n} partial analyses")
+    reduce_prompt = (SYNTH_PROMPT if built_in else _CUSTOM_REDUCE_PROMPT)
+    synth_prompt = (reduce_prompt
+                    .replace("{task}", task)
+                    .replace("{n}", str(n))
+                    .replace("{partials}", "\n\n".join(partials)))
+    return chat_text(
+        synth_prompt, "",
+        base_url=base_url, model=model, api_key=api_key,
+    )
 
 
 def list_ollama_models(base_url: str, *, timeout: int = 10) -> list[str]:

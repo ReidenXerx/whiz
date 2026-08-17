@@ -420,3 +420,254 @@ def test_probe_model_server_down_returns_failure(monkeypatch):
     ok, err = AI.probe_model("http://x/v1", "m", api_key="")
     assert ok is False
     assert "Could not reach AI server" in err
+
+
+# ---------- chunking: chunk_entries / _chunk_text ----------
+
+def test_chunk_entries_splits_to_size():
+    items = list(range(20))
+    chunks = AI.chunk_entries(items, chunk_size=8)
+    assert [len(c) for c in chunks] == [8, 8, 4]
+    # Order preserved.
+    flat = [x for c in chunks for x in c]
+    assert flat == items
+
+
+def test_chunk_entries_under_size_is_single_chunk():
+    items = [1, 2, 3]
+    assert AI.chunk_entries(items, chunk_size=8) == [[1, 2, 3]]
+
+
+def test_chunk_entries_empty_returns_empty():
+    assert AI.chunk_entries([], chunk_size=8) == []
+
+
+def test_chunk_entries_size_floor_is_one():
+    items = [1, 2, 3]
+    # chunk_size <= 1 is coerced to 1 so we get single-item chunks.
+    assert AI.chunk_entries(items, chunk_size=0) == [[1], [2], [3]]
+
+
+def test_chunk_text_short_returns_single_chunk():
+    text = "line one\nline two\nline three"
+    chunks = AI._chunk_text(text, target_chars=10_000)
+    assert chunks == [text]
+
+
+def test_chunk_text_long_splits_on_line_boundaries():
+    # 6 lines of ~10 chars each = 60 chars. target 25 => roughly 2-3 chunks.
+    lines = [f"line number {i:02d} here" for i in range(6)]
+    text = "\n".join(lines)
+    chunks = AI._chunk_text(text, target_chars=25)
+    assert len(chunks) >= 2
+    # Reassembling preserves all the lines.
+    rejoined = "\n".join(chunks)
+    for ln in lines:
+        assert ln in rejoined
+
+
+def test_chunk_text_empty_returns_empty():
+    assert AI._chunk_text("   \n  \n  ", target_chars=10) == []
+
+
+def test_chunk_text_zero_target_returns_single_chunk():
+    text = "hello world"
+    assert AI._chunk_text(text, target_chars=0) == [text]
+
+
+# ---------- chunking: _task_label / _is_built_in_prompt ----------
+
+def test_task_label_built_in_prompts():
+    assert "summary" in AI._task_label(AI.SUMMARY_PROMPT)
+    assert "action" in AI._task_label(AI.ACTIONS_PROMPT)
+    assert "summary" in AI._task_label(AI.SUMMARY_AND_ACTIONS_PROMPT)
+    assert "implementation plan" in AI._task_label(AI.PLAN_PROMPT)
+
+
+def test_task_label_custom_prompt_fallback():
+    label = AI._task_label("What risks? {transcript}")
+    assert "user's question" in label
+
+
+def test_is_built_in_prompt_recognizes_presets():
+    assert AI._is_built_in_prompt(AI.SUMMARY_PROMPT) is True
+    assert AI._is_built_in_prompt(AI.PLAN_PROMPT) is True
+    assert AI._is_built_in_prompt("custom {transcript}") is False
+
+
+# ---------- analyze: short input single call (no chunking) ----------
+
+def test_analyze_short_text_single_call(monkeypatch):
+    """A short transcript uses one chat_text call (no map-reduce)."""
+    calls = []
+
+    def fake_chat_text(prompt_template, transcript, *, base_url, model, api_key):
+        calls.append((prompt_template, transcript))
+        return "final answer"
+
+    monkeypatch.setattr(AI, "chat_text", fake_chat_text)
+    out = AI.analyze(
+        AI.SUMMARY_PROMPT, "a short transcript",
+        base_url="http://x/v1", model="m", api_key="",
+    )
+    assert out == "final answer"
+    assert len(calls) == 1
+    # The single-call path passes the user's prompt template and transcript.
+    assert calls[0][0] is AI.SUMMARY_PROMPT
+    assert calls[0][1] == "a short transcript"
+
+
+def test_analyze_short_vision_single_call(monkeypatch, tmp_path):
+    """With one chunk of entries, vision analyze uses one chat_vision call."""
+    from whiz.screenshots import FrameEntry
+    entries = [
+        FrameEntry(index=1, start=0.0, end=1.0, speaker="A", text="hi", frame="seg0001.jpg"),
+        FrameEntry(index=2, start=1.0, end=2.0, speaker="B", text="yo", frame="seg0002.jpg"),
+    ]
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    for e in entries:
+        (frames_dir / e.frame).write_bytes(b"\xff\xd8img\xff\xd9")
+
+    calls = []
+    def fake_chat_vision(prompt, transcript, frames, *, base_url, model, api_key, max_frames):
+        calls.append((prompt, transcript, len(frames)))
+        return "vision answer"
+    monkeypatch.setattr(AI, "chat_vision", fake_chat_vision)
+    monkeypatch.setattr(AI, "chat_text", lambda *a, **k: "SHOULD NOT BE CALLED")
+
+    out = AI.analyze(
+        AI.SUMMARY_PROMPT, AI.transcript_text(entries),
+        base_url="http://x/v1", model="m", api_key="",
+        entries=entries, frames_dir=frames_dir, use_vision=True, max_frames=50,
+    )
+    assert out == "vision answer"
+    assert len(calls) == 1
+    # Single-call path uses the user's prompt verbatim and all frames.
+    assert calls[0][0] is AI.SUMMARY_PROMPT
+    assert calls[0][2] == 2
+
+
+# ---------- analyze: long input map-reduce ----------
+
+def test_analyze_long_text_map_reduce(monkeypatch):
+    """A long transcript is chunked: map per chunk, then synth reduce."""
+    long_text = "\n".join(f"line {i} some words here" for i in range(50))
+    assert len(AI._chunk_text(long_text, target_chars=120)) >= 2
+
+    chat_calls = []
+
+    def fake_chat_text(prompt_template, transcript, *, base_url, model, api_key):
+        chat_calls.append((prompt_template, transcript))
+        # Map calls use MAP_PROMPT (contains "chunk"); synth uses SYNTH_PROMPT.
+        if "combining" in prompt_template:
+            return "SYNTH FINAL"
+        return f"partial({transcript[:8]})"
+
+    monkeypatch.setattr(AI, "chat_text", fake_chat_text)
+    out = AI.analyze(
+        AI.SUMMARY_AND_ACTIONS_PROMPT, long_text,
+        base_url="http://x/v1", model="m", api_key="",
+        chunk_chars=120,
+    )
+    assert out == "SYNTH FINAL"
+    # Expect N map calls + 1 synth call.
+    map_calls = [c for c in chat_calls if "chunk" in c[0]]
+    synth_calls = [c for c in chat_calls if "combining" in c[0]]
+    assert len(map_calls) >= 2
+    assert len(synth_calls) == 1
+    # Map prompts carry the task label for built-in prompts.
+    assert "summary" in map_calls[0][0]
+    # Synth prompt receives the concatenated partials.
+    assert "partial(" in synth_calls[0][0]
+
+
+def test_analyze_long_vision_map_reduce(monkeypatch, tmp_path):
+    """Many entries with frames chunk by entries; each chunk's frames stay local."""
+    from whiz.screenshots import FrameEntry
+    entries = [
+        FrameEntry(index=i, start=float(i), end=float(i + 1),
+                   speaker="A", text=f"seg {i}", frame=f"seg{i:04d}.jpg")
+        for i in range(1, 21)  # 20 entries -> 3 chunks of 8
+    ]
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    for e in entries:
+        (frames_dir / e.frame).write_bytes(b"\xff\xd8img\xff\xd9")
+
+    vision_calls = []
+    text_calls = []
+
+    def fake_chat_vision(prompt, transcript, frames, *, base_url, model, api_key, max_frames):
+        vision_calls.append((prompt, len(frames)))
+        return f"p{len(vision_calls)}"
+    def fake_chat_text(prompt, transcript, *, base_url, model, api_key):
+        text_calls.append(prompt)
+        return "SYNTH"
+
+    monkeypatch.setattr(AI, "chat_vision", fake_chat_vision)
+    monkeypatch.setattr(AI, "chat_text", fake_chat_text)
+
+    out = AI.analyze(
+        AI.PLAN_PROMPT, AI.transcript_text(entries),
+        base_url="http://x/v1", model="m", api_key="",
+        entries=entries, frames_dir=frames_dir, use_vision=True,
+        max_frames=50, chunk_size=8,
+    )
+    assert out == "SYNTH"
+    # 3 map vision calls (8 + 8 + 4), each carrying only its chunk's frames.
+    assert len(vision_calls) == 3
+    assert vision_calls[0][1] == 8
+    assert vision_calls[1][1] == 8
+    assert vision_calls[2][1] == 4
+    # 1 synth text call.
+    assert len(text_calls) == 1
+    assert "combining" in text_calls[0]
+
+
+def test_analyze_custom_prompt_long_uses_custom_reduce(monkeypatch):
+    """Custom --prompt: applied per chunk verbatim, merged via generic reduce."""
+    long_text = "\n".join(f"line {i} content here" for i in range(40))
+    assert len(AI._chunk_text(long_text, target_chars=120)) >= 2
+
+    calls = []
+    def fake_chat_text(prompt, transcript, *, base_url, model, api_key):
+        calls.append(prompt)
+        if "Partial answers" in prompt:
+            return "MERGED"
+        return "chunk-answer"
+    monkeypatch.setattr(AI, "chat_text", fake_chat_text)
+
+    out = AI.analyze(
+        "What risks? {transcript}", long_text,
+        base_url="http://x/v1", model="m", api_key="",
+        chunk_chars=120,
+    )
+    assert out == "MERGED"
+    map_prompts = [p for p in calls if "What risks?" in p]
+    synth_prompts = [p for p in calls if "Partial answers" in p]
+    assert len(map_prompts) >= 2
+    # Map calls use the user's prompt verbatim (no MAP_PROMPT wrapper).
+    for p in map_prompts:
+        assert p.startswith("What risks?")
+    assert len(synth_prompts) == 1
+
+
+def test_analyze_progress_callback_invoked(monkeypatch):
+    """on_progress is called before each map call and the synth call."""
+    long_text = "\n".join(f"line {i} content" for i in range(30))
+    msgs = []
+
+    def fake_chat_text(prompt, transcript, *, base_url, model, api_key):
+        return "x"
+    monkeypatch.setattr(AI, "chat_text", fake_chat_text)
+
+    AI.analyze(
+        AI.SUMMARY_PROMPT, long_text,
+        base_url="http://x/v1", model="m", api_key="",
+        chunk_chars=120,
+        on_progress=lambda m: msgs.append(m),
+    )
+    # At least one 'analyzing chunk' + one 'synthesizing'.
+    assert any("analyzing chunk" in m for m in msgs)
+    assert any("synthesizing" in m for m in msgs)

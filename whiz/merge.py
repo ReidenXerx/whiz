@@ -230,47 +230,193 @@ def format_speakers_html(
     given and contains ``segNNNN.jpg`` files (from a prior --screenshots run),
     frames are inlined as ``data:image/jpeg;base64`` URIs so the single HTML
     file is portable with every screenshot embedded — no external files needed.
+
+    The page has a sticky header with the title, a speaker legend, and a
+    live search box that filters cues by text or speaker. Clicking any frame
+    thumbnail opens a fullscreen lightbox overlay (close with the button, the
+    backdrop, or the Escape key).
     """
     import base64
 
-    parts: list[str] = []
-    parts.append(f"<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">")
-    parts.append(f"<title>{_html_escape(title)}</title>")
-    parts.append("<style>")
-    parts.append(
-        "body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; "
-        "max-width: 900px; margin: 0 auto; padding: 1em; color: #222; line-height: 1.5; }\n"
-        ".cue { display: flex; gap: 1em; margin: 0.5em 0; padding: 0.5em 0; border-bottom: 1px solid #eee; }\n"
-        ".cue img { max-width: 200px; max-height: 130px; border-radius: 4px; object-fit: cover; flex-shrink: 0; }\n"
-        ".cue .body { flex: 1; }\n"
-        ".ts { color: #888; font-size: 0.85em; font-variant-numeric: tabular-nums; text-decoration: none; }\n"
-        ".speaker { font-weight: 600; }\n"
-        ".text { margin-top: 0.15em; }\n"
-        "</style>"
-    )
-    parts.append("</head>\n<body>")
-    parts.append(f"<h1>{_html_escape(title)}</h1>")
+    # Gather speakers in order of appearance for the legend.
+    speakers_in_order: list[str] = []
+    for _seg, label in merged:
+        if label not in speakers_in_order:
+            speakers_in_order.append(label)
+    legend = [
+        (label, _speaker_color(label)) for label in speakers_in_order
+    ]
 
+    css = """
+:root {
+  --bg: #fafafa;
+  --card: #ffffff;
+  --text: #1f2328;
+  --muted: #6e7781;
+  --border: #e4e7eb;
+  --accent: #2f81f7;
+  --shadow: 0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.04);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+header.bar {
+  position: sticky; top: 0; z-index: 20;
+  background: rgba(255,255,255,.92);
+  backdrop-filter: saturate(180%) blur(12px);
+  -webkit-backdrop-filter: saturate(180%) blur(12px);
+  border-bottom: 1px solid var(--border);
+  padding: .65em 1em;
+  display: flex; align-items: center; gap: 1em; flex-wrap: wrap;
+}
+header.bar h1 { font-size: 1.05em; margin: 0; font-weight: 650; letter-spacing: -.01em; }
+header.bar .spacer { flex: 1; }
+header.bar input.search {
+  font: inherit; font-size: .9em; padding: .35em .6em .35em 1.8em;
+  border: 1px solid var(--border); border-radius: 8px;
+  width: 16em; max-width: 40vw; background: var(--card) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%236e7781' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><circle cx='11' cy='11' r='7'/><line x1='21' y1='21' x2='16.65' y2='16.65'/></svg>") .55em .5em no-repeat; outline: none;
+}
+header.bar input.search:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(47,129,247,.18); }
+.legend { display: flex; gap: .4em; flex-wrap: wrap; align-items: center; }
+.legend .chip { font-size: .72em; padding: .15em .55em; border-radius: 999px; color: #fff; font-weight: 600; white-space: nowrap; }
+main { max-width: 920px; margin: 0 auto; padding: 1em; }
+.cue {
+  display: flex; gap: .9em; align-items: flex-start;
+  margin: .35em 0; padding: .7em .8em;
+  background: var(--card);
+  border: 1px solid var(--border); border-left: 3px solid var(--c, var(--border));
+  border-radius: 10px; box-shadow: var(--shadow);
+  transition: transform .06s ease, box-shadow .12s ease;
+}
+.cue:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,.08); }
+.cue .frame {
+  flex-shrink: 0; cursor: zoom-in; position: relative;
+  border-radius: 8px; overflow: hidden; line-height: 0;
+  border: 1px solid var(--border);
+}
+.cue .frame img { width: 180px; height: 116px; object-fit: cover; display: block; }
+.cue .frame::after {
+  content: ""; position: absolute; inset: 0; background: rgba(0,0,0,0); transition: background .12s;
+}
+.cue .frame:hover::after { background: rgba(0,0,0,.12); }
+.cue .body { flex: 1; min-width: 0; }
+.cue .meta { display: flex; align-items: baseline; gap: .55em; margin-bottom: .15em; }
+.cue .ts { color: var(--muted); font-size: .8em; font-variant-numeric: tabular-nums; text-decoration: none; border-radius: 4px; padding: 0 .2em; }
+.cue .ts:hover { background: var(--border); color: var(--text); }
+.cue .speaker { font-weight: 650; font-size: .92em; }
+.cue .text { font-size: .95em; white-space: pre-wrap; word-wrap: break-word; }
+.cue.hidden { display: none; }
+footer.foot { text-align: center; color: var(--muted); font-size: .8em; padding: 1.5em; }
+/* Lightbox */
+.lightbox { position: fixed; inset: 0; background: rgba(0,0,0,.86); z-index: 100;
+  display: none; align-items: center; justify-content: center; padding: 2em; }
+.lightbox.open { display: flex; }
+.lightbox img { max-width: 96vw; max-height: 92vh; border-radius: 8px; box-shadow: 0 10px 40px rgba(0,0,0,.5); }
+.lightbox .close { position: absolute; top: 1em; right: 1.4em; background: rgba(255,255,255,.12); color: #fff;
+  border: none; font-size: 1.6em; line-height: 1; width: 2.2em; height: 2.2em; border-radius: 50%; cursor: pointer; }
+.lightbox .close:hover { background: rgba(255,255,255,.22); }
+@media (max-width: 640px) {
+  .cue .frame img { width: 120px; height: 78px; }
+  header.bar input.search { width: 10em; }
+}
+"""
+
+    js = r"""
+(function () {
+  var box = document.getElementById('lightbox');
+  var boxImg = box.querySelector('img');
+  function open(src) { boxImg.src = src; box.classList.add('open'); }
+  function close() { box.classList.remove('open'); boxImg.src = ''; }
+  document.querySelectorAll('.cue .frame').forEach(function (el) {
+    el.addEventListener('click', function () {
+      var img = el.querySelector('img'); if (img) open(img.src);
+    });
+  });
+  box.addEventListener('click', function (e) { if (e.target === box || e.target.classList.contains('close')) close(); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') close(); });
+  var search = document.getElementById('search');
+  if (search) {
+    search.addEventListener('input', function () {
+      var q = search.value.trim().toLowerCase();
+      document.querySelectorAll('.cue').forEach(function (cue) {
+        var hay = (cue.textContent || '').toLowerCase();
+        cue.classList.toggle('hidden', q && hay.indexOf(q) === -1);
+      });
+    });
+  }
+})();
+"""
+
+    parts: list[str] = []
+    parts.append("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">")
+    parts.append(f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">")
+    parts.append(f"<title>{_html_escape(title)}</title>")
+    parts.append(f"<style>{css}</style>")
+    parts.append("</head>\n<body>")
+
+    parts.append("<header class=\"bar\">")
+    parts.append(f"<h1>{_html_escape(title)}</h1>")
+    if legend:
+        parts.append('<div class="legend">')
+        for label, color in legend:
+            parts.append(
+                f'<span class="chip" style="background:{color}">{_html_escape(label)}</span>'
+            )
+        parts.append('</div>')
+    parts.append('<div class="spacer"></div>')
+    parts.append(
+        '<input id="search" class="search" type="search" placeholder="Search transcript&hellip;" aria-label="Search transcript">'
+    )
+    parts.append('</header>')
+
+    parts.append('<main>')
+    cue_count = 0
+    has_frame = False
     for i, (seg, label) in enumerate(merged, start=1):
         text = seg.text.strip()
         if not text:
             continue
+        cue_count += 1
         color = _speaker_color(label)
         ts = _fmt_clock(seg.start)
-        parts.append("<div class=\"cue\">")
-        # Inline frame thumbnail if it exists.
+        parts.append(f'<div class="cue" style="--c:{color}">')
+        # Inline frame thumbnail if it exists (clickable -> lightbox).
         if frames_dir is not None:
             frame_path = frames_dir / f"seg{i:04d}.jpg"
             if frame_path.exists():
+                has_frame = True
                 b64 = base64.b64encode(frame_path.read_bytes()).decode("ascii")
-                parts.append(f"<img src=\"data:image/jpeg;base64,{b64}\" alt=\"frame {i}\">")
-        parts.append("<div class=\"body\">")
-        parts.append(f"<a class=\"ts\" href=\"#cue-{i}\" id=\"cue-{i}\">{ts}</a> ")
-        parts.append(f"<span class=\"speaker\" style=\"color:{color}\">{_html_escape(label)}</span>")
-        parts.append(f"<div class=\"text\">{_html_escape(text)}</div>")
-        parts.append("</div></div>")  # close .body and .cue
+                parts.append(
+                    f'<div class="frame"><img src="data:image/jpeg;base64,{b64}" alt="frame {i}"></div>'
+                )
+        parts.append('<div class="body">')
+        parts.append('<div class="meta">')
+        parts.append(f'<a class="ts" href="#cue-{i}" id="cue-{i}">{ts}</a>')
+        parts.append(f'<span class="speaker" style="color:{color}">{_html_escape(label)}</span>')
+        parts.append('</div>')  # .meta
+        parts.append(f'<div class="text">{_html_escape(text)}</div>')
+        parts.append('</div></div>')  # .body and .cue
+    parts.append('</main>')
 
-    parts.append("</body>\n</html>")
+    if cue_count:
+        parts.append(f'<div class="foot">{cue_count} cue(s)</div>')
+
+    # Lightbox overlay (only when at least one frame was inlined, so a
+    # frames-less transcript emits no <img> tags at all).
+    if has_frame:
+        parts.append('<div class="lightbox" id="lightbox" aria-hidden="true">')
+        parts.append('<button class="close" aria-label="Close">&times;</button>')
+        parts.append('<img alt="fullscreen frame">')
+        parts.append('</div>')
+        parts.append(f'<script>{js}</script>')
+
+    parts.append('</body>\n</html>')
     return "\n".join(parts)
 
 

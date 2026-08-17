@@ -168,3 +168,46 @@ def test_format_speakers_html_no_frames_when_dir_missing(tmp_path):
     empty_dir.mkdir()
     html = MR.format_speakers_html(merged, frames_dir=empty_dir)
     assert "<img" not in html
+
+
+def test_format_speakers_html_has_legend_and_search(tmp_path):
+    """The sticky header renders a speaker legend and a search input."""
+    merged = [
+        (_seg(0.0, 1.0, "hi"), "Speaker A"),
+        (_seg(1.0, 2.0, "yo"), "Speaker B"),
+    ]
+    html = MR.format_speakers_html(merged)
+    assert 'class="legend"' in html
+    assert "Speaker A" in html and "Speaker B" in html
+    assert 'id="search"' in html
+    assert 'type="search"' in html
+
+
+def test_format_speakers_html_frame_clickable_opens_lightbox(tmp_path):
+    """A present frame is wrapped in a clickable .frame div and the lightbox
+    overlay + JS are emitted."""
+    merged = [(_seg(0.0, 1.0, "hi"), "Speaker A")]
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    frame_path = frames_dir / "seg0001.jpg"
+    frame_path.write_bytes(b"\xff\xd8jpeg\xff\xd9")
+    html = MR.format_speakers_html(merged, frames_dir=frames_dir)
+    # The thumbnail is wrapped in a clickable .frame container.
+    assert 'class="frame"' in html
+    assert "<img" in html
+    # Lightbox overlay is present.
+    assert 'class="lightbox"' in html
+    assert 'id="lightbox"' in html
+    # The lightbox JS is inlined.
+    assert "<script>" in html
+    assert "lightbox" in html
+
+
+def test_format_speakers_html_no_lightbox_without_frames(tmp_path):
+    """No frames => no <img>, no lightbox overlay, no <script>."""
+    merged = [(_seg(0.0, 1.0, "hi"), "Speaker A")]
+    empty_dir = tmp_path / "frames"
+    empty_dir.mkdir()
+    html = MR.format_speakers_html(merged, frames_dir=empty_dir)
+    assert 'class="lightbox"' not in html
+    assert "<script>" not in html

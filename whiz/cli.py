@@ -1046,19 +1046,14 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     ui.phase("analyzing")
     ui.kv("Model", model)
     ui.muted(f"base_url: {base_url}  vision: {use_vision}  mode: {detected_mode}")
-    if use_vision:
-        frames_dir = SC.frames_dir_for(of_base)
-        frame_paths = [frames_dir / e.frame for e in (entries or []) if e.frame]
-        ui.info(f"Sending {len(frame_paths)} frames (cap {max_frames}) ...")
-        response = AI.chat_vision(
-            prompt_template, transcript, frame_paths,
-            base_url=base_url, model=model, api_key=api_key, max_frames=max_frames,
-        )
-    else:
-        response = AI.chat_text(
-            prompt_template, transcript,
-            base_url=base_url, model=model, api_key=api_key,
-        )
+    frames_dir = SC.frames_dir_for(of_base) if use_vision else None
+    response = AI.analyze(
+        prompt_template, transcript,
+        base_url=base_url, model=model, api_key=api_key,
+        entries=entries, frames_dir=frames_dir,
+        use_vision=use_vision, max_frames=max_frames,
+        on_progress=lambda m: ui.muted(m),
+    )
 
     # Write the .analysis.md (prompt + response) and print response to stdout.
     out_path = _analysis_output_path(of_base)
