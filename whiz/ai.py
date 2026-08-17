@@ -113,37 +113,58 @@ CLASSIFY_PROMPT = (
 
 
 # Chunked map-reduce prompts. For long transcripts (or many frames) the input is
-# split into contiguous chunks; each chunk is analyzed independently (map) and
-# the partial results are merged into one final answer (reduce). Chunking keeps
-# each model call focused on a small, coherent window so the model isn't
-# overwhelmed by one giant blob — this measurably improves analysis quality.
+# split into contiguous chunks; each chunk is analyzed (map) and the partial
+# results are merged into one final answer (reduce). Chunking keeps each model
+# call focused on a small, coherent window so the model isn't overwhelmed by
+# one giant blob — this measurably improves analysis quality.
+#
+# The map phase is **rolling-context** (chat-style): each chunk carries forward
+# the prior chunks' partial analyses as a running context block, so chunk N can
+# refer back to speakers/decisions/entities/open threads established in chunks
+# 1..N-1 instead of analyzing in a vacuum. This keeps the per-chunk partials
+# coherent with each other (the reduce step then just merges them).
 MAP_PROMPT = (
-    "You are analyzing one contiguous chunk (part {k} of {n}) of a longer recorded "
-    "transcript. Your job: {task}\n\n"
-    "Analyze ONLY the transcript chunk below. Be specific to this chunk — keep "
-    "speaker labels and timestamps. Do not invent anything that isn't in this "
-    "chunk, and do not try to summarize the whole recording. Produce a partial "
-    "result for THIS chunk only; later parts will be combined separately.\n\n"
+    "You are analyzing chunk {k} of {n} of a longer recorded transcript. "
+    "Your job: {task}\n\n"
+    "{context_block}"
+    "Analyze the transcript chunk below. Keep speaker labels and timestamps. "
+    "Build on the running context above when present — refer back to speakers, "
+    "decisions, entities, and open threads already established; do not re-derive "
+    "them from scratch. Do not invent anything not supported by this chunk or the "
+    "running context. Produce a partial result for THIS chunk that fits coherently "
+    "with what came before; a later step will merge all chunks.\n\n"
     "Transcript chunk ({k}/{n}):\n{transcript}"
+)
+
+# Injected before a chunk's analysis when prior chunks exist. {context} is the
+# concatenation of the prior chunks' partial analyses (windowed — see
+# ``context_turns``), in order. Empty string for chunk 1 (no context yet).
+_CONTEXT_BLOCK = (
+    "Running context from prior chunks (their partial analyses, in order):\n"
+    "{context}\n\n"
+    "Continue from this context.\n\n"
 )
 
 SYNTH_PROMPT = (
     "You are combining {n} partial analyses of a long recorded transcript into "
     "one final answer. Your job: {task}\n\n"
     "Below are the {n} partial analyses, one per contiguous chunk, in time order. "
-    "Merge them into a single coherent answer: remove duplicates, reconcile "
-    "conflicts, keep the chronological order, and preserve specific speaker/time "
-    "references. Produce the final answer in the exact format the task expects.\n\n"
+    "They were produced with rolling context, so later partials already refer back "
+    "to earlier ones. Merge them into a single coherent answer: remove duplicates, "
+    "reconcile conflicts, keep the chronological order, and preserve specific "
+    "speaker/time references. Produce the final answer in the exact format the task "
+    "expects.\n\n"
     "Partial analyses:\n{partials}"
 )
-
-# Used only for custom --prompt: the user's prompt is applied per chunk (map),
-# then the per-chunk answers are merged with this generic reduce prompt.
+# Used only for custom --prompt: the user's prompt is applied per chunk (map,
+# with rolling context prepended for chunks after the first), then the per-chunk
+# answers are merged with this generic reduce prompt.
 _CUSTOM_REDUCE_PROMPT = (
     "Below are {n} partial answers, one per contiguous chunk of a long "
-    "transcript, in time order. Merge them into one final answer: remove "
-    "duplicates, reconcile conflicts, and preserve specific speaker/time "
-    "references. Do not add anything not supported by the partials.\n\n"
+    "transcript, in time order. They were produced with rolling context, so "
+    "later answers already refer back to earlier ones. Merge them into one final "
+    "answer: remove duplicates, reconcile conflicts, and preserve specific "
+    "speaker/time references. Do not add anything not supported by the partials.\n\n"
     "Partial answers:\n{partials}"
 )
 
@@ -429,23 +450,34 @@ def analyze(
     max_frames: int = 50,
     chunk_size: int = 8,
     chunk_chars: int = 6000,
+    context_turns: int = 3,
     on_progress=None,
 ) -> str:
-    """Run an analysis, chunking long inputs with map-reduce for quality.
+    """Run an analysis, chunking long inputs with rolling-context map-reduce.
 
     Short inputs (one chunk) use a single ``chat_text`` / ``chat_vision`` call —
     identical to the old behavior, so existing single-call tests keep passing.
 
-    Long inputs are split into contiguous chunks; each chunk is analyzed
-    independently (the *map* step) and the partial results are merged into one
-    final answer (the *reduce* step). With frames, each chunk carries only the
-    frames for its own segments, so the vision model sees a small, coherent
-    window of "these frames + this text" instead of one giant blob.
+    Long inputs are split into contiguous chunks. The map phase is
+    **rolling-context** (chat-style): each chunk's prompt carries forward the
+    prior chunks' partial analyses as a running context block, so chunk N can
+    refer back to speakers/decisions/entities/open threads established in chunks
+    1..N-1 instead of analyzing in a vacuum. The reduce step then merges the
+    (already coherent) partials into one final answer. With frames, each chunk
+    carries only the frames for its own segments, so the vision model sees a
+    small, coherent window of "these frames + this text" plus the running
+    context instead of one giant blob.
+
+    ``context_turns`` caps how many prior partials are injected as context for
+    a given chunk (a sliding window — the last ``context_turns`` partials),
+    bounding prompt growth on very long inputs. ``0`` disables the rolling
+    context (each chunk analyzed independently), which is the old behavior.
 
     Built-in prompts (summary / actions / summary+actions / plan) route through
     ``MAP_PROMPT`` + ``SYNTH_PROMPT`` so the final answer has the same structure
     the non-chunked path would produce. Custom ``--prompt`` text is applied per
-    chunk verbatim and the per-chunk answers are merged with a generic reduce.
+    chunk (with rolling context prepended for chunks after the first) and the
+    per-chunk answers are merged with a generic reduce.
 
     ``on_progress(msg)``, if given, is called with a short status string before
     each map call and the reduce call so callers can surface progress.
@@ -465,6 +497,7 @@ def analyze(
             )
         return _map_reduce_vision(
             chunks, task, built_in, prompt_template, max_frames,
+            context_turns=context_turns,
             base_url=base_url, model=model, api_key=api_key,
             frames_dir=frames_dir, on_progress=on_progress,
         )
@@ -478,6 +511,7 @@ def analyze(
         )
     return _map_reduce_text(
         chunks, task, built_in, prompt_template,
+        context_turns=context_turns,
         base_url=base_url, model=model, api_key=api_key, on_progress=on_progress,
     )
 
@@ -494,9 +528,23 @@ def _frames_for_entries(entries, frames_dir) -> list[Path]:
     return out
 
 
+def _running_context(partials: list[str], context_turns: int) -> str:
+    """Build the running-context block from prior partials (sliding window).
+
+    Returns the filled ``_CONTEXT_BLOCK`` with the last ``context_turns``
+    partials joined in order, or an empty string when there are no prior
+    partials (chunk 1) or rolling context is disabled (``context_turns`` <= 0).
+    """
+    if context_turns <= 0 or not partials:
+        return ""
+    window = partials[-context_turns:]
+    context = "\n\n".join(window)
+    return _CONTEXT_BLOCK.replace("{context}", context)
+
+
 def _map_reduce_vision(
     chunks, task, built_in, prompt_template, max_frames, *,
-    base_url, model, api_key, frames_dir, on_progress=None,
+    context_turns=3, base_url, model, api_key, frames_dir, on_progress=None,
 ) -> str:
     n = len(chunks)
     partials: list[str] = []
@@ -505,14 +553,17 @@ def _map_reduce_vision(
         frames = _frames_for_entries(chunk, frames_dir)
         if on_progress:
             on_progress(f"analyzing chunk {k}/{n} ({len(chunk)} segments, {len(frames)} frames)")
+        context_block = _running_context(partials, context_turns)
         if built_in:
             mp = (MAP_PROMPT
                   .replace("{task}", task)
                   .replace("{k}", str(k))
                   .replace("{n}", str(n))
+                  .replace("{context_block}", context_block)
                   .replace("{transcript}", chunk_transcript))
         else:
-            mp = prompt_template.replace("{transcript}", chunk_transcript)
+            # Custom prompt: prepend the running context (no MAP_PROMPT wrapper).
+            mp = context_block + prompt_template.replace("{transcript}", chunk_transcript)
         partial = chat_vision(
             mp, chunk_transcript, frames,
             base_url=base_url, model=model, api_key=api_key, max_frames=max_frames,
@@ -533,21 +584,23 @@ def _map_reduce_vision(
 
 def _map_reduce_text(
     chunks, task, built_in, prompt_template, *,
-    base_url, model, api_key, on_progress=None,
+    context_turns=3, base_url, model, api_key, on_progress=None,
 ) -> str:
     n = len(chunks)
     partials: list[str] = []
     for k, chunk in enumerate(chunks, start=1):
         if on_progress:
             on_progress(f"analyzing chunk {k}/{n}")
+        context_block = _running_context(partials, context_turns)
         if built_in:
             mp = (MAP_PROMPT
                   .replace("{task}", task)
                   .replace("{k}", str(k))
                   .replace("{n}", str(n))
+                  .replace("{context_block}", context_block)
                   .replace("{transcript}", chunk))
         else:
-            mp = prompt_template.replace("{transcript}", chunk)
+            mp = context_block + prompt_template.replace("{transcript}", chunk)
         partial = chat_text(
             mp, chunk,
             base_url=base_url, model=model, api_key=api_key,

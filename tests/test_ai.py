@@ -625,8 +625,9 @@ def test_analyze_long_vision_map_reduce(monkeypatch, tmp_path):
     assert "combining" in text_calls[0]
 
 
-def test_analyze_custom_prompt_long_uses_custom_reduce(monkeypatch):
-    """Custom --prompt: applied per chunk verbatim, merged via generic reduce."""
+def test_analyze_custom_prompt_long_with_rolling_context(monkeypatch):
+    """Custom --prompt with rolling context: chunk 1 is verbatim, chunk 2+ has
+    the context block prepended."""
     long_text = "\n".join(f"line {i} content here" for i in range(40))
     assert len(AI._chunk_text(long_text, target_chars=120)) >= 2
 
@@ -647,10 +648,127 @@ def test_analyze_custom_prompt_long_uses_custom_reduce(monkeypatch):
     map_prompts = [p for p in calls if "What risks?" in p]
     synth_prompts = [p for p in calls if "Partial answers" in p]
     assert len(map_prompts) >= 2
-    # Map calls use the user's prompt verbatim (no MAP_PROMPT wrapper).
+    # Map calls use the user's prompt verbatim (no MAP_PROMPT wrapper). Chunk 1
+    # has no running context yet; later chunks get the context block prepended.
+    assert map_prompts[0].startswith("What risks?")
+    assert "What risks?" in map_prompts[1]
+    assert len(synth_prompts) == 1
+
+
+def test_analyze_custom_prompt_no_context_when_disabled(monkeypatch):
+    """context_turns=0 disables rolling context: every map call starts with
+    the user's prompt verbatim (the old independent-chunk behavior)."""
+    long_text = "\n".join(f"line {i} content here" for i in range(40))
+    assert len(AI._chunk_text(long_text, target_chars=120)) >= 2
+
+    calls = []
+    def fake_chat_text(prompt, transcript, *, base_url, model, api_key):
+        calls.append(prompt)
+        if "Partial answers" in prompt:
+            return "MERGED"
+        return "chunk-answer"
+    monkeypatch.setattr(AI, "chat_text", fake_chat_text)
+
+    out = AI.analyze(
+        "What risks? {transcript}", long_text,
+        base_url="http://x/v1", model="m", api_key="",
+        chunk_chars=120, context_turns=0,
+    )
+    assert out == "MERGED"
+    map_prompts = [p for p in calls if "What risks?" in p]
+    synth_prompts = [p for p in calls if "Partial answers" in p]
+    assert len(map_prompts) >= 2
     for p in map_prompts:
         assert p.startswith("What risks?")
     assert len(synth_prompts) == 1
+
+
+# ---------- rolling context across chunks ----------
+
+def test_running_context_chunk1_is_empty(monkeypatch):
+    """The first chunk has no prior partials, so its context block is empty."""
+    seen_prompts = []
+    def fake_chat_text(prompt, transcript, *, base_url, model, api_key):
+        seen_prompts.append(prompt)
+        return "partial"
+    monkeypatch.setattr(AI, "chat_text", fake_chat_text)
+    long_text = "\n".join(f"line {i} content here" for i in range(40))
+    AI.analyze(
+        AI.SUMMARY_PROMPT, long_text,
+        base_url="http://x/v1", model="m", api_key="",
+        chunk_chars=120, context_turns=3,
+    )
+    # The first map call is chunk 1 — no running context block.
+    first = seen_prompts[0]
+    assert "Running context" not in first
+
+
+def test_running_context_later_chunks_carry_prior_partials(monkeypatch):
+    """Chunk 2+ injects the prior chunks' partial analyses as running context."""
+    seen_prompts = []
+    def fake_chat_text(prompt, transcript, *, base_url, model, api_key):
+        seen_prompts.append(prompt)
+        if "combining" in prompt:
+            return "SYNTH"
+        return f"PARTIAL-{transcript[:6]}"
+    monkeypatch.setattr(AI, "chat_text", fake_chat_text)
+    long_text = "\n".join(f"line {i} content here" for i in range(40))
+    AI.analyze(
+        AI.SUMMARY_PROMPT, long_text,
+        base_url="http://x/v1", model="m", api_key="",
+        chunk_chars=120, context_turns=3,
+    )
+    # Map calls contain "Transcript chunk"; the synth call contains "combining".
+    map_prompts = [p for p in seen_prompts if "Transcript chunk" in p]
+    assert len(map_prompts) >= 2
+    # Chunk 1 has no running context; chunk 2 must contain chunk 1's partial.
+    assert "Running context" not in map_prompts[0]
+    assert "Running context" in map_prompts[1]
+    # The context block in chunk 2 carries the first partial's body.
+    assert "PARTIAL-" in map_prompts[1]
+
+
+def test_running_context_window_caps(monkeypatch):
+    """context_turns limits how many prior partials are injected."""
+    seen_prompts = []
+    def fake_chat_text(prompt, transcript, *, base_url, model, api_key):
+        seen_prompts.append(prompt)
+        return f"PARTIAL-{transcript[:6]}"
+    monkeypatch.setattr(AI, "chat_text", fake_chat_text)
+    long_text = "\n".join(f"line {i} content here" for i in range(80))
+    # Force small chunks + only 1 turn of context.
+    AI.analyze(
+        AI.SUMMARY_PROMPT, long_text,
+        base_url="http://x/v1", model="m", api_key="",
+        chunk_chars=120, context_turns=1,
+    )
+    map_prompts = [p for p in seen_prompts if "Transcript chunk" in p]
+    assert len(map_prompts) >= 3
+    # The last chunk's context block contains only the immediately-preceding
+    # partial (window of 1), not all prior partials.
+    last = map_prompts[-1]
+    assert "Running context" in last
+    markers = [m for m in last.splitlines() if m.startswith("PARTIAL-")]
+    assert len(markers) == 1
+
+
+def test_running_context_disabled_when_zero(monkeypatch):
+    """context_turns=0 disables rolling context (old independent-chunk behavior)."""
+    seen_prompts = []
+    def fake_chat_text(prompt, transcript, *, base_url, model, api_key):
+        seen_prompts.append(prompt)
+        return "partial"
+    monkeypatch.setattr(AI, "chat_text", fake_chat_text)
+    long_text = "\n".join(f"line {i} content here" for i in range(40))
+    AI.analyze(
+        AI.SUMMARY_PROMPT, long_text,
+        base_url="http://x/v1", model="m", api_key="",
+        chunk_chars=120, context_turns=0,
+    )
+    map_prompts = [p for p in seen_prompts if "Transcript chunk" in p]
+    assert len(map_prompts) >= 2
+    for p in map_prompts:
+        assert "Running context" not in p
 
 
 def test_analyze_progress_callback_invoked(monkeypatch):
@@ -668,6 +786,5 @@ def test_analyze_progress_callback_invoked(monkeypatch):
         chunk_chars=120,
         on_progress=lambda m: msgs.append(m),
     )
-    # At least one 'analyzing chunk' + one 'synthesizing'.
     assert any("analyzing chunk" in m for m in msgs)
     assert any("synthesizing" in m for m in msgs)
