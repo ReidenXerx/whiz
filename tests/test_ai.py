@@ -63,6 +63,12 @@ def test_essentials_instruction_has_required_markers():
     assert "REJECTED:" in AI._ESSENTIALS_INSTRUCTION
     assert "(inferred)" in AI._ESSENTIALS_INSTRUCTION
     assert "## Essentials" in AI._ESSENTIALS_TASK_SUFFIX
+    # The shared analyst posture (thoroughness + frame reconciliation) is folded
+    # into every augmentation so it applies to the whole analysis.
+    assert "thorough" in AI._ANALYST_POSTURE
+    assert "reconcile" in AI._ANALYST_POSTURE
+    assert AI._ANALYST_POSTURE in AI._ESSENTIALS_TASK_SUFFIX
+    assert AI._ANALYST_POSTURE in AI._ESSENTIALS_INSTRUCTION
 
 
 def test_plan_prompt_has_required_sections():

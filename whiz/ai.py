@@ -111,6 +111,24 @@ CLASSIFY_PROMPT = (
     "Transcript:\n{transcript}\n\nClassification:"
 )
 
+# Shared analyst posture prepended to every Essentials augmentation (both the
+# {task} suffix for built-in map-reduce and the instruction for single-call /
+# custom paths). Applies to the WHOLE analysis, not just the Essentials
+# section: be thorough and attentive, reason at maximum effort, and when frames
+# are provided, actively reconcile what's visible on screen with the spoken
+# transcript (cross-check names, labels, values, and UI state against what was
+# said) rather than treating the two channels independently.
+_ANALYST_POSTURE = (
+    "Be exceptionally thorough and attentive. Reason step-by-step at maximum "
+    "effort before producing any section; do not rush to the first plausible "
+    "answer. When on-screen frames are provided, you have TWO sources of truth — "
+    "the spoken transcript AND the visible screen. Actively reconcile them: "
+    "cross-check names, labels, field values, button text, error messages, and "
+    "UI state shown on screen against what was said, and surface discrepancies "
+    "(mark them 'SCREEN vs TRANSCRIPT:'). Treat the frames as authoritative "
+    "for anything visible (schema, code, config, URLs) and the transcript as "
+    "authoritative for intent and discussion; use both. "
+)
 # Essentials: always-on augmentation. Every `whiz analyze` run produces the
 # normal analysis (summary / plan / custom) AND appends a dense `## Essentials`
 # section — a concentrated bullet list of every meaningful point — to the same
@@ -119,11 +137,13 @@ CLASSIFY_PROMPT = (
 # essentials), and the synth merges both. The essentials section is designed as
 # concentrated context you can feed back to a later `whiz analyze`.
 #
-# _ESSENTIALS_TASK_SUFFIX is appended to the {task} label in MAP_PROMPT /
-# SYNTH_PROMPT (built-in prompts), so both the per-chunk map and the final
-# synth know to produce / merge the Essentials section.
+# _ESSENTIALS_TASK_SUFFIX is prepended with _ANALYST_POSTURE and appended to the
+# {task} label in MAP_PROMPT / SYNTH_PROMPT (built-in prompts), so both the
+# per-chunk map and the final synth apply the posture AND produce / merge the
+# Essentials section.
 _ESSENTIALS_TASK_SUFFIX = (
-    " After producing the analysis above, ALSO produce a `## Essentials` "
+    _ANALYST_POSTURE
+    + "After producing the analysis above, ALSO produce a `## Essentials` "
     "section: a dense, exhaustive bullet list of EVERY meaningful point — facts, "
     "decisions, requirements, constraints, names, numbers, UI/UX details, "
     "workflows, open questions, and rejected alternatives. One bullet per point, "
@@ -133,12 +153,14 @@ _ESSENTIALS_TASK_SUFFIX = (
     "capture visible on-screen text/schema. This section is for feeding to a "
     "later AI analysis as concentrated context."
 )
-# _ESSENTIALS_INSTRUCTION is appended to the prompt for single-call (short
-# transcript) and custom --prompt map-reduce paths, where there is no {task}
-# slot. It's inserted right after the {transcript} placeholder so the model
-# reads the transcript then sees the Essentials instruction.
+# _ESSENTIALS_INSTRUCTION is prepended with _ANALYST_POSTURE and appended to the
+# prompt for single-call (short transcript) and custom --prompt map-reduce
+# paths, where there is no {task} slot. It's inserted right after the
+# {transcript} placeholder so the model reads the transcript then sees the
+# posture + Essentials instruction.
 _ESSENTIALS_INSTRUCTION = (
-    "\n\n---\nALSO produce a `## Essentials` section: a dense, exhaustive bullet "
+    "\n\n---\n" + _ANALYST_POSTURE
+    + "ALSO produce a `## Essentials` section: a dense, exhaustive bullet "
     "list of EVERY meaningful point — facts, decisions, requirements, "
     "constraints, names, numbers, UI/UX details, workflows, open questions, and "
     "rejected alternatives. One bullet per point, concise; prefix with timestamp "
