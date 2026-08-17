@@ -403,6 +403,21 @@ The embedding pass reuses the diarization cache, so on a cached run profile matc
 
 `whiz analyze` sends a prior transcript (and optionally on-screen frames) to a chat model via an OpenAI-compatible API ([Ollama](https://ollama.com) by default). It produces a markdown analysis (`.analysis.md`) alongside the input and prints the response to stdout. Requires a prior `whiz transcribe` of a video (which auto-produces speakers + screenshots) or an audio run with `--speakers` (and `--screenshots` for `--vision`).
 
+### One-command transcribe + analyze
+
+Pass `--analyze` to `whiz transcribe` to chain straight into analysis once transcription finishes — no separate `whiz analyze` call needed. It runs the same auto-detect path (see below):
+
+```bash
+# Transcribe + diarize + screenshots, then auto-analyze (summary+actions or plan)
+whiz transcribe --analyze recording.mov
+
+# Same, but send the on-screen frames to a vision model (video inputs already
+# capture screenshots, so this just feeds them to the analysis)
+whiz transcribe --analyze --vision recording.mov
+```
+
+The analysis output (`.analysis.md`) is written alongside the other transcript artifacts. If analysis fails (Ollama down, no model picked), the transcription itself still succeeded — whiz prints a hint and keeps the transcript files.
+
 ### Auto-detect (the default)
 
 When you run `whiz analyze` with **no mode flag**, whiz first asks the model to classify the transcript as one of:

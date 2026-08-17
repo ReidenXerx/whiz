@@ -2,6 +2,7 @@
 
 Subcommands:
   whiz transcribe <file>   Transcribe an audio/video file.
+    --analyze              Chain into AI analysis after transcription.
   whiz merge <file>        Re-run diarization + merge against an existing JSON.
   whiz models list         Show discovered models.
   whiz models download N   Download a model from HuggingFace.
@@ -731,6 +732,33 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             pass
 
     ui.summary(written)
+
+    # Optional: chain into AI analysis after a successful transcription.
+    # Runs the same auto-detect path as `whiz analyze <file>` so the user gets
+    # summary+actions or an implementation plan without a second command.
+    if getattr(args, "analyze", False) and rc == 0:
+        from types import SimpleNamespace
+        analyze_args = SimpleNamespace(
+            file=str(in_path),
+            model="",
+            base_url="",
+            api_key=None,
+            max_frames=None,
+            summary=False,
+            actions=False,
+            plan=False,
+            prompt="",
+            vision=getattr(args, "vision", False) or False,
+        )
+        ui.phase("analyzing (chained)")
+        try:
+            cmd_analyze(analyze_args)
+        except SystemExit:
+            # cmd_analyze raises SystemExit on missing transcript/model issues;
+            # the transcription itself already succeeded, so don't surface that
+            # as a hard failure — the hint was already printed.
+            pass
+
     return rc
 
 
@@ -1339,6 +1367,8 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--verbose", action="store_true", help="Verbose whisper-cli output")
     t.add_argument("--extra", nargs=argparse.REMAINDER, default=[], help="Extra flags passed verbatim to whisper-cli")
     t.add_argument("--dry-run", action="store_true", help="Print the command without running it")
+    t.add_argument("--analyze", action="store_true", help="After transcription, run AI analysis (auto-detect: summary+actions or implementation plan). Equivalent to a follow-up `whiz analyze <file>`")
+    t.add_argument("--vision", action="store_true", help="With --analyze, send on-screen frames to a vision model (requires screenshots, auto-enabled for video)")
     t.set_defaults(func=cmd_transcribe)
 
     # merge
