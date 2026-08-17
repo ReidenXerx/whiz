@@ -38,7 +38,7 @@ def speakers_in_order(merged: list[tuple[WhisperSeg, str]]) -> list[str]:
 def speakers_by_talk_time(merged: list[tuple[WhisperSeg, str]]) -> list[str]:
     """Unique speaker labels ordered by total speaking time (most first).
 
-    Used by `--speakers-names Enric,Vadim,...`: names are assigned to speakers
+    Used by `--speakers-names Alice,Bob,...`: names are assigned to speakers
     in this order so the most talkative speaker gets the first name. Falls
     back to order-of-appearance for ties (stable sort).
     """

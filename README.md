@@ -4,7 +4,7 @@ A handy CLI wrapper around [whisper-cli](https://github.com/ggerganov/whisper.cp
 
 1. **`failed to open 'large-v3'`** — whiz auto-discovers models across your filesystem and resolves friendly aliases (`turbo`, `large-v3`, `medium`) to the actual `.bin` file.
 2. **whisper-cli choking on `.mov`/`.mp4`** — whiz extracts a 16 kHz mono WAV with ffmpeg and hands *that* to whisper-cli, then cleans up.
-3. **No multi-speaker labels** — `whiz transcribe --speakers` runs true diarization via sherpa-onnx and emits labeled `Speaker A:` / `Speaker B:` output (or real names — see [Speaker naming](#naming-speakers)). Diarization results are cached so re-tuning names/thresholds via `whiz merge` is instant.
+3. **No multi-speaker labels** — for video inputs, speaker diarization and on-screen frame capture are **on by default** (opt out with `--no-speakers` / `--no-screenshots`). whiz runs true diarization via sherpa-onnx and emits labeled `Speaker A:` / `Speaker B:` output (or real names — see [Speaker naming](#naming-speakers)). Diarization results are cached so re-tuning names/thresholds via `whiz merge` is instant.
 4. **VAD model download moved** — whiz auto-downloads the current Silero VAD model from the new `ggml-org/whisper-vad` repo when VAD is enabled and no model is found.
 
 Zero runtime dependencies — pure Python 3.11+ stdlib. Speaker diarization requires the optional `sherpa-onnx` package (see below).
@@ -40,8 +40,12 @@ whiz models download turbo      # ggml-large-v3-turbo-q5_0.bin — fast & accura
 
 ```bash
 # Auto-picks the best available model, extracts audio if it's a video,
-# writes SRT + JSON alongside the input.
+# and (for video) auto-enables speaker diarization + on-screen screenshots.
+# Writes SRT + JSON + labeled speakers.srt/.txt + frames alongside the input.
 whiz transcribe ~/Desktop/recording.mov
+
+# Opt out of the video defaults if you don't need them
+whiz transcribe --no-speakers --no-screenshots recording.mov
 
 # Be explicit
 whiz transcribe -m turbo -l en --outputs srt,vtt recording.mp4
@@ -49,9 +53,11 @@ whiz transcribe -m turbo -l en --outputs srt,vtt recording.mp4
 # See what it would run, without running it
 whiz transcribe --dry-run recording.mov
 
-# Plain text, no timestamps
+# Plain text, no timestamps (audio input — no auto screenshots/speakers)
 whiz transcribe --outputs txt --no-timestamps meeting.m4a
 ```
+
+> **Video inputs** auto-enable `--screenshots` and `--speakers` (auto-detect) so you get a labeled transcript plus per-segment frames for AI analysis / HTML output without extra flags. Pass `--no-screenshots` and/or `--no-speakers` to opt out. Audio inputs are unaffected.
 
 ## Commands
 
@@ -74,11 +80,13 @@ Transcribe an audio or video file.
 | `--print-progress` | on (TTY) | Print whisper-cli progress; default on when stderr is a TTY, off otherwise |
 | `--no-progress` | off | Disable whisper-cli progress passthrough (forces `-np`) |
 | `--keep-wav` | off | Keep the intermediate extracted WAV |
-| `--speakers [N]` | off | Enable speaker diarization; optional integer = known speaker count, omit = auto-detect |
+| `--speakers [N]` | on (video) | Enable speaker diarization; optional integer = known speaker count, omit = auto-detect. Auto-enabled for video inputs |
+| `--no-speakers` | off | Disable the auto-enabled diarization for video inputs (opt out) |
 | `--cluster-threshold` | `0.9` | Diarization clustering threshold when auto-detecting (larger = fewer speakers) |
 | `--name-speakers` | off | After transcription, interactively prompt to name each detected speaker |
-| `--speakers-names Enric,Vadim,...` | off | Non-interactive speaker names assigned by total talk time (most talkative first) |
-| `--screenshots` | off | For video inputs, extract one on-screen frame per segment into `<stem>.frames/` + write `<stem>.frames.json` (for AI analysis / HTML output) |
+| `--speakers-names Alice,Bob,...` | off | Non-interactive speaker names assigned by total talk time (most talkative first) |
+| `--screenshots` | on (video) | For video inputs, extract one on-screen frame per segment into `<stem>.frames/` + write `<stem>.frames.json` (for AI analysis / HTML output). Auto-enabled for video inputs |
+| `--no-screenshots` | off | Disable the auto-enabled on-screen frame extraction for video inputs (opt out) |
 | `--screenshot-width` | `1280` | Frame width in pixels (0 = native resolution) |
 | `--no-voice-profiles` | off | Don't compute voice-profile embeddings or auto-match/save speaker profiles this run |
 | `--resume` | off | Skip whisper-cli transcription if its JSON output already exists and go straight to diarization + merge |
@@ -92,11 +100,13 @@ Re-run only diarization + the merge against an existing whisper JSON, skipping t
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--json` | auto-find | Explicit path to the whisper JSON |
-| `--speakers [N]` | auto-detect | Known speaker count; omit = auto-detect |
+| `--speakers [N]` | on (video) | Known speaker count; omit = auto-detect. Auto-enabled for video inputs |
+| `--no-speakers` | off | Disable the auto-enabled diarization for video inputs (opt out) |
 | `--cluster-threshold` | `0.9` | Clustering threshold when auto-detecting (larger = fewer speakers) |
 | `--name-speakers` | off | Interactively prompt to name each detected speaker |
-| `--speakers-names Enric,Vadim,...` | off | Non-interactive speaker names assigned by total talk time (most talkative first) |
-| `--screenshots` | off | Re-extract on-screen frames per segment into `<stem>.frames/` + write `<stem>.frames.json` |
+| `--speakers-names Alice,Bob,...` | off | Non-interactive speaker names assigned by total talk time (most talkative first) |
+| `--screenshots` | on (video) | Re-extract on-screen frames per segment into `<stem>.frames/` + write `<stem>.frames.json`. Auto-enabled for video inputs |
+| `--no-screenshots` | off | Disable the auto-enabled on-screen frame extraction for video inputs (opt out) |
 | `--screenshot-width` | `1280` | Frame width in pixels (0 = native resolution) |
 | `--no-voice-profiles` | off | Don't compute voice-profile embeddings or auto-match/save speaker profiles this run |
 | `--outputs` | `srt,json` | Comma-separated output formats; add `html` for a self-contained transcript (requires `--speakers`) |
@@ -236,9 +246,14 @@ whiz models download-diarization
 
 ### Usage
 
+For video inputs, diarization is already on by default — `whiz transcribe recording.mov` labels speakers automatically (auto-detect). The examples below show the explicit forms when you want a known count, tuning, or opt-out:
+
 ```bash
-# Auto-detect number of speakers
-whiz transcribe --speakers recording.mov
+# Video: speakers + screenshots are auto-on already
+whiz transcribe recording.mov
+
+# Opt out of diarization for a video
+whiz transcribe --no-speakers recording.mov
 
 # Known speaker count (more accurate — threshold is ignored)
 whiz transcribe --speakers 2 meeting.mp4
@@ -250,8 +265,10 @@ whiz transcribe --speakers --cluster-threshold 0.95 call.m4a
 whiz transcribe --speakers 4 --name-speakers meeting.mov
 
 # Name speakers non-interactively (assigned by total talk time, most talkative first)
-whiz transcribe --speakers 4 --speakers-names Enric,Vadim,Thomas,Dziyana meeting.mov
+whiz transcribe --speakers 4 --speakers-names Alice,Bob,Carol,Dave meeting.mov
 ```
+
+If diarization is auto-enabled but sherpa-onnx or its models aren't installed yet, whiz skips speaker labeling with a one-line hint (and still transcribes + captures screenshots) instead of crashing — run the one-time setup above to turn it on.
 
 This produces the normal whisper-cli outputs (SRT, JSON) plus two labeled files alongside the input:
 
@@ -264,7 +281,7 @@ When `--screenshots` is set (video inputs only), whiz also writes:
 - `<stem>.frames/` — one JPEG per segment (`seg0001.jpg` ...), taken at each segment's start timestamp
 - `<stem>.frames.json` — machine manifest referencing frames by path with per-segment metadata `{index, start, end, speaker, text, frame}` (no image bytes; small, re-runnable)
 
-The frames manifest is the join key for AI analysis (`whiz analyze --vision`) and for the self-contained HTML transcript (which inlines frames as base64).
+For video inputs `--screenshots` is on by default; pass `--no-screenshots` to skip it. The frames manifest is the join key for AI analysis (`whiz analyze --vision`) and for the self-contained HTML transcript (which inlines frames as base64).
 
 ### HTML transcript
 
@@ -272,15 +289,16 @@ Add `html` to `--outputs` (or pass `--outputs html` to `whiz merge`) to write a 
 
 ```bash
 # Transcribe + diarize + capture frames + write HTML transcript
-whiz transcribe --speakers 4 --screenshots --outputs srt,html recording.mov
+# (for video, --speakers and --screenshots are already on by default)
+whiz transcribe --outputs srt,html recording.mov
 
 # Add HTML to an existing run via merge (reuses diarization cache)
-whiz merge --speakers 4 --screenshots --outputs html recording.mov
+whiz merge --outputs html recording.mov
 ```
 
 The HTML file can be large (one base64-encoded JPEG per segment), but it opens in any browser with no server and no missing images. Speaker colors are assigned deterministically by a hash of the speaker label.
 
-When `--speakers` is set, whisper-cli VAD is disabled (sherpa-onnx handles speech segmentation).
+When diarization is on, whisper-cli VAD is disabled (sherpa-onnx handles speech segmentation). If diarization is auto-enabled for a video but unavailable, VAD stays on so you still get a clean transcription.
 
 **Tip:** if you know the speaker count, always pass `--speakers N`. It locks clustering to exactly N speakers and ignores the threshold — this is the single biggest accuracy lever.
 
@@ -289,7 +307,7 @@ When `--speakers` is set, whisper-cli VAD is disabled (sherpa-onnx handles speec
 There are two ways to name speakers:
 
 - **Interactive** — pass `--name-speakers` and, after transcription + diarization, whiz shows one representative quote per detected speaker (the longest utterance — most identifying) and prompts for a real name. Blank input keeps the default `Speaker A` label.
-- **Non-interactive** — pass `--speakers-names Enric,Vadim,Thomas,Dziyana` to name speakers in a single command. Names are assigned to speakers ordered by total speaking time (most talkative gets the first name). Extra names beyond the detected speaker count are ignored; speakers beyond the provided names keep their `Speaker A/B/C` labels.
+- **Non-interactive** — pass `--speakers-names Alice,Bob,Carol,Dave` to name speakers in a single command. Names are assigned to speakers ordered by total speaking time (most talkative gets the first name). Extra names beyond the detected speaker count are ignored; speakers beyond the provided names keep their `Speaker A/B/C` labels.
 
 Both can be combined: `--speakers-names` provides defaults that are shown in the `--name-speakers` prompt, so you can confirm or override each one. Real names replace the `Speaker A/B/C` labels in both `*.speakers.srt` and `*.speakers.txt`.
 
@@ -303,25 +321,28 @@ redoing the expensive transcription:
 # Re-diarize with a known count, reusing the prior whisper JSON
 whiz merge --speakers 4 recording.mov
 
+# Video: diarization + screenshots are auto-on via merge too
+whiz merge recording.mov
+
+# Opt out of the video defaults at merge time
+whiz merge --no-speakers --no-screenshots recording.mov
+
 # Name speakers at merge time too
 whiz merge --speakers 4 --name-speakers recording.mov
 
 # Name speakers non-interactively (instant — diarization cache is reused)
-whiz merge --speakers 4 --speakers-names Enric,Vadim,Thomas,Dziyana recording.mov
-
-# Capture on-screen frames per segment (for AI analysis / HTML output)
-whiz merge --speakers 4 --screenshots recording.mov
+whiz merge --speakers 4 --speakers-names Alice,Bob,Carol,Dave recording.mov
 ```
 
 ## Speaker voice profiles (cross-recording recognition)
 
 When you name a speaker (with `--name-speakers` or `--speakers-names`), whiz can save a **voice profile**: a fixed-size embedding vector for that speaker's audio, computed with the same sherpa-onnx embedding extractor used for diarization. On later recordings, each detected cluster's embedding is compared (cosine similarity) to the stored profiles and a name is auto-assigned when the best match exceeds `speaker_match_threshold` (default `0.8`).
 
-Profiles live at `~/.config/whiz/speakers/<Name>.json` (one file per name, inspectable and easy to delete). whiz saves a profile automatically whenever a speaker receives a real name — so the first time you transcribe a meeting with `--speakers-names Enric,Vadim,Thomas,Dziyana`, those four voice profiles are stored; the next recording with the same people is labeled automatically, no flags needed.
+Profiles live at `~/.config/whiz/speakers/<Name>.json` (one file per name, inspectable and easy to delete). whiz saves a profile automatically whenever a speaker receives a real name — so the first time you transcribe a meeting with `--speakers-names Alice,Bob,Carol,Dave`, those four voice profiles are stored; the next recording with the same people is labeled automatically, no flags needed.
 
 ```bash
 # First recording: name speakers explicitly — profiles are saved automatically
-whiz transcribe --speakers 4 --speakers-names Enric,Vadim,Thomas,Dziyana meeting1.mov
+whiz transcribe --speakers 4 --speakers-names Alice,Bob,Carol,Dave meeting1.mov
 
 # Later recording: speakers auto-matched from stored profiles, no flags needed
 whiz transcribe --speakers 4 meeting2.mov
@@ -333,7 +354,7 @@ whiz speakers list
 whiz speakers match meeting2.mov --speakers 4
 
 # Remove a profile (e.g. someone left the team)
-whiz speakers forget Dziyana
+whiz speakers forget Dave
 ```
 
 Naming precedence when profiles exist: voice-profile auto-match seeds the names, `--speakers-names` overrides them, and `--name-speakers` prompts interactively with the auto-matched names shown as defaults. Pass `--no-voice-profiles` to skip both auto-matching and profile saving for a run. Auto-matched clusters that don't reach the threshold keep their `Speaker A/B/C` labels for you to name manually.
@@ -342,7 +363,7 @@ The embedding pass reuses the diarization cache, so on a cached run profile matc
 
 ## AI analysis (summary, action items, vision)
 
-`whiz analyze` sends a prior transcript (and optionally on-screen frames) to a chat model via an OpenAI-compatible API ([Ollama](https://ollama.com) by default). It produces a markdown analysis (`.analysis.md`) alongside the input and prints the response to stdout. Requires a prior `whiz transcribe --speakers` (and `--screenshots` for `--vision`).
+`whiz analyze` sends a prior transcript (and optionally on-screen frames) to a chat model via an OpenAI-compatible API ([Ollama](https://ollama.com) by default). It produces a markdown analysis (`.analysis.md`) alongside the input and prints the response to stdout. Requires a prior `whiz transcribe` of a video (which auto-produces speakers + screenshots) or an audio run with `--speakers` (and `--screenshots` for `--vision`).
 
 ### Setup
 
@@ -391,7 +412,7 @@ List stored speaker voice profiles (name, embedding dimension, creation time, fi
 Delete a stored voice profile by name.
 
 ```bash
-whiz speakers forget Enric
+whiz speakers forget Alice
 ```
 
 ### `whiz speakers match <file>`

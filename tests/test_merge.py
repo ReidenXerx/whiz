@@ -73,8 +73,8 @@ def test_speakers_in_order_of_appearance():
 
 def test_relabel_replaces_names():
     merged = [(_seg(0, 1, "hi"), "Speaker A"), (_seg(1, 2, "yo"), "Speaker B")]
-    out = MR.relabel(merged, {"Speaker A": "Enric"})
-    assert out[0][1] == "Enric"
+    out = MR.relabel(merged, {"Speaker A": "Alice"})
+    assert out[0][1] == "Alice"
     assert out[1][1] == "Speaker B"  # untouched
 
 

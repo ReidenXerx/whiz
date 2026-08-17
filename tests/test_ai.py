@@ -50,12 +50,12 @@ def test_resolve_prompt_summary_and_actions_explicit():
 def test_transcript_text_with_frame_entries():
     from whiz.screenshots import FrameEntry
     entries = [
-        FrameEntry(index=1, start=0.0, end=2.0, speaker="Enric", text="hello", frame="seg0001.jpg"),
-        FrameEntry(index=2, start=2.0, end=4.0, speaker="Vadim", text="world", frame="seg0002.jpg"),
+        FrameEntry(index=1, start=0.0, end=2.0, speaker="Alice", text="hello", frame="seg0001.jpg"),
+        FrameEntry(index=2, start=2.0, end=4.0, speaker="Bob", text="world", frame="seg0002.jpg"),
     ]
     txt = AI.transcript_text(entries)
-    assert "[00:00:00] Enric: hello" in txt
-    assert "[00:00:02] Vadim: world" in txt
+    assert "[00:00:00] Alice: hello" in txt
+    assert "[00:00:02] Bob: world" in txt
 
 
 def test_transcript_text_with_merged_tuples():

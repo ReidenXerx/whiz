@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "whiz"
-version = "0.8.1"
+version = "0.9.0"
 description = "A handy CLI wrapper around whisper-cli (whisper.cpp) — auto-finds models, extracts audio from video, sensible defaults."
 readme = "README.md"
 license = { text = "MIT" }

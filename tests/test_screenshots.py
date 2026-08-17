@@ -60,8 +60,8 @@ def test_extract_frames_dry_run_names_entries(tmp_path):
 
 def test_manifest_round_trip(tmp_path):
     entries = [
-        SC.FrameEntry(index=1, start=0.0, end=2.5, speaker="Enric", text="hello", frame="seg0001.jpg"),
-        SC.FrameEntry(index=2, start=2.5, end=5.0, speaker="Vadim", text="world", frame="seg0002.jpg"),
+        SC.FrameEntry(index=1, start=0.0, end=2.5, speaker="Alice", text="hello", frame="seg0001.jpg"),
+        SC.FrameEntry(index=2, start=2.5, end=5.0, speaker="Bob", text="world", frame="seg0002.jpg"),
     ]
     out_dir = tmp_path / "rec.frames"
     out_dir.mkdir()
@@ -72,7 +72,7 @@ def test_manifest_round_trip(tmp_path):
     loaded = SC.load_manifest(manifest)
     assert loaded is not None
     assert len(loaded) == 2
-    assert loaded[0].speaker == "Enric"
+    assert loaded[0].speaker == "Alice"
     assert loaded[1].frame == "seg0002.jpg"
     assert loaded[0].index == 1
 

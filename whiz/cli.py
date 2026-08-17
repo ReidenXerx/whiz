@@ -108,9 +108,65 @@ def _fmt_elapsed(seconds: float) -> str:
 
 # ---------- transcribe ----------
 
+def _video_auto_flags(args: argparse.Namespace, in_path: Path) -> tuple[bool, bool]:
+    """Resolve effective (screenshots, speakers) for a video input.
+
+    For video inputs whiz auto-enables screenshots and diarization so the user
+    doesn't have to pass ``--screenshots`` / ``--speakers`` every time. The
+    opt-out flags ``--no-screenshots`` / ``--no-speakers`` disable either.
+    Explicit ``--speakers`` / ``--screenshots`` (the on-switches) still work
+    and imply intent; this helper only adds defaults the user omitted.
+
+    Returns (screenshots, speakers_auto) where ``speakers_auto`` is True when
+    diarization should run via auto-detect (the caller still needs to honor an
+    explicit ``args.speakers`` count). For non-video inputs both stay as-is.
+    """
+    is_video = aud.needs_extraction(in_path)
+    screenshots = args.screenshots or (is_video and not getattr(args, "no_screenshots", False))
+    # Diarization auto-enable: video + not explicitly disabled. An explicit
+    # --speakers (args.speakers is not None) already enables it with a count.
+    speakers_auto = is_video and not getattr(args, "no_speakers", False)
+    return screenshots, speakers_auto
+
+
+def _diarization_available(config: cfg.Config) -> bool:
+    """True if sherpa-onnx + diarization models are ready (no heavy import).
+
+    The segmentation/embedding model files are checked via the diarize module's
+    finders (filesystem only); sherpa_onnx itself is imported lazily just to
+    confirm the package is present. Used to gracefully skip auto-enabled
+    diarization on machines that haven't run the one-time setup.
+    """
+    if D.find_segmentation_model(config) is None or D.find_embedding_model(config) is None:
+        return False
+    try:
+        import sherpa_onnx  # type: ignore[import-not-found]  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list[str]:
     """Assemble the whisper-cli argv."""
-    diarize_enabled = args.speakers is not None
+    # Resolve input file first so video auto-enable can inform diarize_enabled.
+    in_path = Path(args.file).expanduser()
+    if not in_path.exists():
+        raise SystemExit(f"Input file not found: {in_path}")
+    screenshots, speakers_auto = _video_auto_flags(args, in_path)
+    # diarize_enabled is True when the user passed --speakers (with or without
+    # a count) OR when it's auto-enabled for a video input.
+    diarize_enabled = args.speakers is not None or speakers_auto
+    # Graceful fallback: if diarization was only auto-enabled (not explicitly
+    # requested) but sherpa-onnx/models aren't available, skip it silently with
+    # a hint instead of crashing. VAD then stays on and screenshots still run.
+    if speakers_auto and args.speakers is None and not _diarization_available(config):
+        print("Speakers: diarization not available (sherpa-onnx or models missing); "
+              "skipping speaker labels for this run.", file=sys.stderr)
+        print("  Enable with:  pipx inject whiz sherpa-onnx && whiz models download-diarization",
+              file=sys.stderr)
+        print("  Or silence this with: --no-speakers", file=sys.stderr)
+        diarize_enabled = False
+        speakers_auto = False
     # Resolve model.
     model_ref = args.model or config.model
     if model_ref:
@@ -126,11 +182,6 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
             raise SystemExit(
                 "No models found. Run `whiz models download turbo` to get a fast one."
             )
-
-    # Resolve input file.
-    in_path = Path(args.file).expanduser()
-    if not in_path.exists():
-        raise SystemExit(f"Input file not found: {in_path}")
 
     # Extract audio if it's a video container.
     keep_wav = args.keep_wav
@@ -154,9 +205,10 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
 
     # Outputs.
     outputs = args.outputs if args.outputs else config.outputs
-    # When diarizing we need a parseable whisper output to merge against.
-    # Force JSON (in addition to any user-requested formats) so we can parse segments.
-    if diarize_enabled and "json" not in outputs and "json-full" not in outputs:
+    # We need a parseable whisper JSON to merge diarization against AND to
+    # drive the per-segment screenshots path (even without diarization). Force
+    # JSON (in addition to any user-requested formats) so we can parse segments.
+    if (diarize_enabled or screenshots) and "json" not in outputs and "json-full" not in outputs:
         outputs = list(outputs) + ["json"]
     out_flags = []
     for o in outputs:
@@ -230,7 +282,7 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
     if args.extra:
         cmd += args.extra
 
-    return cmd, model_path, wav, in_path, keep_wav, of_base
+    return cmd, model_path, wav, in_path, keep_wav, of_base, diarize_enabled, screenshots
 
 
 def _output_base_path(args, wav: Path) -> Path:
@@ -271,7 +323,7 @@ def _apply_speaker_names_list(
 
     Returns the relabeled merged list and the {label: name} map used. Speakers
     beyond the provided names keep their default ``Speaker X`` label.
-    ``names`` may be a single comma-separated token (``["Enric,Vadim"]``) or
+    ``names`` may be a single comma-separated token (``["Alice,Bob"]``) or
     multiple tokens; both are flattened into a flat name list.
     """
     flat: list[str] = []
@@ -292,7 +344,7 @@ def _prompt_speaker_names(
     """Interactively ask the user to name each detected speaker.
 
     Shows one representative quote per speaker (the longest utterance) and
-    prompts for a real name. Returns a {"Speaker A": "Enric", ...} map.
+    prompts for a real name. Returns a {"Speaker A": "Alice", ...} map.
     Blank input keeps the default label. When ``default_names`` is supplied
     (from ``--speakers-names``), the suggested name is shown in the prompt
     and used as the value if the user presses Enter.
@@ -461,15 +513,47 @@ def _write_labeled_outputs(
     return srt_out, txt_out, name_map
 
 
+def _run_diarize_or_fallback(wav: Path, config: cfg.Config, args: argparse.Namespace) -> list[D.DiarSegment]:
+    """Run diarization, returning [] and a hint if sherpa-onnx/models are missing.
+
+    An explicitly-requested diarization (``--speakers``) that fails because the
+    runtime/models aren't installed surfaces a clear hint but still returns []
+    so the caller can fall back to the unlabeled (or screenshots-only) path
+    instead of crashing. A truly transient failure is re-raised.
+    """
+    num_sp = args.speakers if args.speakers else 0
+    thr = args.cluster_threshold if args.cluster_threshold is not None else config.cluster_threshold
+    try:
+        diar_segments = D.run_diarization(wav, config, num_speakers=num_sp, threshold=thr)
+    except RuntimeError as e:
+        msg = str(e)
+        if "sherpa_onnx" in msg or "models not found" in msg or "download-diarization" in msg:
+            print(f"Speakers: diarization unavailable — {msg.splitlines()[0]}", file=sys.stderr)
+            print("  Skipping speaker labels for this run. Enable with:", file=sys.stderr)
+            print("    pipx inject whiz sherpa-onnx && whiz models download-diarization", file=sys.stderr)
+            return []
+        raise
+    if not diar_segments:
+        print("Warning: diarization produced no segments; falling back to unlabeled output.", file=sys.stderr)
+    return diar_segments
+
+
 def cmd_transcribe(args: argparse.Namespace) -> int:
     config = cfg.load()
-    cmd, model_path, wav, in_path, keep_wav, of_base = _build_transcribe_args(args, config)
-    diarize_enabled = args.speakers is not None
+    cmd, model_path, wav, in_path, keep_wav, of_base, diarize_enabled, screenshots = _build_transcribe_args(args, config)
 
     print(f"Model:  {model_path}", file=sys.stderr)
     print(f"Input:  {in_path}", file=sys.stderr)
     if wav != in_path:
         print(f"Audio:  {wav}", file=sys.stderr)
+    if aud.needs_extraction(in_path):
+        flags = []
+        if screenshots:
+            flags.append("screenshots=on" if not args.screenshots else "screenshots=on (explicit)")
+        if diarize_enabled:
+            flags.append("speakers=on" if args.speakers is None else f"speakers={args.speakers or 'auto'} (explicit)")
+        if flags:
+            print(f"Video input — auto-enabled: {', '.join(flags)}", file=sys.stderr)
     print(f"Run:    {' '.join(cmd)}", file=sys.stderr)
     print("-" * 60, file=sys.stderr)
 
@@ -487,25 +571,18 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     # It's an ergonomic alias for `whiz merge` triggered from transcribe.
     json_path = _find_whisper_json(of_base, wav, of_passed=bool(args.output))
     resuming = bool(getattr(args, "resume", False) and json_path.exists())
+    diar_segments: list[D.DiarSegment] = []
     if resuming:
         print(f"--resume: found existing whisper JSON {json_path}; skipping transcription.", file=sys.stderr)
         rc = 0
         # Diarization still runs so a new --speakers count / threshold takes
         # effect against the existing transcription.
         if diarize_enabled:
-            num_sp = args.speakers if args.speakers else 0
-            thr = args.cluster_threshold if args.cluster_threshold is not None else config.cluster_threshold
-            diar_segments = D.run_diarization(wav, config, num_speakers=num_sp, threshold=thr)
-            if not diar_segments:
-                print("Warning: diarization produced no segments; falling back to unlabeled output.", file=sys.stderr)
+            diar_segments = _run_diarize_or_fallback(wav, config, args)
     else:
         # --- Diarization path ---
         if diarize_enabled:
-            num_sp = args.speakers if args.speakers else 0
-            thr = args.cluster_threshold if args.cluster_threshold is not None else config.cluster_threshold
-            diar_segments = D.run_diarization(wav, config, num_speakers=num_sp, threshold=thr)
-            if not diar_segments:
-                print("Warning: diarization produced no segments; falling back to unlabeled output.", file=sys.stderr)
+            diar_segments = _run_diarize_or_fallback(wav, config, args)
 
         proc = _run_whisper_streaming(cmd)
         rc = proc.returncode
@@ -524,7 +601,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             if whisper_segs and diar_segments:
                 merged = MR.assign_speakers(whisper_segs, diar_segments)
                 want_html = _outputs_include(args, config, "html")
-                want_frames = args.screenshots and aud.needs_extraction(in_path)
+                want_frames = screenshots and aud.needs_extraction(in_path)
                 # Voice profiles: compute per-cluster embeddings and auto-match
                 # against any stored profiles. The match seeds speaker names
                 # (used as defaults); --speakers-names/--name-speakers can override.
@@ -580,10 +657,10 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                     )
 
     # --- Screenshots without diarization ---
-    # `whiz transcribe --screenshots` without --speakers: one frame per whisper
-    # segment, labeled with a single generic speaker.
+    # Video input (or explicit --screenshots) without usable diarization: one
+    # frame per whisper segment, labeled with a single generic speaker.
     if (
-        args.screenshots
+        screenshots
         and not diarize_enabled
         and rc == 0
         and aud.needs_extraction(in_path)
@@ -775,6 +852,11 @@ def cmd_merge(args: argparse.Namespace) -> int:
     if not in_path.exists():
         raise SystemExit(f"Input file not found: {in_path}")
 
+    # Video inputs auto-enable screenshots + diarization here too (opt out with
+    # --no-screenshots / --no-speakers), matching `whiz transcribe`.
+    screenshots, speakers_auto = _video_auto_flags(args, in_path)
+    speakers_requested = args.speakers is not None or speakers_auto
+
     # Resolve the audio (WAV) to diarize. Reuse an existing sibling WAV if the
     # transcribe run kept it; otherwise re-extract from the video.
     if aud.is_audio(in_path):
@@ -792,7 +874,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
     if not json_path.exists():
         raise SystemExit(
             f"No whisper JSON found (looked for {json_path}).\n"
-            "Run `whiz transcribe --speakers <file>` first to produce one, or pass --json <path>."
+            "Run `whiz transcribe <file>` first to produce one, or pass --json <path>."
         )
     print(f"Whisper JSON:  {json_path}", file=sys.stderr)
 
@@ -804,36 +886,57 @@ def cmd_merge(args: argparse.Namespace) -> int:
         raise SystemExit(f"No segments parsed from {json_path}.")
     print(f"Whisper segments: {len(whisper_segs)}", file=sys.stderr)
 
-    # Diarization params.
-    num_sp = args.speakers if args.speakers else 0
-    thr = args.cluster_threshold if args.cluster_threshold is not None else config.cluster_threshold
-    print(f"Diarize: num_speakers={num_sp or 'auto'} cluster_threshold={thr}", file=sys.stderr)
-
-    diar_segments = D.run_diarization(wav, config, num_speakers=num_sp, threshold=thr)
-    if not diar_segments:
-        raise SystemExit("Diarization produced no segments; cannot merge.")
-
-    merged = MR.assign_speakers(whisper_segs, diar_segments)
-
     of_base = json_path.with_suffix("")  # e.g. ...16.03.40.wav -> ...16.03.40
     # For the wav.json case, of_base should be the input stem without .json.
     if json_path.name.endswith(".wav.json"):
         of_base = json_path.with_name(json_path.name[: -len(".json")])  # ...16.03.40.wav
         of_base = of_base.with_suffix("")  # ...16.03.40
 
+    # Diarization params.
+    num_sp = args.speakers if args.speakers else 0
+    thr = args.cluster_threshold if args.cluster_threshold is not None else config.cluster_threshold
+    print(f"Diarize: num_speakers={num_sp or 'auto'} cluster_threshold={thr}", file=sys.stderr)
+
+    try:
+        diar_segments = D.run_diarization(wav, config, num_speakers=num_sp, threshold=thr)
+    except RuntimeError as e:
+        msg = str(e)
+        if "sherpa_onnx" in msg or "models not found" in msg or "download-diarization" in msg:
+            if speakers_auto and args.speakers is None:
+                # Auto-enabled only: fall back to screenshots-only, don't crash.
+                print(f"Speakers: diarization unavailable — {msg.splitlines()[0]}", file=sys.stderr)
+                print("  Skipping speaker labels. Enable with:", file=sys.stderr)
+                print("    pipx inject whiz sherpa-onnx && whiz models download-diarization", file=sys.stderr)
+                diar_segments = []
+            else:
+                raise SystemExit(
+                    f"{msg}\nEnable diarization with: pipx inject whiz sherpa-onnx && "
+                    f"whiz models download-diarization"
+                )
+        else:
+            raise
+    if not diar_segments:
+        if speakers_requested:
+            print("Diarization produced no segments; writing screenshots only.", file=sys.stderr)
+        else:
+            raise SystemExit("Diarization produced no segments; cannot merge.")
+
+    merged = MR.assign_speakers(whisper_segs, diar_segments) if diar_segments else []
+
     # Speaker tally to stderr for quick tuning feedback (before relabeling).
-    from collections import Counter
-    tally = Counter(label for _, label in merged)
-    print(f"Detected speakers: {len(tally)}", file=sys.stderr)
-    for label, n in tally.most_common():
-        print(f"  {label}: {n} segments", file=sys.stderr)
+    if merged:
+        from collections import Counter
+        tally = Counter(label for _, label in merged)
+        print(f"Detected speakers: {len(tally)}", file=sys.stderr)
+        for label, n in tally.most_common():
+            print(f"  {label}: {n} segments", file=sys.stderr)
 
     # Voice profiles: compute per-cluster embeddings and auto-match against any
     # stored profiles. Matched names seed the speaker labels; --speakers-names
     # / --name-speakers can override. Embeddings are reused for profile saving.
     profile_names: dict[str, str] = {}
     cluster_embeddings: dict[int, list[float]] = {}
-    if not args.no_voice_profiles:
+    if merged and not args.no_voice_profiles:
         try:
             cluster_embeddings = P.compute_speaker_embeddings(wav, diar_segments, config)
             if cluster_embeddings:
@@ -844,26 +947,28 @@ def cmd_merge(args: argparse.Namespace) -> int:
         except Exception as e:  # noqa: BLE001
             print(f"Warning: voice-profile matching skipped: {e}", file=sys.stderr)
 
-    srt_out, txt_out, name_map = _write_labeled_outputs(
-        merged, of_base,
-        name_speakers=args.name_speakers,
-        speakers_names=args.speakers_names,
-        html=_outputs_include(args, config, "html") and not (args.screenshots and aud.needs_extraction(in_path)),
-        title=in_path.name,
-        profile_names=profile_names or None,
-        cluster_embeddings=cluster_embeddings or None,
-        save_profiles=config.save_voice_profiles and not args.no_voice_profiles,
-    )
-    print(f"Wrote labeled SRT:  {srt_out}", file=sys.stderr)
-    print(f"Wrote dialogue TXT: {txt_out}", file=sys.stderr)
+    if merged:
+        srt_out, txt_out, name_map = _write_labeled_outputs(
+            merged, of_base,
+            name_speakers=args.name_speakers,
+            speakers_names=args.speakers_names,
+            html=_outputs_include(args, config, "html") and not (screenshots and aud.needs_extraction(in_path)),
+            title=in_path.name,
+            profile_names=profile_names or None,
+            cluster_embeddings=cluster_embeddings or None,
+            save_profiles=config.save_voice_profiles and not args.no_voice_profiles,
+        )
+        print(f"Wrote labeled SRT:  {srt_out}", file=sys.stderr)
+        print(f"Wrote dialogue TXT: {txt_out}", file=sys.stderr)
 
     # Video screenshots: re-extract frames against the existing merged list.
     # Frame extraction is cheap (~seconds), so merge --screenshots re-runs it.
     frames_dir = None
-    if args.screenshots and aud.needs_extraction(in_path):
+    if screenshots and aud.needs_extraction(in_path):
         width = args.screenshot_width if args.screenshot_width is not None else 1280
+        shot_list = merged if merged else [(seg, "Speaker") for seg in whisper_segs]
         result = _extract_and_manifest_screenshots(
-            in_path, merged, of_base,
+            in_path, shot_list, of_base,
             ffmpeg=aud.find_ffmpeg(config.ffmpeg),
             width=width,
             dry_run=False,
@@ -871,7 +976,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         if result is not None:
             frames_dir = result[0]
     # Write HTML after frames exist so they can be inlined.
-    if _outputs_include(args, config, "html") and frames_dir is not None:
+    if _outputs_include(args, config, "html") and frames_dir is not None and merged:
         _write_labeled_outputs(
             merged, of_base,
             name_speakers=False,
@@ -1051,11 +1156,13 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--no-progress", dest="no_progress", action="store_true", help="Disable whisper-cli progress passthrough (forces -np)")
     t.add_argument("--keep-wav", action="store_true", help="Keep the intermediate extracted WAV (default: deleted after)")
     t.add_argument("--no-auto-vad-download", action="store_true", help="Don't auto-download the Silero VAD model when VAD is enabled and missing")
-    t.add_argument("--speakers", type=int, default=None, nargs="?", const=0, help="Enable speaker diarization via sherpa-onnx. Optional integer = known speaker count; omit = auto-detect")
+    t.add_argument("--speakers", type=int, default=None, nargs="?", const=0, help="Enable speaker diarization via sherpa-onnx. Optional integer = known speaker count; omit = auto-detect. Auto-enabled for video inputs (see --no-speakers)")
+    t.add_argument("--no-speakers", dest="no_speakers", action="store_true", help="Disable the auto-enabled speaker diarization for video inputs (opt out)")
     t.add_argument("--cluster-threshold", type=float, default=None, help="Diarization clustering threshold when auto-detecting (larger = fewer speakers; default 0.9)")
     t.add_argument("--name-speakers", action="store_true", help="After transcription, interactively prompt to name each detected speaker (replaces Speaker A/B/C with real names)")
-    t.add_argument("--speakers-names", dest="speakers_names", nargs="+", default=None, help="Non-interactive speaker names assigned by total talk time (most talkative first), e.g. --speakers-names Enric,Vadim,Thomas,Dziyana")
-    t.add_argument("--screenshots", action="store_true", help="For video inputs, extract one on-screen frame per transcribed segment into <stem>.frames/ and write <stem>.frames.json (for AI analysis / HTML output)")
+    t.add_argument("--speakers-names", dest="speakers_names", nargs="+", default=None, help="Non-interactive speaker names assigned by total talk time (most talkative first), e.g. --speakers-names Alice,Bob,Carol,Dave")
+    t.add_argument("--screenshots", action="store_true", help="For video inputs, extract one on-screen frame per transcribed segment into <stem>.frames/ and write <stem>.frames.json (for AI analysis / HTML output). Auto-enabled for video inputs (see --no-screenshots)")
+    t.add_argument("--no-screenshots", dest="no_screenshots", action="store_true", help="Disable the auto-enabled on-screen frame extraction for video inputs (opt out)")
     t.add_argument("--screenshot-width", type=int, default=None, help="Frame width in pixels (default 1280; 0 = native resolution)")
     t.add_argument("--no-voice-profiles", dest="no_voice_profiles", action="store_true", help="Don't compute voice-profile embeddings or auto-match/save speaker profiles this run")
     t.add_argument("--resume", action="store_true", help="Skip whisper-cli transcription if its JSON output already exists and go straight to diarization + merge (ergonomic alias for `whiz merge`)"),
@@ -1069,11 +1176,13 @@ def build_parser() -> argparse.ArgumentParser:
     mg.add_argument("file", help="Input audio/video file (used to find the whisper JSON and re-extract WAV if needed)")
     mg.add_argument("--json", default="", help="Explicit path to the whisper JSON (default: auto-find next to input)")
     mg.add_argument("--outputs", default=None, help="Comma-separated whiz post-merge output formats: html (others are whisper-cli formats, ignored here)")
-    mg.add_argument("--speakers", type=int, default=None, nargs="?", const=0, help="Known speaker count; omit = auto-detect")
+    mg.add_argument("--speakers", type=int, default=None, nargs="?", const=0, help="Known speaker count; omit = auto-detect. Auto-enabled for video inputs (see --no-speakers)")
+    mg.add_argument("--no-speakers", dest="no_speakers", action="store_true", help="Disable the auto-enabled speaker diarization for video inputs (opt out)")
     mg.add_argument("--cluster-threshold", type=float, default=None, help="Clustering threshold when auto-detecting (larger = fewer speakers; default 0.9)")
     mg.add_argument("--name-speakers", action="store_true", help="Interactively prompt to name each detected speaker (replaces Speaker A/B/C with real names)")
-    mg.add_argument("--speakers-names", dest="speakers_names", nargs="+", default=None, help="Non-interactive speaker names assigned by total talk time (most talkative first), e.g. --speakers-names Enric,Vadim,Thomas,Dziyana")
-    mg.add_argument("--screenshots", action="store_true", help="Re-extract on-screen frames per segment into <stem>.frames/ and write <stem>.frames.json")
+    mg.add_argument("--speakers-names", dest="speakers_names", nargs="+", default=None, help="Non-interactive speaker names assigned by total talk time (most talkative first), e.g. --speakers-names Alice,Bob,Carol,Dave")
+    mg.add_argument("--screenshots", action="store_true", help="Re-extract on-screen frames per segment into <stem>.frames/ and write <stem>.frames.json. Auto-enabled for video inputs (see --no-screenshots)")
+    mg.add_argument("--no-screenshots", dest="no_screenshots", action="store_true", help="Disable the auto-enabled on-screen frame extraction for video inputs (opt out)")
     mg.add_argument("--screenshot-width", type=int, default=None, help="Frame width in pixels (default 1280; 0 = native resolution)")
     mg.add_argument("--no-voice-profiles", dest="no_voice_profiles", action="store_true", help="Don't compute voice-profile embeddings or auto-match/save speaker profiles this run")
     mg.set_defaults(func=cmd_merge)

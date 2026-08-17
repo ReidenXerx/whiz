@@ -93,20 +93,20 @@ def test_cosine_similarity_different_lengths_uses_min():
 
 def test_match_speakers_assigns_above_threshold():
     profiles = [
-        P.Profile(name="Enric", embedding=[1.0, 0.0], dim=2, created=""),
-        P.Profile(name="Vadim", embedding=[0.0, 1.0], dim=2, created=""),
+        P.Profile(name="Alice", embedding=[1.0, 0.0], dim=2, created=""),
+        P.Profile(name="Bob", embedding=[0.0, 1.0], dim=2, created=""),
     ]
     clusters = {
-        0: [1.0, 0.0],  # matches Enric
-        1: [0.0, 1.0],  # matches Vadim
+        0: [1.0, 0.0],  # matches Alice
+        1: [0.0, 1.0],  # matches Bob
     }
     matches = P.match_speakers(clusters, profiles, threshold=0.8)
-    assert matches[0] is not None and matches[0][0] == "Enric"
-    assert matches[1] is not None and matches[1][0] == "Vadim"
+    assert matches[0] is not None and matches[0][0] == "Alice"
+    assert matches[1] is not None and matches[1][0] == "Bob"
 
 
 def test_match_speakers_below_threshold_returns_none():
-    profiles = [P.Profile(name="Enric", embedding=[1.0, 0.0], dim=2, created="")]
+    profiles = [P.Profile(name="Alice", embedding=[1.0, 0.0], dim=2, created="")]
     clusters = {0: [0.0, 1.0]}  # orthogonal -> score 0
     matches = P.match_speakers(clusters, profiles, threshold=0.8)
     assert matches[0] is None
@@ -114,14 +114,14 @@ def test_match_speakers_below_threshold_returns_none():
 
 def test_match_speakers_one_to_one_no_double_assignment():
     """A profile can't be assigned to two clusters even if it's the best for both."""
-    profiles = [P.Profile(name="Enric", embedding=[1.0, 0.0], dim=2, created="")]
+    profiles = [P.Profile(name="Alice", embedding=[1.0, 0.0], dim=2, created="")]
     clusters = {
-        0: [1.0, 0.0],  # matches Enric at 1.0
-        1: [0.99, 0.01], # also near Enric but lower score
+        0: [1.0, 0.0],  # matches Alice at 1.0
+        1: [0.99, 0.01], # also near Alice but lower score
     }
     matches = P.match_speakers(clusters, profiles, threshold=0.8)
-    # Only the best cluster (0) gets Enric; cluster 1 gets None.
-    assert matches[0] is not None and matches[0][0] == "Enric"
+    # Only the best cluster (0) gets Alice; cluster 1 gets None.
+    assert matches[0] is not None and matches[0][0] == "Alice"
     assert matches[1] is None
 
 
@@ -133,7 +133,7 @@ def test_match_speakers_empty_profiles_all_none():
 
 
 def test_match_speakers_empty_clusters():
-    profiles = [P.Profile(name="Enric", embedding=[1.0], dim=1, created="")]
+    profiles = [P.Profile(name="Alice", embedding=[1.0], dim=1, created="")]
     assert P.match_speakers({}, profiles, threshold=0.8) == {}
 
 
@@ -143,13 +143,13 @@ def test_save_load_forget_profile(tmp_path, monkeypatch):
     monkeypatch.setattr("whiz.profiles.cfg.CONFIG_DIR", tmp_path)
     # save_profile writes to profiles_dir() which reads cfg.CONFIG_DIR at call
     # time, so the monkeypatch takes effect.
-    P.save_profile("Enric", [1.0, 2.0, 3.0], samples=5)
+    P.save_profile("Alice", [1.0, 2.0, 3.0], samples=5)
     profiles = P.load_profiles()
     assert len(profiles) == 1
-    assert profiles[0].name == "Enric"
+    assert profiles[0].name == "Alice"
     assert profiles[0].dim == 3
     assert profiles[0].samples == 5
 
-    assert P.forget_profile("Enric") is True
+    assert P.forget_profile("Alice") is True
     assert P.load_profiles() == []
-    assert P.forget_profile("Enric") is False  # already gone
+    assert P.forget_profile("Alice") is False  # already gone

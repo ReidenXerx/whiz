@@ -11,7 +11,7 @@ auto-assigned when the best match exceeds ``speaker_match_threshold``
 Profiles live at ``~/.config/whiz/speakers/<Name>.json``::
 
     {
-      "name": "Enric",
+      "name": "Alice",
       "dim": 256,
       "embedding": [0.0123, -0.0456, ...],
       "created": "2026-08-17T01:11:55Z",
