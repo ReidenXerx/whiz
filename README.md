@@ -412,12 +412,15 @@ The embedding pass reuses the diarization cache, so on a cached run profile matc
 Pass `--analyze` to `whiz transcribe` to chain straight into analysis once transcription finishes — no separate `whiz analyze` call needed. It runs the same auto-detect path (see below):
 
 ```bash
-# Transcribe + diarize + screenshots, then auto-analyze (summary+actions or plan)
+# Transcribe + diarize + screenshots, then auto-analyze (summary+actions or plan).
+# For video, frames are captured automatically; vision analysis auto-enables
+# when the configured AI model is vision-capable (e.g. llava, qwen2.5-vl).
 whiz transcribe --analyze recording.mov
 
-# Same, but send the on-screen frames to a vision model (video inputs already
-# capture screenshots, so this just feeds them to the analysis)
-whiz transcribe --analyze --vision recording.mov
+# Force feeding the on-screen frames to a vision model even for a non-video
+# (audio + --screenshots) run, or skip frames and analyze text-only:
+whiz transcribe --analyze --vision call-with-screenshots.m4a
+whiz transcribe --analyze --no-vision recording.mov
 ```
 
 The analysis output (`.analysis.md`) is written alongside the other transcript artifacts. If analysis fails (Ollama down, no model picked), the transcription itself still succeeded — whiz prints a hint and keeps the transcript files.
@@ -466,10 +469,14 @@ whiz analyze recording.mov --plan
 # Freeform question (use {transcript} where the transcript should go)
 whiz analyze recording.mov --prompt "What risks did the team raise? Transcript: {transcript}"
 
-# Vision analysis: send on-screen frames to a vision model (requires a prior
-# transcribe of a video, which auto-captures screenshots; frames are spread
-# evenly, capped at ai_max_frames=50)
+# Vision analysis: send on-screen frames to a vision model. This is AUTO-ENABLED
+# when a frames manifest exists and the model is vision-capable, so for a video
+# run you usually don't need --vision. Use --no-vision to opt out, or --vision
+# to force it on when you have a frames manifest but a non-auto-enabling setup.
 whiz analyze recording.mov --vision --summary
+
+# Stay text-only even though frames exist
+whiz analyze recording.mov --no-vision
 ```
 
 The implementation-plan output (from `--plan` or auto-detected `PLAN`) follows this structure:
@@ -482,7 +489,7 @@ The implementation-plan output (from `--plan` or auto-detected `PLAN`) follows t
 - **Open questions** — unresolved questions that need a decision or more info
 - **Acceptance criteria** — a checklist (`- [ ] ...`) of 'done' conditions
 
-`--vision` requires a vision-capable model (`llava`, `qwen2.5-vl`, `minicpm-v`, `gpt-4o`, ...). whiz detects a text-only model rejecting images and prints a clear hint. Frames are base64-encoded only at send time, so the on-disk `.frames.json` manifest stays small (paths only).
+`--vision` requires a vision-capable model (`llava`, `qwen2.5-vl`, `minicpm-v`, `gpt-4o`, ...). Vision analysis **auto-enables** when (a) a frames manifest exists (i.e. you transcribed a video, which auto-captures screenshots) and (b) the configured `ai_model` looks vision-capable by name — so a plain `whiz analyze recording.mov` after a video transcription feeds the frames to the model without any flag. Pass `--no-vision` to opt out. If frames exist but the model looks text-only (e.g. `gpt-oss`, `llama`, `qwen`), whiz stays text-only and prints a hint to switch models rather than sending images that the model would reject. whiz also detects a text-only model rejecting images at call time and prints a clear hint. Frames are base64-encoded only at send time, so the on-disk `.frames.json` manifest stays small (paths only).
 
 ### Chunked analysis (rolling-context map-reduce)
 

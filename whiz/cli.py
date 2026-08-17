@@ -761,6 +761,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             plan=False,
             prompt="",
             vision=getattr(args, "vision", False) or False,
+            no_vision=getattr(args, "no_vision", False) or False,
         )
         ui.phase("analyzing (chained)")
         try:
@@ -858,9 +859,7 @@ def _recommend_model(models: list[str], prefer_vision: bool) -> int:
     """
     if not models:
         return 0
-    vision_tokens = ("vl", "vision", "llava", "minicpm-v", "qwen2.5-vl", "multimodal")
-    text_tokens = ("gpt", "qwen", "llama", "mistral", "mixtral", "glm", "deepseek", "devstral", "codestral", "coder")
-    want_tokens = vision_tokens if prefer_vision else text_tokens
+    want_tokens = _VISION_TOKENS if prefer_vision else _TEXT_TOKENS
     best_idx = 0
     best_score = -1
     for i, name in enumerate(models):
@@ -875,6 +874,66 @@ def _recommend_model(models: list[str], prefer_vision: bool) -> int:
             best_score = score
             best_idx = i
     return best_idx
+
+
+# Substrings (lowercased) in a model name that signal vision capability. Used
+# both by the model-recommend heuristic and the analyze-time vision gate so a
+# single source of truth decides whether sending images is safe.
+_VISION_TOKENS = ("vl", "vision", "llava", "minicpm-v", "qwen2.5-vl", "qwen-vl",
+                  "multimodal", "gpt-4o", "gpt-4-vision", "llama-3.2-vision",
+                  "pixtral", "cogvlm", "internvl", "phi-3.5-vision", "phi-3-vision")
+# Substrings that signal a strong text/coder model (non-vision).
+_TEXT_TOKENS = ("gpt", "qwen", "llama", "mistral", "mixtral", "glm", "deepseek",
+                "devstral", "codestral", "coder")
+
+
+def _looks_vision_capable(model: str) -> bool:
+    """True if ``model``'s name suggests it can accept image inputs.
+
+    This is a name heuristic only (no probing) so it's fast and offline. It errs
+    on the side of "not vision" for ambiguous names so we never send images to a
+    model that will reject them. The HTTP layer prints a clear hint if a text
+    model still gets image content.
+    """
+    low = (model or "").lower()
+    return any(tok in low for tok in _VISION_TOKENS)
+
+
+def _resolve_vision(*, explicit_vision: bool, no_vision: bool, has_frames: bool, model: str) -> tuple[bool, str, str]:
+    """Decide whether analysis should use vision (feed frames to the model).
+
+    Returns ``(use_vision, kind, message)`` where ``kind`` is a ui status kind
+    ("", "info", "warn", "hint") and ``message`` is a one-line explanation to show
+    the user (empty when there's nothing worth surfacing).
+
+    Priority:
+      * ``--no-vision`` always disables (opt out), even if ``--vision`` was set.
+      * ``--vision`` explicitly requests it; if no frames manifest exists we
+        fall back to text-only with a warning.
+      * Otherwise: when frames exist AND the configured model looks vision-
+        capable, auto-enable (info). When frames exist but the model looks
+        text-only, stay text-only with a hint to switch models (we never send
+        images to a model that will reject them).
+      * No frames: text-only, silently.
+    """
+    if no_vision:
+        return False, "", ""
+    if explicit_vision:
+        if not has_frames:
+            return False, "warn", "--vision requested but no frames manifest found; falling back to text-only."
+        if not _looks_vision_capable(model):
+            return False, "warn", ("--vision requested but the model '{m}' doesn't look "
+                                   "vision-capable; falling back to text-only to avoid a "
+                                   "image-rejection error.").format(m=model)
+        return True, "", ""
+    if not has_frames:
+        return False, "", ""
+    if _looks_vision_capable(model):
+        return True, "info", ("Frames found and '{m}' is vision-capable; auto-enabling "
+                              "vision (use --no-vision to opt out).").format(m=model)
+    return False, "hint", ("Frames found but '{m}' doesn't look vision-capable; staying "
+                           "text-only. Run `whiz config set ai_model=llava` (or another "
+                           "vision model) and re-analyze to use the frames.").format(m=model)
 
 
 def _pick_model_interactive(config: cfg.Config, *, prefer_vision: bool) -> str | None:
@@ -971,31 +1030,14 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     transcript text and (with --vision) the frame images; otherwise loads the
     <stem>.speakers.txt transcript. Writes the prompt + response to
     <stem>.analysis.md and prints the response to stdout.
+
+    Vision is **auto-enabled** when a frames manifest exists and the configured
+    model looks vision-capable, so a video run followed by ``whiz analyze`` uses
+    the frames without needing ``--vision``. ``--no-vision`` opts out, and a
+    text-only model stays text-only with a hint (we never send images to a model
+    that will reject them).
     """
     config = cfg.load()
-    if not config.ai_model and not args.model:
-        chosen = _pick_model_interactive(config, prefer_vision=args.vision)
-        if not chosen:
-            return 1
-    model = args.model or config.ai_model
-    base_url = args.base_url or config.ai_base_url
-    api_key = args.api_key if args.api_key is not None else config.ai_api_key
-    max_frames = args.max_frames if args.max_frames is not None else config.ai_max_frames
-
-    # Probe the configured model before doing real work. Ollama's /api/tags can
-    # list models that are retired server-side (HTTP 410 at call time); a stored
-    # ai_model can silently go dead. When that happens, fall back to the
-    # interactive picker so the user picks a live one instead of crashing.
-    if not args.model and model:
-        ok, err = AI.probe_model(base_url, model, api_key)
-        if not ok:
-            ui.status(f"Configured model '{model}' is unavailable.", kind="warn", detail=err)
-            chosen = _pick_model_interactive(config, prefer_vision=args.vision)
-            if not chosen:
-                return 1
-            model = chosen
-            base_url = args.base_url or config.ai_base_url
-            api_key = args.api_key if args.api_key is not None else config.ai_api_key
 
     in_path = Path(args.file).expanduser()
     if not in_path.exists():
@@ -1019,6 +1061,37 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             f"No transcript found. Looked for:\n  {manifest_path}\n  {txt_path}\n"
             "Run `whiz transcribe --speakers [--screenshots] <file>` first."
         )
+    has_frames = entries is not None
+
+    # Model picking. prefer_vision mirrors the effective vision intent: if the
+    # user explicitly asked for --vision, or frames exist and they haven't opted
+    # out with --no-vision, steer the interactive picker toward a vision model.
+    explicit_vision = bool(getattr(args, "vision", False))
+    no_vision = bool(getattr(args, "no_vision", False))
+    prefer_vision = explicit_vision or (has_frames and not no_vision)
+    if not config.ai_model and not args.model:
+        chosen = _pick_model_interactive(config, prefer_vision=prefer_vision)
+        if not chosen:
+            return 1
+    model = args.model or config.ai_model
+    base_url = args.base_url or config.ai_base_url
+    api_key = args.api_key if args.api_key is not None else config.ai_api_key
+    max_frames = args.max_frames if args.max_frames is not None else config.ai_max_frames
+
+    # Probe the configured model before doing real work. Ollama's /api/tags can
+    # list models that are retired server-side (HTTP 410 at call time); a stored
+    # ai_model can silently go dead. When that happens, fall back to the
+    # interactive picker so the user picks a live one instead of crashing.
+    if not args.model and model:
+        ok, err = AI.probe_model(base_url, model, api_key)
+        if not ok:
+            ui.status(f"Configured model '{model}' is unavailable.", kind="warn", detail=err)
+            chosen = _pick_model_interactive(config, prefer_vision=prefer_vision)
+            if not chosen:
+                return 1
+            model = chosen
+            base_url = args.base_url or config.ai_base_url
+            api_key = args.api_key if args.api_key is not None else config.ai_api_key
 
     # Resolve the prompt. Explicit flags (--prompt/--plan/--summary/--actions)
     # skip the classifier; the default path auto-detects via the model.
@@ -1038,10 +1111,14 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         else:
             ui.status(f"Auto-detected: {detected_mode}", kind="info")
 
-    use_vision = args.vision and entries is not None
-    if args.vision and entries is None:
-        ui.status("--vision requested but no frames manifest found; falling back to text-only.", kind="warn")
-        use_vision = False
+    # Decide whether to feed frames to the model. See _resolve_vision for the
+    # full precedence (no-vision > explicit --vision > auto-enable by model type).
+    use_vision, vkind, vmsg = _resolve_vision(
+        explicit_vision=explicit_vision, no_vision=no_vision,
+        has_frames=has_frames, model=model,
+    )
+    if vmsg:
+        ui.status(vmsg, kind=vkind or "info")
 
     ui.phase("analyzing")
     ui.kv("Model", model)
@@ -1427,8 +1504,9 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--verbose", action="store_true", help="Verbose whisper-cli output")
     t.add_argument("--extra", nargs=argparse.REMAINDER, default=[], help="Extra flags passed verbatim to whisper-cli")
     t.add_argument("--dry-run", action="store_true", help="Print the command without running it")
-    t.add_argument("--analyze", action="store_true", help="After transcription, run AI analysis (auto-detect: summary+actions or implementation plan). Equivalent to a follow-up `whiz analyze <file>`")
-    t.add_argument("--vision", action="store_true", help="With --analyze, send on-screen frames to a vision model (requires screenshots, auto-enabled for video)")
+    t.add_argument("--analyze", action="store_true", help="After transcription, run AI analysis (auto-detect: summary+actions or implementation plan). Equivalent to a follow-up `whiz analyze <file>`. For video inputs this auto-enables vision when the AI model is vision-capable.")
+    t.add_argument("--vision", action="store_true", help="With --analyze, force sending on-screen frames to a vision model (auto-enabled for video when the model is vision-capable; this flag forces it on for audio/non-video runs)")
+    t.add_argument("--no-vision", dest="no_vision", action="store_true", help="With --analyze, opt out of the auto-enabled vision analysis (stay text-only even for a video with frames)")
     t.set_defaults(func=cmd_transcribe)
 
     # merge
@@ -1476,7 +1554,8 @@ def build_parser() -> argparse.ArgumentParser:
     an.add_argument("--actions", action="store_true", help="Use the built-in action-items prompt")
     an.add_argument("--plan", action="store_true", help="Use the built-in implementation-plan prompt (Overview → Goal → Proposed approach → Steps with owner/effort → Risks → Open questions → Acceptance criteria)")
     an.add_argument("--prompt", default="", help="Freeform prompt (overrides --summary/--actions/--plan; use {transcript} placeholder for the transcript)")
-    an.add_argument("--vision", action="store_true", help="Send on-screen frames as images to a vision model (requires a prior --screenshots run)")
+    an.add_argument("--vision", action="store_true", help="Send on-screen frames as images to a vision model (requires a prior --screenshots run). Auto-enabled when a frames manifest exists and the model is vision-capable; --no-vision opts out")
+    an.add_argument("--no-vision", dest="no_vision", action="store_true", help="Opt out of the auto-enabled vision analysis (stay text-only even when frames exist)")
     an.set_defaults(func=cmd_analyze)
 
     # speakers (voice profiles)
