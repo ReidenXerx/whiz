@@ -432,7 +432,7 @@ When you run `whiz analyze` with **no mode flag**, whiz first asks the model to 
 - **MEETING** — a standup, review, decision meeting, interview, or general conversation → summary + action items.
 - **PLAN** — a discussion about building, implementing, fixing, or changing a specific feature/bug/task → a structured implementation plan.
 
-The detected mode is shown in the terminal and written to the `.analysis.md` header. If the classifier call fails (Ollama down, model error), whiz falls back to summary + actions with a warning rather than aborting. Explicit flags (`--summary` / `--actions` / `--plan` / `--essentials` / `--prompt`) skip the classifier and go straight to their prompt.
+The detected mode is shown in the terminal and written to the `.analysis.md` header. If the classifier call fails (Ollama down, model error), whiz falls back to summary + actions with a warning rather than aborting. Explicit flags (`--summary` / `--actions` / `--plan` / `--prompt`) skip the classifier and go straight to their prompt.
 
 ### Setup: interactive model picker
 
@@ -466,11 +466,6 @@ whiz analyze recording.mov --actions
 # Force an implementation plan (auto-detected by default for feature/task talks)
 whiz analyze recording.mov --plan
 
-# Extract every meaningful point into one dense Essentials section, written to
-# <stem>.essentials.md — a concentrated artifact you feed to a later analyze.
-# See the Essentials section below.
-whiz analyze recording.mov --essentials
-
 # Freeform question (use {transcript} where the transcript should go)
 whiz analyze recording.mov --prompt "What risks did the team raise? Transcript: {transcript}"
 
@@ -503,24 +498,24 @@ Long transcripts (or many frames) aren't sent to the model as one giant blob —
 1. **Map (rolling context)** — each chunk is analyzed carrying forward the prior chunks' partial analyses as a running context block, so chunk N can refer back to speakers/decisions/entities/open threads established in chunks 1..N-1 instead of analyzing in a vacuum. With `--vision`, each chunk carries only the frames for its own segments, so the vision model sees a small, coherent window of "these frames + this text" + the running context instead of every frame at once. The context is a sliding window (default last 3 partials) so prompt growth stays bounded on very long inputs.
 2. **Reduce** — the per-chunk partial analyses (already coherent with each other thanks to the rolling context) are merged into one final answer: duplicates removed, conflicts reconciled, chronological order kept, speaker/time references preserved.
 
-Built-in modes (summary / action items / plan / essentials) route through a dedicated map + synthesize prompt pair so the final answer has the same structure the non-chunked path would produce. A custom `--prompt` is applied per chunk (with the rolling context prepended for chunks after the first) and the per-chunk answers are merged with a generic reduce. Short transcripts (one chunk) skip the map-reduce and use a single call, identical to the old behavior. Each chunk call is logged in the terminal (`analyzing chunk k/n ...`, then `synthesizing ...`) so you can follow progress.
+Built-in modes (summary / action items / plan) route through a dedicated map + synthesize prompt pair so the final answer has the same structure the non-chunked path would produce. A custom `--prompt` is applied per chunk (with the rolling context prepended for chunks after the first) and the per-chunk answers are merged with a generic reduce. Short transcripts (one chunk) skip the map-reduce and use a single call, identical to the old behavior. Each chunk call is logged in the terminal (`analyzing chunk k/n ...`, then `synthesizing ...`) so you can follow progress.
 
-Output is written to `<stem>.analysis.md` (the prompt + the response) and the response is also printed to stdout. Essentials mode instead writes `<stem>.essentials.md` (see below).
+Output is written to `<stem>.analysis.md` (the prompt + the response) and the response is also printed to stdout.
 
-### Essentials (`--essentials`): a concentrated artifact for later analysis
+### Essentials (always on): concentrated context for a later analysis
 
-`--essentials` produces a different artifact from the other modes: instead of a polished summary or plan, it extracts **every meaningful point** from the whole recording into one dense `## Essentials` bullet list — facts, decisions, requirements, names, numbers, UI/schema details, workflows, open questions, and rejected alternatives — and writes it to a standalone `<stem>.essentials.md` file.
+Every `whiz analyze` run — auto-detect, `--summary`, `--actions`, `--plan`, or `--prompt`, single-call or map-reduce — also produces a dense **`## Essentials`** section appended to the same `.analysis.md`. It extracts **every meaningful point** from the whole recording into one tight bullet list: facts, decisions, requirements, names, numbers, UI/schema details, workflows, open questions, and rejected alternatives. There's no flag for it and no extra model call — it's folded into the analysis you already run.
 
-It's designed as **context you feed back to a later `whiz analyze`** (or any AI): the dense points list preserves the specifics a summary would compress away, so a follow-up analysis can reason about field names, enum values, and decisions without re-watching the video. Each bullet is one concise point, prefixed with a timestamp and speaker when useful (`- [00:12:03] Vadim: must use GET for the Export endpoint`), open questions are marked `OPEN:`, rejected alternatives `REJECTED:`, and inferred points `(inferred)`. With vision (frames present), it also captures on-screen UI/schema/label detail.
+The Essentials section is designed as **concentrated context you feed back to a later `whiz analyze`** (or any AI): the dense points list preserves the specifics a summary would compress away, so a follow-up analysis can reason about field names, enum values, and decisions without re-watching the video. Each bullet is one concise point, prefixed with a timestamp and speaker when useful (`- [00:12:03] Vadim: must use GET for the Export endpoint`), open questions are marked `OPEN:`, rejected alternatives `REJECTED:`, and inferred points `(inferred)`. With vision (frames present), it also captures on-screen UI/schema/label detail.
 
 ```bash
-# First pass: extract the concentrated points from the recording
-whiz analyze recording.mov --essentials
-# -> writes recording.essentials.md
+# Every analyze already appends ## Essentials to the .analysis.md:
+whiz analyze recording.mov --plan
+# -> recording.analysis.md contains the plan AND a ## Essentials section
 
-# Later: use the essentials as context for a focused analysis. Paste the
-# essentials file into a freeform --prompt, e.g.
-whiz analyze recording.mov --prompt "Given these essentials, draft the migration steps. Essentials:\n$(cat recording.essentials.md)\n\nTranscript: {transcript}"
+# Later: feed the essentials back as concentrated context for a focused analysis.
+# Paste the Essentials section into a freeform --prompt, e.g.
+whiz analyze recording.mov --prompt "Given these essentials, draft the migration steps. Essentials:\n$(awk '/^## Essentials/{f=1;next} f' recording.analysis.md)\n\nTranscript: {transcript}"
 ```
 
 ### `whiz speakers list`

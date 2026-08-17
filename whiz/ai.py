@@ -111,38 +111,66 @@ CLASSIFY_PROMPT = (
     "Transcript:\n{transcript}\n\nClassification:"
 )
 
-# Essentials: a dense, concentrated extraction of EVERY meaningful point from
-# the whole recording — facts, decisions, requirements, names, numbers, UI
-# details, workflows, constraints, open questions — as one tight bullet list.
-# Prioritizes completeness and density over prose. With vision (frames) it
-# also captures on-screen UI/schema/label detail. Designed as a standalone
-# artifact you can feed back to a later `whiz analyze` (or any AI) as context.
-ESSENTIALS_PROMPT = (
-    "You are an expert analyst. Below is a transcript of a recording (with "
-    "speaker labels and timestamps). "
-    "Extract EVERY meaningful point into one dense, concentrated section. "
-    "This is for feeding to a later AI analysis pass, so be exhaustive and "
-    "specific — do not summarize away detail. Capture:\n"
-    "- Facts, decisions, and conclusions stated (who decided what).\n"
-    "- Requirements, constraints, and rules (feature flags, names, ids, enums).\n"
-    "- Concrete numbers, dates, versions, URLs, field names, table/column names, "
-    "API methods, status values.\n"
-    "- UI/UX specifics: labels, button names, tabs, modals, workflows, and "
-    "what changed (before/after). When frames are provided, read visible text "
-    "and schema on screen.\n"
-    "- Names of people, teams, products, and vendors mentioned.\n"
-    "- Open questions, TODOs, and unresolved threads (mark them 'OPEN:').\n"
-    "- Explicit disagreements or rejected alternatives (mark them 'REJECTED:').\n\n"
-    "Format as Markdown:\n"
-    "## Essentials\n"
-    "A flat, grouped bullet list (group by topic with bold sub-headers as "
-    "needed). Each bullet is ONE concise point. Prefix with a timestamp and "
-    "speaker when useful, e.g. '- [00:12:03] Vadim: must use GET for the Export "
-    "endpoint (Enric confirmed)'. Do not invent anything not in the transcript "
-    "or frames; if something is only implied, mark it '(inferred)'. Be as "
-    "complete as possible — prefer more short bullets over fewer long ones.\n\n"
-    "Transcript:\n{transcript}"
+# Essentials: always-on augmentation. Every `whiz analyze` run produces the
+# normal analysis (summary / plan / custom) AND appends a dense `## Essentials`
+# section — a concentrated bullet list of every meaningful point — to the same
+# `.analysis.md`. It's folded into the existing map-reduce so it costs zero
+# extra model calls: each chunk's map call produces (partial analysis + partial
+# essentials), and the synth merges both. The essentials section is designed as
+# concentrated context you can feed back to a later `whiz analyze`.
+#
+# _ESSENTIALS_TASK_SUFFIX is appended to the {task} label in MAP_PROMPT /
+# SYNTH_PROMPT (built-in prompts), so both the per-chunk map and the final
+# synth know to produce / merge the Essentials section.
+_ESSENTIALS_TASK_SUFFIX = (
+    " After producing the analysis above, ALSO produce a `## Essentials` "
+    "section: a dense, exhaustive bullet list of EVERY meaningful point — facts, "
+    "decisions, requirements, constraints, names, numbers, UI/UX details, "
+    "workflows, open questions, and rejected alternatives. One bullet per point, "
+    "concise; prefix with timestamp and speaker when useful "
+    "(e.g. '- [00:12:03] Vadim: ...'). Mark open questions 'OPEN:', rejected "
+    "alternatives 'REJECTED:', inferred points '(inferred)'. With frames, also "
+    "capture visible on-screen text/schema. This section is for feeding to a "
+    "later AI analysis as concentrated context."
 )
+# _ESSENTIALS_INSTRUCTION is appended to the prompt for single-call (short
+# transcript) and custom --prompt map-reduce paths, where there is no {task}
+# slot. It's inserted right after the {transcript} placeholder so the model
+# reads the transcript then sees the Essentials instruction.
+_ESSENTIALS_INSTRUCTION = (
+    "\n\n---\nALSO produce a `## Essentials` section: a dense, exhaustive bullet "
+    "list of EVERY meaningful point — facts, decisions, requirements, "
+    "constraints, names, numbers, UI/UX details, workflows, open questions, and "
+    "rejected alternatives. One bullet per point, concise; prefix with timestamp "
+    "and speaker when useful (e.g. '- [00:12:03] Vadim: ...'). Mark open "
+    "questions 'OPEN:', rejected alternatives 'REJECTED:', inferred points "
+    "'(inferred)'. With frames, also capture visible on-screen text/schema. This "
+    "section is for feeding to a later AI analysis as concentrated context."
+)
+# Appended to _CUSTOM_REDUCE_PROMPT (custom --prompt reduce step) so the synth
+# merges the per-chunk Essentials sections into one.
+_ESSENTIALS_REDUCE_INSTRUCTION = (
+    "\n\nThe partial answers above may each contain a `## Essentials` section. "
+    "Merge ALL of those Essentials bullets into one consolidated, deduplicated "
+    "`## Essentials` section at the end of your final answer, preserving "
+    "timestamps and speaker prefixes."
+)
+
+
+def _augment_prompt_essentials(prompt_template: str) -> str:
+    """Append the always-on Essentials instruction to a prompt template.
+
+    Used for single-call (short transcript) and custom --prompt paths where
+    there is no {task} slot. The instruction is inserted right after the
+    {transcript} placeholder so chat_text/chat_vision's .replace places it
+    after the transcript text.
+    """
+    if "{transcript}" in prompt_template:
+        return prompt_template.replace(
+            "{transcript}", "{transcript}" + _ESSENTIALS_INSTRUCTION
+        )
+    # No placeholder (shouldn't happen for real prompts): just append.
+    return prompt_template + _ESSENTIALS_INSTRUCTION
 
 
 # Chunked map-reduce prompts. For long transcripts (or many frames) the input is
@@ -219,10 +247,6 @@ _BUILT_IN_TASKS: list[tuple[str, str]] = [
      "produce a structured implementation plan with sections: Overview, Goal, "
      "Proposed approach, Steps (each with Owner + Effort S/M/L), Risks, Open "
      "questions, Acceptance criteria"),
-    (ESSENTIALS_PROMPT,
-     "produce a dense Essentials section — one bullet per meaningful point "
-     "(facts, decisions, requirements, names, numbers, UI/workflow details, open "
-     "questions), exhaustive and specific, for use as context by a later analysis"),
 ]
 
 
@@ -255,14 +279,12 @@ def resolve_prompt(args) -> str:
     just need a static prompt (and existing tests) keep working; the auto path
     that actually runs the classifier is ``resolve_prompt_auto``.
     """
-    # --prompt wins; then --plan; then --essentials; then --summary/--actions
-    # combine; default = summary+actions.
+    # --prompt wins; then --plan; then --summary/--actions combine; default =
+    # summary+actions.
     if getattr(args, "prompt", None):
         return args.prompt
     if getattr(args, "plan", False):
         return PLAN_PROMPT
-    if getattr(args, "essentials", False):
-        return ESSENTIALS_PROMPT
     want_summary = getattr(args, "summary", False)
     want_actions = getattr(args, "actions", False)
     if want_summary and want_actions:
@@ -282,8 +304,6 @@ def _explicit_mode_set(args) -> set[str]:
         modes.add("prompt")
     if getattr(args, "plan", False):
         modes.add("plan")
-    if getattr(args, "essentials", False):
-        modes.add("essentials")
     if getattr(args, "summary", False):
         modes.add("summary")
     if getattr(args, "actions", False):
@@ -521,11 +541,23 @@ def analyze(
     chunk (with rolling context prepended for chunks after the first) and the
     per-chunk answers are merged with a generic reduce.
 
+    **Essentials is always on.** Every analysis (built-in or custom, single-call
+    or map-reduce) also produces a dense ``## Essentials`` bullet list — every
+    meaningful point (facts, decisions, requirements, names, numbers, UI details,
+    open questions) — appended to the same response, for feeding to a later AI
+    analysis as concentrated context. For built-in prompts the instruction rides
+    on the ``{task}`` label in MAP/SYNTH; for single-call and custom paths it's
+    appended to the prompt template. Zero extra model calls.
+
     ``on_progress(msg)``, if given, is called with a short status string before
     each map call and the reduce call so callers can surface progress.
     """
     built_in = _is_built_in_prompt(prompt_template)
-    task = _task_label(prompt_template)
+    # Essentials is always on: augment the task label (for built-in map-reduce)
+    # and the prompt template (for single-call + custom paths) so every analysis
+    # also produces a ## Essentials section at zero extra model-call cost.
+    task = _task_label(prompt_template) + _ESSENTIALS_TASK_SUFFIX
+    prompt_template = _augment_prompt_essentials(prompt_template)
 
     # --- Vision path: chunk by entries so each chunk's frames stay local ---
     if use_vision and entries:
@@ -613,7 +645,7 @@ def _map_reduce_vision(
         partials.append(f"### Part {k} of {n}\n{partial}")
     if on_progress:
         on_progress(f"synthesizing {n} partial analyses")
-    reduce_prompt = (SYNTH_PROMPT if built_in else _CUSTOM_REDUCE_PROMPT)
+    reduce_prompt = (SYNTH_PROMPT if built_in else _CUSTOM_REDUCE_PROMPT + _ESSENTIALS_REDUCE_INSTRUCTION)
     synth_prompt = (reduce_prompt
                     .replace("{task}", task)
                     .replace("{n}", str(n))
@@ -650,7 +682,7 @@ def _map_reduce_text(
         partials.append(f"### Part {k} of {n}\n{partial}")
     if on_progress:
         on_progress(f"synthesizing {n} partial analyses")
-    reduce_prompt = (SYNTH_PROMPT if built_in else _CUSTOM_REDUCE_PROMPT)
+    reduce_prompt = (SYNTH_PROMPT if built_in else _CUSTOM_REDUCE_PROMPT + _ESSENTIALS_REDUCE_INSTRUCTION)
     synth_prompt = (reduce_prompt
                     .replace("{task}", task)
                     .replace("{n}", str(n))
