@@ -4,7 +4,7 @@ A handy CLI wrapper around [whisper-cli](https://github.com/ggerganov/whisper.cp
 
 1. **`failed to open 'large-v3'`** — whiz auto-discovers models across your filesystem and resolves friendly aliases (`turbo`, `large-v3`, `medium`) to the actual `.bin` file.
 2. **whisper-cli choking on `.mov`/`.mp4`** — whiz extracts a 16 kHz mono WAV with ffmpeg and hands *that* to whisper-cli, then cleans up.
-3. **No multi-speaker labels** — for video inputs, speaker diarization and on-screen frame capture are **on by default** (opt out with `--no-speakers` / `--no-screenshots`). whiz runs true diarization via sherpa-onnx and emits labeled `Speaker A:` / `Speaker B:` output (or real names — see [Speaker naming](#naming-speakers)). Diarization results are cached so re-tuning names/thresholds via `whiz merge` is instant.
+3. **No multi-speaker labels** — for video inputs, speaker diarization, on-screen frame capture, and the interactive speaker-naming prompt are **on by default** (opt out with `--no-speakers` / `--no-screenshots` / `--no-name-speakers`). whiz runs true diarization via sherpa-onnx and emits labeled `Speaker A:` / `Speaker B:` output (or real names — see [Speaker naming](#naming-speakers)). Diarization results are cached so re-tuning names/thresholds via `whiz merge` is instant.
 4. **VAD model download moved** — whiz auto-downloads the current Silero VAD model from the new `ggml-org/whisper-vad` repo when VAD is enabled and no model is found.
 
 Zero runtime dependencies — pure Python 3.11+ stdlib. Speaker diarization requires the optional `sherpa-onnx` package (see below).
@@ -40,12 +40,13 @@ whiz models download turbo      # ggml-large-v3-turbo-q5_0.bin — fast & accura
 
 ```bash
 # Auto-picks the best available model, extracts audio if it's a video,
-# and (for video) auto-enables speaker diarization + on-screen screenshots.
+# and (for video) auto-enables speaker diarization + on-screen screenshots
+# + the interactive speaker-naming prompt.
 # Writes SRT + JSON + labeled speakers.srt/.txt + frames alongside the input.
 whiz transcribe ~/Desktop/recording.mov
 
 # Opt out of the video defaults if you don't need them
-whiz transcribe --no-speakers --no-screenshots recording.mov
+whiz transcribe --no-speakers --no-screenshots --no-name-speakers recording.mov
 
 # Be explicit
 whiz transcribe -m turbo -l en --outputs srt,vtt recording.mp4
@@ -57,7 +58,7 @@ whiz transcribe --dry-run recording.mov
 whiz transcribe --outputs txt --no-timestamps meeting.m4a
 ```
 
-> **Video inputs** auto-enable `--screenshots` and `--speakers` (auto-detect) so you get a labeled transcript plus per-segment frames for AI analysis / HTML output without extra flags. Pass `--no-screenshots` and/or `--no-speakers` to opt out. Audio inputs are unaffected.
+> **Video inputs** auto-enable `--screenshots`, `--speakers` (auto-detect), and the interactive `--name-speakers` prompt so you get a labeled transcript plus per-segment frames plus a chance to name speakers without extra flags. Pass `--no-screenshots`, `--no-speakers`, and/or `--no-name-speakers` to opt out. Audio inputs are unaffected (unless you pass `--speakers`).
 
 ## Commands
 
@@ -83,7 +84,8 @@ Transcribe an audio or video file.
 | `--speakers [N]` | on (video) | Enable speaker diarization; optional integer = known speaker count, omit = auto-detect. Auto-enabled for video inputs |
 | `--no-speakers` | off | Disable the auto-enabled diarization for video inputs (opt out) |
 | `--cluster-threshold` | `0.9` | Diarization clustering threshold when auto-detecting (larger = fewer speakers) |
-| `--name-speakers` | off | After transcription, interactively prompt to name each detected speaker |
+| `--name-speakers` | on (diarized) | Interactively prompt to name each detected speaker. Auto-enabled whenever diarization runs |
+| `--no-name-speakers` | off | Disable the auto-enabled interactive speaker-naming prompt (opt out) |
 | `--speakers-names Alice,Bob,...` | off | Non-interactive speaker names assigned by total talk time (most talkative first) |
 | `--screenshots` | on (video) | For video inputs, extract one on-screen frame per segment into `<stem>.frames/` + write `<stem>.frames.json` (for AI analysis / HTML output). Auto-enabled for video inputs |
 | `--no-screenshots` | off | Disable the auto-enabled on-screen frame extraction for video inputs (opt out) |
@@ -103,7 +105,8 @@ Re-run only diarization + the merge against an existing whisper JSON, skipping t
 | `--speakers [N]` | on (video) | Known speaker count; omit = auto-detect. Auto-enabled for video inputs |
 | `--no-speakers` | off | Disable the auto-enabled diarization for video inputs (opt out) |
 | `--cluster-threshold` | `0.9` | Clustering threshold when auto-detecting (larger = fewer speakers) |
-| `--name-speakers` | off | Interactively prompt to name each detected speaker |
+| `--name-speakers` | on (diarized) | Interactively prompt to name each detected speaker. Auto-enabled whenever diarization runs |
+| `--no-name-speakers` | off | Disable the auto-enabled interactive speaker-naming prompt (opt out) |
 | `--speakers-names Alice,Bob,...` | off | Non-interactive speaker names assigned by total talk time (most talkative first) |
 | `--screenshots` | on (video) | Re-extract on-screen frames per segment into `<stem>.frames/` + write `<stem>.frames.json`. Auto-enabled for video inputs |
 | `--no-screenshots` | off | Disable the auto-enabled on-screen frame extraction for video inputs (opt out) |
@@ -422,6 +425,23 @@ Run diarization on the given file and print, for each detected cluster, the cosi
 
 ```bash
 whiz speakers match recording.mov --speakers 4
+```
+
+## Testing
+
+whiz ships a pytest suite covering the pure-Python modules (merge, models, screenshots, ai, diarize cache, profiles) — no sherpa-onnx, ffmpeg, or network required. Install the test extras and run:
+
+```bash
+pipx install --force --editable '.[test]'
+pytest tests/
+```
+
+Tests isolate the filesystem (via `monkeypatch` and `tmp_path`) so host-installed models don't leak into model-discovery assertions. The suite runs in under a second.
+
+## License
+
+MIT © ReidenXerx
+akers 4
 ```
 
 ## Testing

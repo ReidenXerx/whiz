@@ -146,6 +146,21 @@ def _diarization_available(config: cfg.Config) -> bool:
     return True
 
 
+def _name_speakers_enabled(args: argparse.Namespace, diarize_enabled: bool) -> bool:
+    """Resolve whether the interactive speaker-naming prompt should run.
+
+    Naming only makes sense when diarization actually ran. It's auto-enabled
+    in that case (so you get prompted to label speakers without passing
+    ``--name-speakers``); ``--no-name-speakers`` opts out. An explicit
+    ``--name-speakers`` keeps working regardless.
+    """
+    if not diarize_enabled:
+        return False
+    if getattr(args, "no_name_speakers", False):
+        return False
+    return True
+
+
 def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list[str]:
     """Assemble the whisper-cli argv."""
     # Resolve input file first so video auto-enable can inform diarize_enabled.
@@ -553,6 +568,8 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             flags.append("screenshots=on" if not args.screenshots else "screenshots=on (explicit)")
         if diarize_enabled:
             flags.append("speakers=on" if args.speakers is None else f"speakers={args.speakers or 'auto'} (explicit)")
+        if diarize_enabled and not getattr(args, "no_name_speakers", False):
+            flags.append("name-speakers=on" + (" (explicit)" if args.name_speakers else ""))
         if flags:
             print(f"Video input — auto-enabled: {', '.join(flags)}", file=sys.stderr)
     print(f"Run:    {' '.join(cmd)}", file=sys.stderr)
@@ -623,7 +640,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                 # outputs but before HTML if both are requested.
                 srt_out, txt_out, name_map = _write_labeled_outputs(
                     merged, of_base,
-                    name_speakers=args.name_speakers,
+                    name_speakers=_name_speakers_enabled(args, diarize_enabled),
                     speakers_names=args.speakers_names,
                     html=want_html and not want_frames,
                     title=in_path.name,
@@ -951,7 +968,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
     if merged:
         srt_out, txt_out, name_map = _write_labeled_outputs(
             merged, of_base,
-            name_speakers=args.name_speakers,
+            name_speakers=_name_speakers_enabled(args, diarize_enabled=True),
             speakers_names=args.speakers_names,
             html=_outputs_include(args, config, "html") and not (screenshots and aud.needs_extraction(in_path)),
             title=in_path.name,
@@ -1160,7 +1177,8 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--speakers", type=int, default=None, nargs="?", const=0, help="Enable speaker diarization via sherpa-onnx. Optional integer = known speaker count; omit = auto-detect. Auto-enabled for video inputs (see --no-speakers)")
     t.add_argument("--no-speakers", dest="no_speakers", action="store_true", help="Disable the auto-enabled speaker diarization for video inputs (opt out)")
     t.add_argument("--cluster-threshold", type=float, default=None, help="Diarization clustering threshold when auto-detecting (larger = fewer speakers; default 0.9)")
-    t.add_argument("--name-speakers", action="store_true", help="After transcription, interactively prompt to name each detected speaker (replaces Speaker A/B/C with real names)")
+    t.add_argument("--name-speakers", action="store_true", help="Interactively prompt to name each detected speaker. Auto-enabled when diarization runs (see --no-name-speakers)")
+    t.add_argument("--no-name-speakers", dest="no_name_speakers", action="store_true", help="Disable the auto-enabled interactive speaker-naming prompt (opt out)")
     t.add_argument("--speakers-names", dest="speakers_names", nargs="+", default=None, help="Non-interactive speaker names assigned by total talk time (most talkative first), e.g. --speakers-names Alice,Bob,Carol,Dave")
     t.add_argument("--screenshots", action="store_true", help="For video inputs, extract one on-screen frame per transcribed segment into <stem>.frames/ and write <stem>.frames.json (for AI analysis / HTML output). Auto-enabled for video inputs (see --no-screenshots)")
     t.add_argument("--no-screenshots", dest="no_screenshots", action="store_true", help="Disable the auto-enabled on-screen frame extraction for video inputs (opt out)")
@@ -1180,7 +1198,8 @@ def build_parser() -> argparse.ArgumentParser:
     mg.add_argument("--speakers", type=int, default=None, nargs="?", const=0, help="Known speaker count; omit = auto-detect. Auto-enabled for video inputs (see --no-speakers)")
     mg.add_argument("--no-speakers", dest="no_speakers", action="store_true", help="Disable the auto-enabled speaker diarization for video inputs (opt out)")
     mg.add_argument("--cluster-threshold", type=float, default=None, help="Clustering threshold when auto-detecting (larger = fewer speakers; default 0.9)")
-    mg.add_argument("--name-speakers", action="store_true", help="Interactively prompt to name each detected speaker (replaces Speaker A/B/C with real names)")
+    mg.add_argument("--name-speakers", action="store_true", help="Interactively prompt to name each detected speaker. Auto-enabled when diarization runs (see --no-name-speakers)")
+    mg.add_argument("--no-name-speakers", dest="no_name_speakers", action="store_true", help="Disable the auto-enabled interactive speaker-naming prompt (opt out)")
     mg.add_argument("--speakers-names", dest="speakers_names", nargs="+", default=None, help="Non-interactive speaker names assigned by total talk time (most talkative first), e.g. --speakers-names Alice,Bob,Carol,Dave")
     mg.add_argument("--screenshots", action="store_true", help="Re-extract on-screen frames per segment into <stem>.frames/ and write <stem>.frames.json. Auto-enabled for video inputs (see --no-screenshots)")
     mg.add_argument("--no-screenshots", dest="no_screenshots", action="store_true", help="Disable the auto-enabled on-screen frame extraction for video inputs (opt out)")
