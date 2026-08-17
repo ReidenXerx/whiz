@@ -69,7 +69,7 @@ Transcribe an audio or video file.
 |------|---------|-------------|
 | `-m, --model` | auto-pick best | Model alias (`turbo`, `large-v3`, `medium`) or path |
 | `-o, --output` | alongside input | Output base path (no extension) |
-| `--outputs` | `srt,json` | Comma-separated: `txt,srt,vtt,json,json-full,csv,lrc,html` (`html` requires `--speakers`) |
+| `--outputs` | `srt,json` | Comma-separated output formats: `txt,srt,vtt,json,json-full,csv,lrc,html` (`html` requires diarization, which is auto-on for video) |
 | `-l, --language` | `auto` | Spoken language code or `auto` |
 | `-t, --threads` | auto (`min(8, cores)`) | CPU threads |
 | `--vad` / `--no-vad` | on | Enable/disable voice activity detection |
@@ -109,7 +109,7 @@ Re-run only diarization + the merge against an existing whisper JSON, skipping t
 | `--no-screenshots` | off | Disable the auto-enabled on-screen frame extraction for video inputs (opt out) |
 | `--screenshot-width` | `1280` | Frame width in pixels (0 = native resolution) |
 | `--no-voice-profiles` | off | Don't compute voice-profile embeddings or auto-match/save speaker profiles this run |
-| `--outputs` | `srt,json` | Comma-separated output formats; add `html` for a self-contained transcript (requires `--speakers`) |
+| `--outputs` | `srt,json` | Comma-separated output formats; add `html` for a self-contained transcript (requires diarization, which is auto-on for video) |
 
 ### `whiz models list`
 
@@ -395,7 +395,8 @@ whiz analyze recording.mov --actions
 whiz analyze recording.mov --prompt "What risks did the team raise? Transcript: {transcript}"
 
 # Vision analysis: send on-screen frames to a vision model (requires a prior
-# --screenshots run; frames are spread evenly, capped at ai_max_frames=50)
+# transcribe of a video, which auto-captures screenshots; frames are spread
+# evenly, capped at ai_max_frames=50)
 whiz analyze recording.mov --vision --summary
 ```
 
