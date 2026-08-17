@@ -328,6 +328,27 @@ def list_ollama_models(base_url: str, *, timeout: int = 10) -> list[str]:
     return _get_json(base_url.rstrip("/") + "/models", timeout) or []
 
 
+def probe_model(base_url: str, model: str, api_key: str = "", *, timeout: int = 30) -> tuple[bool, str]:
+    """Send a trivial chat completion to check ``model`` is actually usable.
+
+    Ollama's ``/api/tags`` can list models that are retired/unavailable
+    server-side (e.g. cloud-tagged models whose upstream was retired) — the
+    retirement only surfaces as an HTTP 410 when you actually call the model.
+    This probe lets the interactive picker avoid saving a dead model.
+
+    Returns ``(ok, error_message)``; ``error_message`` is empty on success.
+    """
+    try:
+        _post_chat(
+            base_url, model,
+            [{"role": "user", "content": "Reply with: ok"}],
+            api_key, timeout=timeout,
+        )
+    except RuntimeError as exc:
+        return False, str(exc)
+    return True, ""
+
+
 def _get_json(url: str, timeout: int) -> list[str] | None:
     """GET ``url`` and return model names, or None if the endpoint failed.
 

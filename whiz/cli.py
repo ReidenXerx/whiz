@@ -883,8 +883,15 @@ def _pick_model_interactive(config: cfg.Config, *, prefer_vision: bool) -> str |
     Returns the chosen model name (and saves it to ``config.ai_model`` via
     ``cfg.save``), or None if no models were reachable — in which case a hint is
     printed and the caller should exit cleanly.
+
+    Each listed model is probed with a trivial chat completion because Ollama's
+    ``/api/tags`` can list models that are retired server-side (the retirement
+    only surfaces as an HTTP 410 at call time). Dead models are marked
+    ``(unavailable)`` in the table; the recommended default is the highest-ranked
+    model that actually responds, so we never silently save a dead model.
     """
     base_url = config.ai_base_url
+    api_key = config.ai_api_key
     ui.phase("choosing AI model")
     ui.muted(f"querying {base_url} for available models ...")
     models = AI.list_ollama_models(base_url)
@@ -892,34 +899,65 @@ def _pick_model_interactive(config: cfg.Config, *, prefer_vision: bool) -> str |
         ui.status("No AI model configured and no models found at the server.", kind="warn",
                   detail="Set one with:  whiz config set ai_model=llava\nOr start Ollama:  ollama serve")
         return None
-    rec_idx = _recommend_model(models, prefer_vision=prefer_vision)
+    # Probe each model once. Cloud-tagged/retired models fail here; we mark them
+    # and prefer a live one for the default.
+    ui.muted(f"probing {len(models)} model(s) for availability ...")
+    live: list[tuple[int, str]] = []  # (original_index, name)
+    status: list[str] = []
+    for i, name in enumerate(models):
+        ok, _err = AI.probe_model(base_url, name, api_key)
+        if ok:
+            live.append((i, name))
+            status.append("")
+        else:
+            status.append("(unavailable)")
+    if not live:
+        ui.status("None of the listed models responded to a probe.", kind="warn",
+                  detail="Ollama listed models but every one failed a trivial chat call.\n"
+                          "Cloud models may be retired server-side; pull a local one with `ollama pull llama3.1`.\n"
+                          "Or set a model explicitly:  whiz config set ai_model=...")
+        return None
+    # Recommend the best live model (heuristic over the live subset).
+    live_names = [n for _, n in live]
+    rec_in_live = _recommend_model(live_names, prefer_vision=prefer_vision)
+    rec_idx = live[rec_in_live][0]  # map back to the full-list index for display
     ui.header("whiz", "models")
     rows: list[list[object]] = []
     for i, name in enumerate(models):
-        tag = "\u2190 recommended" if i == rec_idx else ""
-        rows.append([i + 1, name, tag])
+        mark = "\u2190 recommended" if i == rec_idx else ""
+        rows.append([i + 1, name, status[i] or mark])
     ui.table(
-        f"{len(models)} model(s) available",
+        f"{len(models)} model(s) listed, {len(live)} available",
         [("#", "right"), ("Model", "left"), ("", "left")],
         rows,
     )
     default_name = models[rec_idx]
-    try:
-        choice = input(f"Choose a model [1-{len(models)}] (default {rec_idx + 1} = {default_name}): ").strip()
-    except EOFError:
-        choice = ""
-    if not choice:
-        chosen = default_name
-    else:
-        idx = int(choice) - 1 if choice.isdigit() else -1
-        if 0 <= idx < len(models):
-            chosen = models[idx]
+    # Loop until the user picks a live model (or accepts the live default).
+    while True:
+        try:
+            choice = input(f"Choose a model [1-{len(models)}] (default {rec_idx + 1} = {default_name}): ").strip()
+        except EOFError:
+            choice = ""
+        if not choice:
+            chosen = default_name
+            chosen_idx = rec_idx
         else:
-            # Accept a typed model name verbatim too.
-            chosen = choice if choice in models else default_name
-            if chosen != default_name and choice not in models:
-                ui.status(f"'{choice}' isn't in the list; using default {default_name}.", kind="warn")
-                chosen = default_name
+            chosen_idx = int(choice) - 1 if choice.isdigit() else -1
+            if 0 <= chosen_idx < len(models):
+                chosen = models[chosen_idx]
+            else:
+                # Accept a typed model name verbatim too.
+                chosen = choice if choice in models else default_name
+                chosen_idx = models.index(chosen) if chosen in models else rec_idx
+                if chosen != default_name and choice not in models:
+                    ui.status(f"'{choice}' isn't in the list; using default {default_name}.", kind="warn")
+                    chosen = default_name
+                    chosen_idx = rec_idx
+        if status[chosen_idx]:
+            # Marked unavailable (e.g. retired server-side).
+            ui.status(f"{chosen} is unavailable: {status[chosen_idx].strip('()')}. Pick another.", kind="warn")
+            continue
+        break
     config.ai_model = chosen
     cfg.save(config)
     ui.status(f"Saved ai_model = {chosen}", kind="ok")
@@ -943,6 +981,21 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     base_url = args.base_url or config.ai_base_url
     api_key = args.api_key if args.api_key is not None else config.ai_api_key
     max_frames = args.max_frames if args.max_frames is not None else config.ai_max_frames
+
+    # Probe the configured model before doing real work. Ollama's /api/tags can
+    # list models that are retired server-side (HTTP 410 at call time); a stored
+    # ai_model can silently go dead. When that happens, fall back to the
+    # interactive picker so the user picks a live one instead of crashing.
+    if not args.model and model:
+        ok, err = AI.probe_model(base_url, model, api_key)
+        if not ok:
+            ui.status(f"Configured model '{model}' is unavailable.", kind="warn", detail=err)
+            chosen = _pick_model_interactive(config, prefer_vision=args.vision)
+            if not chosen:
+                return 1
+            model = chosen
+            base_url = args.base_url or config.ai_base_url
+            api_key = args.api_key if args.api_key is not None else config.ai_api_key
 
     in_path = Path(args.file).expanduser()
     if not in_path.exists():

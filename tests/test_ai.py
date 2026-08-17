@@ -385,3 +385,38 @@ def test_list_ollama_models_strips_base_url_without_v1(monkeypatch):
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     AI.list_ollama_models("http://localhost:11434/")
     assert seen[0] == "http://localhost:11434/api/tags"
+
+
+# ---------- probe_model ----------
+
+def test_probe_model_ok(monkeypatch):
+    def fake_urlopen(req, timeout=30):
+        return _mock_response({"choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    ok, err = AI.probe_model("http://x/v1", "live-model", api_key="")
+    assert ok is True
+    assert err == ""
+
+
+def test_probe_model_retired_returns_failure(monkeypatch):
+    def fake_urlopen(req, timeout=30):
+        raise urllib.error.HTTPError(
+            req.full_url, 410, "Gone", hdrs=None,
+            fp=io.BytesIO(b'{"error":{"message":"model was retired"}}'),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    ok, err = AI.probe_model("http://x/v1", "dead-model", api_key="")
+    assert ok is False
+    assert "HTTP 410" in err
+
+
+def test_probe_model_server_down_returns_failure(monkeypatch):
+    def fake_urlopen(req, timeout=30):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    ok, err = AI.probe_model("http://x/v1", "m", api_key="")
+    assert ok is False
+    assert "Could not reach AI server" in err
