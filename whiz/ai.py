@@ -111,6 +111,39 @@ CLASSIFY_PROMPT = (
     "Transcript:\n{transcript}\n\nClassification:"
 )
 
+# Essentials: a dense, concentrated extraction of EVERY meaningful point from
+# the whole recording — facts, decisions, requirements, names, numbers, UI
+# details, workflows, constraints, open questions — as one tight bullet list.
+# Prioritizes completeness and density over prose. With vision (frames) it
+# also captures on-screen UI/schema/label detail. Designed as a standalone
+# artifact you can feed back to a later `whiz analyze` (or any AI) as context.
+ESSENTIALS_PROMPT = (
+    "You are an expert analyst. Below is a transcript of a recording (with "
+    "speaker labels and timestamps). "
+    "Extract EVERY meaningful point into one dense, concentrated section. "
+    "This is for feeding to a later AI analysis pass, so be exhaustive and "
+    "specific — do not summarize away detail. Capture:\n"
+    "- Facts, decisions, and conclusions stated (who decided what).\n"
+    "- Requirements, constraints, and rules (feature flags, names, ids, enums).\n"
+    "- Concrete numbers, dates, versions, URLs, field names, table/column names, "
+    "API methods, status values.\n"
+    "- UI/UX specifics: labels, button names, tabs, modals, workflows, and "
+    "what changed (before/after). When frames are provided, read visible text "
+    "and schema on screen.\n"
+    "- Names of people, teams, products, and vendors mentioned.\n"
+    "- Open questions, TODOs, and unresolved threads (mark them 'OPEN:').\n"
+    "- Explicit disagreements or rejected alternatives (mark them 'REJECTED:').\n\n"
+    "Format as Markdown:\n"
+    "## Essentials\n"
+    "A flat, grouped bullet list (group by topic with bold sub-headers as "
+    "needed). Each bullet is ONE concise point. Prefix with a timestamp and "
+    "speaker when useful, e.g. '- [00:12:03] Vadim: must use GET for the Export "
+    "endpoint (Enric confirmed)'. Do not invent anything not in the transcript "
+    "or frames; if something is only implied, mark it '(inferred)'. Be as "
+    "complete as possible — prefer more short bullets over fewer long ones.\n\n"
+    "Transcript:\n{transcript}"
+)
+
 
 # Chunked map-reduce prompts. For long transcripts (or many frames) the input is
 # split into contiguous chunks; each chunk is analyzed (map) and the partial
@@ -186,6 +219,10 @@ _BUILT_IN_TASKS: list[tuple[str, str]] = [
      "produce a structured implementation plan with sections: Overview, Goal, "
      "Proposed approach, Steps (each with Owner + Effort S/M/L), Risks, Open "
      "questions, Acceptance criteria"),
+    (ESSENTIALS_PROMPT,
+     "produce a dense Essentials section — one bullet per meaningful point "
+     "(facts, decisions, requirements, names, numbers, UI/workflow details, open "
+     "questions), exhaustive and specific, for use as context by a later analysis"),
 ]
 
 
@@ -218,11 +255,14 @@ def resolve_prompt(args) -> str:
     just need a static prompt (and existing tests) keep working; the auto path
     that actually runs the classifier is ``resolve_prompt_auto``.
     """
-    # --prompt wins; then --plan; then --summary/--actions combine; default = summary+actions.
+    # --prompt wins; then --plan; then --essentials; then --summary/--actions
+    # combine; default = summary+actions.
     if getattr(args, "prompt", None):
         return args.prompt
     if getattr(args, "plan", False):
         return PLAN_PROMPT
+    if getattr(args, "essentials", False):
+        return ESSENTIALS_PROMPT
     want_summary = getattr(args, "summary", False)
     want_actions = getattr(args, "actions", False)
     if want_summary and want_actions:
@@ -242,6 +282,8 @@ def _explicit_mode_set(args) -> set[str]:
         modes.add("prompt")
     if getattr(args, "plan", False):
         modes.add("plan")
+    if getattr(args, "essentials", False):
+        modes.add("essentials")
     if getattr(args, "summary", False):
         modes.add("summary")
     if getattr(args, "actions", False):

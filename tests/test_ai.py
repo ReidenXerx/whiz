@@ -55,6 +55,24 @@ def test_resolve_prompt_plan_overridden_by_prompt():
     assert AI.resolve_prompt(args) == "custom {transcript}"
 
 
+def test_resolve_prompt_essentials_flag():
+    args = SimpleNamespace(prompt="", plan=False, essentials=True, summary=False, actions=False)
+    assert AI.resolve_prompt(args) is AI.ESSENTIALS_PROMPT
+
+
+def test_resolve_prompt_essentials_overridden_by_prompt():
+    args = SimpleNamespace(prompt="custom {transcript}", plan=False, essentials=True)
+    assert AI.resolve_prompt(args) == "custom {transcript}"
+
+
+def test_essentials_prompt_has_required_section():
+    assert "## Essentials" in AI.ESSENTIALS_PROMPT
+    assert "{transcript}" in AI.ESSENTIALS_PROMPT
+    # The prompt must ask for dense, exhaustive extraction (not prose summary).
+    assert "meaningful point" in AI.ESSENTIALS_PROMPT
+    assert "OPEN:" in AI.ESSENTIALS_PROMPT
+
+
 def test_plan_prompt_has_required_sections():
     for heading in ("Overview", "Goal", "Proposed approach", "Steps", "Risks",
                     "Open questions", "Acceptance criteria"):
@@ -310,12 +328,14 @@ def test_resolve_prompt_auto_garbled_reply_defaults_to_meeting(monkeypatch):
 
 
 def test_explicit_mode_set_detects_flags():
-    args = SimpleNamespace(prompt="", plan=True, summary=False, actions=False)
+    args = SimpleNamespace(prompt="", plan=True, essentials=False, summary=False, actions=False)
     assert AI._explicit_mode_set(args) == {"plan"}
-    args = SimpleNamespace(prompt="custom", plan=False, summary=True, actions=False)
-    assert AI._explicit_mode_set(args) == {"prompt", "summary"}
-    args = SimpleNamespace(prompt="", plan=False, summary=False, actions=False)
+    args = SimpleNamespace(prompt="custom", plan=False, essentials=True, summary=True, actions=False)
+    assert AI._explicit_mode_set(args) == {"prompt", "essentials", "summary"}
+    args = SimpleNamespace(prompt="", plan=False, essentials=False, summary=False, actions=False)
     assert AI._explicit_mode_set(args) == set()
+    args = SimpleNamespace(prompt="", plan=False, essentials=True, summary=False, actions=False)
+    assert AI._explicit_mode_set(args) == {"essentials"}
 
 
 # ---------- list_ollama_models ----------
@@ -482,6 +502,7 @@ def test_task_label_built_in_prompts():
     assert "action" in AI._task_label(AI.ACTIONS_PROMPT)
     assert "summary" in AI._task_label(AI.SUMMARY_AND_ACTIONS_PROMPT)
     assert "implementation plan" in AI._task_label(AI.PLAN_PROMPT)
+    assert "Essentials" in AI._task_label(AI.ESSENTIALS_PROMPT)
 
 
 def test_task_label_custom_prompt_fallback():
@@ -492,6 +513,7 @@ def test_task_label_custom_prompt_fallback():
 def test_is_built_in_prompt_recognizes_presets():
     assert AI._is_built_in_prompt(AI.SUMMARY_PROMPT) is True
     assert AI._is_built_in_prompt(AI.PLAN_PROMPT) is True
+    assert AI._is_built_in_prompt(AI.ESSENTIALS_PROMPT) is True
     assert AI._is_built_in_prompt("custom {transcript}") is False
 
 
@@ -515,6 +537,25 @@ def test_analyze_short_text_single_call(monkeypatch):
     # The single-call path passes the user's prompt template and transcript.
     assert calls[0][0] is AI.SUMMARY_PROMPT
     assert calls[0][1] == "a short transcript"
+
+
+def test_analyze_short_essentials_single_call(monkeypatch):
+    """A short transcript with --essentials uses one chat_text call and the
+    ESSENTIALS_PROMPT verbatim (no MAP_PROMPT wrapper)."""
+    calls = []
+
+    def fake_chat_text(prompt_template, transcript, *, base_url, model, api_key):
+        calls.append(prompt_template)
+        return "## Essentials\n- [00:00:00] A: point one"
+
+    monkeypatch.setattr(AI, "chat_text", fake_chat_text)
+    out = AI.analyze(
+        AI.ESSENTIALS_PROMPT, "a short transcript",
+        base_url="http://x/v1", model="m", api_key="",
+    )
+    assert out == "## Essentials\n- [00:00:00] A: point one"
+    assert len(calls) == 1
+    assert calls[0] is AI.ESSENTIALS_PROMPT
 
 
 def test_analyze_short_vision_single_call(monkeypatch, tmp_path):

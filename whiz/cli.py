@@ -759,6 +759,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             summary=False,
             actions=False,
             plan=False,
+            essentials=False,
             prompt="",
             vision=getattr(args, "vision", False) or False,
             no_vision=getattr(args, "no_vision", False) or False,
@@ -846,6 +847,12 @@ def cmd_models_download_diarization(args: argparse.Namespace) -> int:
 
 def _analysis_output_path(of_base: Path) -> Path:
     return Path(str(of_base) + ".analysis.md")
+
+
+def _essentials_output_path(of_base: Path) -> Path:
+    """Output path for the essentials extract (a standalone concentrated points
+    list meant to be fed back to a later `whiz analyze` as context)."""
+    return Path(str(of_base) + ".essentials.md")
 
 
 def _recommend_model(models: list[str], prefer_vision: bool) -> int:
@@ -1140,13 +1147,17 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     )
 
     # Write the .analysis.md (prompt + response) and print response to stdout.
-    out_path = _analysis_output_path(of_base)
-    md = f"# whiz analysis — {in_path.name}\n\n"
+    # Essentials mode writes a standalone .essentials.md artifact instead.
+    is_essentials = detected_mode == "essentials"
+    out_path = (_essentials_output_path(of_base) if is_essentials
+                else _analysis_output_path(of_base))
+    title = "essentials" if is_essentials else "analysis"
+    md = f"# whiz {title} — {in_path.name}\n\n"
     md += f"**Model:** {model}  **Vision:** {use_vision}  **Mode:** {detected_mode}\n\n"
     md += "## Prompt\n\n```\n" + prompt_template.replace("{transcript}", "<transcript omitted>") + "\n```\n\n"
     md += "## Response\n\n" + response + "\n"
     out_path.write_text(md, encoding="utf-8")
-    ui.status(f"Wrote analysis: {out_path}", kind="ok")
+    ui.status(f"Wrote {title}: {out_path}", kind="ok")
     print(response)
     return 0
 
@@ -1551,7 +1562,7 @@ def build_parser() -> argparse.ArgumentParser:
     mdiar.set_defaults(func=cmd_models_download_diarization)
 
     # analyze
-    an = sub.add_parser("analyze", aliases=["a"], help="AI-analyze a prior transcript (+ frames): auto-detects meeting vs implementation-plan, or use --summary/--actions/--plan/--prompt")
+    an = sub.add_parser("analyze", aliases=["a"], help="AI-analyze a prior transcript (+ frames): auto-detects meeting vs implementation-plan, or use --summary/--actions/--plan/--essentials/--prompt")
     an.add_argument("file", help="Input file (used to find the .frames.json manifest or .speakers.txt alongside it)")
     an.add_argument("--model", default="", help="AI model name (default: config ai_model, e.g. llava, qwen2.5-vl, gpt-4o-mini)")
     an.add_argument("--base-url", dest="base_url", default="", help="Chat API base URL (default: config ai_base_url, http://localhost:11434/v1)")
@@ -1560,7 +1571,8 @@ def build_parser() -> argparse.ArgumentParser:
     an.add_argument("--summary", action="store_true", help="Use the built-in summary prompt")
     an.add_argument("--actions", action="store_true", help="Use the built-in action-items prompt")
     an.add_argument("--plan", action="store_true", help="Use the built-in implementation-plan prompt (Overview → Goal → Proposed approach → Steps with owner/effort → Risks → Open questions → Acceptance criteria)")
-    an.add_argument("--prompt", default="", help="Freeform prompt (overrides --summary/--actions/--plan; use {transcript} placeholder for the transcript)")
+    an.add_argument("--essentials", action="store_true", help="Extract every meaningful point (facts, decisions, requirements, names, numbers, UI details, open questions) into one dense Essentials section written to <stem>.essentials.md — a concentrated artifact to feed to a later analyze")
+    an.add_argument("--prompt", default="", help="Freeform prompt (overrides --summary/--actions/--plan/--essentials; use {transcript} placeholder for the transcript)")
     an.add_argument("--vision", action="store_true", help="Send on-screen frames as images to a vision model (requires a prior --screenshots run). Auto-enabled when a frames manifest exists and the model is vision-capable; --no-vision opts out")
     an.add_argument("--no-vision", dest="no_vision", action="store_true", help="Opt out of the auto-enabled vision analysis (stay text-only even when frames exist)")
     an.set_defaults(func=cmd_analyze)
