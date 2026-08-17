@@ -27,6 +27,7 @@ from whiz import diarize as D
 from whiz import merge as MR
 from whiz import models as M
 from whiz import screenshots as SC
+from whiz import ai as AI
 
 # whisper-cli output-format flags.
 OUTPUT_FLAGS = {
@@ -545,6 +546,88 @@ def cmd_models_download_diarization(args: argparse.Namespace) -> int:
         return 2
 
 
+# ---------- analyze ----------
+
+def _analysis_output_path(of_base: Path) -> Path:
+    return Path(str(of_base) + ".analysis.md")
+
+
+def cmd_analyze(args: argparse.Namespace) -> int:
+    """Analyze a prior transcript (and optionally frames) with an AI model.
+
+    Loads the frames manifest if present (<stem>.frames.json) for both the
+    transcript text and (with --vision) the frame images; otherwise loads the
+    <stem>.speakers.txt transcript. Writes the prompt + response to
+    <stem>.analysis.md and prints the response to stdout.
+    """
+    config = cfg.load()
+    if not config.ai_model and not args.model:
+        raise SystemExit(
+            "No AI model configured. Set one with:\n"
+            "  whiz config set ai_model=llava\n"
+            "or pass --model on the command line."
+        )
+    model = args.model or config.ai_model
+    base_url = args.base_url or config.ai_base_url
+    api_key = args.api_key if args.api_key is not None else config.ai_api_key
+    max_frames = args.max_frames if args.max_frames is not None else config.ai_max_frames
+
+    in_path = Path(args.file).expanduser()
+    if not in_path.exists():
+        raise SystemExit(f"Input file not found: {in_path}")
+
+    of_base = in_path.with_suffix("")
+    # For video inputs the manifest/transcript sit alongside, named after the
+    # video stem (not the .wav). We just use the video stem directly.
+    manifest_path = SC.frames_manifest_path(of_base)
+    txt_path = Path(str(of_base) + ".speakers.txt")
+
+    entries = SC.load_manifest(manifest_path)
+    if entries:
+        transcript = AI.transcript_text(entries)
+        print(f"Loaded frames manifest: {manifest_path} ({len(entries)} segments)", file=sys.stderr)
+    elif txt_path.exists():
+        transcript = txt_path.read_text(encoding="utf-8")
+        print(f"Loaded transcript: {txt_path}", file=sys.stderr)
+    else:
+        raise SystemExit(
+            f"No transcript found. Looked for:\n  {manifest_path}\n  {txt_path}\n"
+            "Run `whiz transcribe --speakers [--screenshots] <file>` first."
+        )
+
+    prompt_template = AI.resolve_prompt(args)
+    use_vision = args.vision and entries is not None
+    if args.vision and entries is None:
+        print("--vision requested but no frames manifest found; falling back to text-only.", file=sys.stderr)
+        use_vision = False
+
+    print(f"Model: {model}  base_url: {base_url}  vision: {use_vision}", file=sys.stderr)
+    if use_vision:
+        frames_dir = SC.frames_dir_for(of_base)
+        frame_paths = [frames_dir / e.frame for e in (entries or []) if e.frame]
+        print(f"Sending {len(frame_paths)} frames (cap {max_frames}) ...", file=sys.stderr)
+        response = AI.chat_vision(
+            prompt_template, transcript, frame_paths,
+            base_url=base_url, model=model, api_key=api_key, max_frames=max_frames,
+        )
+    else:
+        response = AI.chat_text(
+            prompt_template, transcript,
+            base_url=base_url, model=model, api_key=api_key,
+        )
+
+    # Write the .analysis.md (prompt + response) and print response to stdout.
+    out_path = _analysis_output_path(of_base)
+    md = f"# whiz analysis — {in_path.name}\n\n"
+    md += f"**Model:** {model}  **Vision:** {use_vision}\n\n"
+    md += "## Prompt\n\n```\n" + prompt_template.replace("{transcript}", "<transcript omitted>") + "\n```\n\n"
+    md += "## Response\n\n" + response + "\n"
+    out_path.write_text(md, encoding="utf-8")
+    print(f"Wrote analysis: {out_path}", file=sys.stderr)
+    print(response)
+    return 0
+
+
 def cmd_merge(args: argparse.Namespace) -> int:
     """Re-run only diarization + merge against an existing whisper JSON.
 
@@ -757,6 +840,19 @@ def build_parser() -> argparse.ArgumentParser:
     mdiar = msub.add_parser("download-diarization", aliases=["diar"], help="Download diarization models (sherpa-onnx segmentation + embedding)")
     mdiar.add_argument("--dest", default="", help="Destination directory (default: ~/.cache/whiz/diarization)")
     mdiar.set_defaults(func=cmd_models_download_diarization)
+
+    # analyze
+    an = sub.add_parser("analyze", aliases=["a"], help="Analyze a prior transcript (and optional frames) with an AI model via Ollama/OpenAI-compatible API")
+    an.add_argument("file", help="Input file (used to find the .frames.json manifest or .speakers.txt alongside it)")
+    an.add_argument("--model", default="", help="AI model name (default: config ai_model, e.g. llava, qwen2.5-vl, gpt-4o-mini)")
+    an.add_argument("--base-url", dest="base_url", default="", help="Chat API base URL (default: config ai_base_url, http://localhost:11434/v1)")
+    an.add_argument("--api-key", dest="api_key", default=None, help="API key (default: config ai_api_key; Ollama ignores it)")
+    an.add_argument("--max-frames", dest="max_frames", type=int, default=None, help="Max frames sent to a vision model, spread evenly (default: config ai_max_frames, 50)")
+    an.add_argument("--summary", action="store_true", help="Use the built-in summary prompt")
+    an.add_argument("--actions", action="store_true", help="Use the built-in action-items prompt")
+    an.add_argument("--prompt", default="", help="Freeform prompt (overrides --summary/--actions; use {transcript} placeholder for the transcript)")
+    an.add_argument("--vision", action="store_true", help="Send on-screen frames as images to a vision model (requires a prior --screenshots run)")
+    an.set_defaults(func=cmd_analyze)
 
     # config
     cp = sub.add_parser("config", aliases=["c"], help="View or edit configuration")

@@ -180,6 +180,11 @@ num_speakers = 0
 cluster_threshold = 0.9
 diarization_segmentation_model = ""
 diarization_embedding_model = ""
+# --- AI analysis (Ollama / OpenAI-compatible) ---
+ai_base_url = "http://localhost:11434/v1"
+ai_model = ""
+ai_api_key = ""
+ai_max_frames = 50
 ```
 
 If `model` is empty, whiz auto-picks the best available model by this preference:
@@ -286,6 +291,48 @@ whiz merge --speakers 4 --speakers-names Enric,Vadim,Thomas,Dziyana recording.mo
 # Capture on-screen frames per segment (for AI analysis / HTML output)
 whiz merge --speakers 4 --screenshots recording.mov
 ```
+
+## AI analysis (summary, action items, vision)
+
+`whiz analyze` sends a prior transcript (and optionally on-screen frames) to a chat model via an OpenAI-compatible API ([Ollama](https://ollama.com) by default). It produces a markdown analysis (`.analysis.md`) alongside the input and prints the response to stdout. Requires a prior `whiz transcribe --speakers` (and `--screenshots` for `--vision`).
+
+### Setup
+
+```bash
+# 1. Tell whiz which model to use (text-only for --summary/--actions)
+whiz config set ai_model=gpt-4o-mini        # or any Ollama / OpenAI-compatible model
+
+# For vision (--vision), use a vision-capable model
+whiz config set ai_model=llava              # or qwen2.5-vl, minicpm-v, etc.
+
+# Optional: point at a different server / set an API key for cloud providers
+whiz config set ai_base_url=http://localhost:11434/v1
+whiz config set ai_api_key=your-key          # Ollama ignores this
+```
+
+### Usage
+
+```bash
+# Summary + action items (default when neither --summary nor --actions is set)
+whiz analyze recording.mov
+
+# Just a summary
+whiz analyze recording.mov --summary
+
+# Just action items
+whiz analyze recording.mov --actions
+
+# Freeform question (use {transcript} where the transcript should go)
+whiz analyze recording.mov --prompt "What risks did the team raise? Transcript: {transcript}"
+
+# Vision analysis: send on-screen frames to a vision model (requires a prior
+# --screenshots run; frames are spread evenly, capped at ai_max_frames=50)
+whiz analyze recording.mov --vision --summary
+```
+
+`--vision` requires a vision-capable model (`llava`, `qwen2.5-vl`, `minicpm-v`, `gpt-4o`, ...). whiz detects a text-only model rejecting images and prints a clear hint. Frames are base64-encoded only at send time, so the on-disk `.frames.json` manifest stays small (paths only).
+
+Output is written to `<stem>.analysis.md` (the prompt + the response) and the response is also printed to stdout.
 
 ## License
 

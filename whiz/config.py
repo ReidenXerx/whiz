@@ -53,6 +53,15 @@ class Config:
     # Explicit paths to diarization models (empty => auto-discover).
     diarization_segmentation_model: str = ""
     diarization_embedding_model: str = ""
+    # --- AI analysis (Ollama / OpenAI-compatible) ---
+    # Base URL of the chat completions endpoint (without /chat/completions).
+    ai_base_url: str = "http://localhost:11434/v1"
+    # Model name (e.g. 'llava', 'qwen2.5-vl', 'gpt-4o-mini'). Empty => error with hint.
+    ai_model: str = ""
+    # API key (Ollama ignores this; set for cloud OpenAI-compatible providers).
+    ai_api_key: str = ""
+    # Max frames sent to a vision model (spread evenly across the video).
+    ai_max_frames: int = 50
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
