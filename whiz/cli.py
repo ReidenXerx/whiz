@@ -807,6 +807,85 @@ def _analysis_output_path(of_base: Path) -> Path:
     return Path(str(of_base) + ".analysis.md")
 
 
+def _recommend_model(models: list[str], prefer_vision: bool) -> int:
+    """Pick the index of the recommended default model from ``models``.
+
+    Heuristic: when ``prefer_vision`` is set, prefer a name suggesting a vision
+    model (llava, vl, vision, minicpm-v, qwen2.5-vl, etc.). Otherwise prefer a
+    name suggesting a strong text/coder model (gpt, qwen, llama, mistral, glm,
+    deepseek, devstral, ...). Anything not tagged ':cloud' wins over cloud-tagged
+    (local models respond faster and cost nothing). Falls back to 0.
+    """
+    if not models:
+        return 0
+    vision_tokens = ("vl", "vision", "llava", "minicpm-v", "qwen2.5-vl", "multimodal")
+    text_tokens = ("gpt", "qwen", "llama", "mistral", "mixtral", "glm", "deepseek", "devstral", "codestral", "coder")
+    want_tokens = vision_tokens if prefer_vision else text_tokens
+    best_idx = 0
+    best_score = -1
+    for i, name in enumerate(models):
+        low = name.lower()
+        is_cloud = ":cloud" in low
+        score = 0
+        if not is_cloud:
+            score += 2
+        if any(tok in low for tok in want_tokens):
+            score += 5
+        if score > best_score:
+            best_score = score
+            best_idx = i
+    return best_idx
+
+
+def _pick_model_interactive(config: cfg.Config, *, prefer_vision: bool) -> str | None:
+    """List available Ollama models and let the user choose; persist to config.
+
+    Returns the chosen model name (and saves it to ``config.ai_model`` via
+    ``cfg.save``), or None if no models were reachable — in which case a hint is
+    printed and the caller should exit cleanly.
+    """
+    base_url = config.ai_base_url
+    ui.phase("choosing AI model")
+    ui.muted(f"querying {base_url} for available models ...")
+    models = AI.list_ollama_models(base_url)
+    if not models:
+        ui.status("No AI model configured and no models found at the server.", kind="warn",
+                  detail="Set one with:  whiz config set ai_model=llava\nOr start Ollama:  ollama serve")
+        return None
+    rec_idx = _recommend_model(models, prefer_vision=prefer_vision)
+    ui.header("whiz", "models")
+    rows: list[list[object]] = []
+    for i, name in enumerate(models):
+        tag = "\u2190 recommended" if i == rec_idx else ""
+        rows.append([i + 1, name, tag])
+    ui.table(
+        f"{len(models)} model(s) available",
+        [("#", "right"), ("Model", "left"), ("", "left")],
+        rows,
+    )
+    default_name = models[rec_idx]
+    try:
+        choice = input(f"Choose a model [1-{len(models)}] (default {rec_idx + 1} = {default_name}): ").strip()
+    except EOFError:
+        choice = ""
+    if not choice:
+        chosen = default_name
+    else:
+        idx = int(choice) - 1 if choice.isdigit() else -1
+        if 0 <= idx < len(models):
+            chosen = models[idx]
+        else:
+            # Accept a typed model name verbatim too.
+            chosen = choice if choice in models else default_name
+            if chosen != default_name and choice not in models:
+                ui.status(f"'{choice}' isn't in the list; using default {default_name}.", kind="warn")
+                chosen = default_name
+    config.ai_model = chosen
+    cfg.save(config)
+    ui.status(f"Saved ai_model = {chosen}", kind="ok")
+    return chosen
+
+
 def cmd_analyze(args: argparse.Namespace) -> int:
     """Analyze a prior transcript (and optionally frames) with an AI model.
 
@@ -817,11 +896,9 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     """
     config = cfg.load()
     if not config.ai_model and not args.model:
-        raise SystemExit(
-            "No AI model configured. Set one with:\n"
-            "  whiz config set ai_model=llava\n"
-            "or pass --model on the command line."
-        )
+        chosen = _pick_model_interactive(config, prefer_vision=args.vision)
+        if not chosen:
+            return 1
     model = args.model or config.ai_model
     base_url = args.base_url or config.ai_base_url
     api_key = args.api_key if args.api_key is not None else config.ai_api_key
@@ -850,7 +927,24 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             "Run `whiz transcribe --speakers [--screenshots] <file>` first."
         )
 
-    prompt_template = AI.resolve_prompt(args)
+    # Resolve the prompt. Explicit flags (--prompt/--plan/--summary/--actions)
+    # skip the classifier; the default path auto-detects via the model.
+    explicit_modes = AI._explicit_mode_set(args)
+    detected_mode = ""
+    if explicit_modes:
+        prompt_template = AI.resolve_prompt(args)
+        mode_label = next(iter(explicit_modes))
+        detected_mode = mode_label
+    else:
+        prompt_template, detected_mode = AI.resolve_prompt_auto(
+            transcript, base_url=base_url, model=model, api_key=api_key,
+        )
+        if detected_mode.endswith("(fallback)"):
+            ui.status(f"Classifier failed; falling back to summary + actions.", kind="warn",
+                      detail=AI._last_classifier_error[0] or "")
+        else:
+            ui.status(f"Auto-detected: {detected_mode}", kind="info")
+
     use_vision = args.vision and entries is not None
     if args.vision and entries is None:
         ui.status("--vision requested but no frames manifest found; falling back to text-only.", kind="warn")
@@ -858,7 +952,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     ui.phase("analyzing")
     ui.kv("Model", model)
-    ui.muted(f"base_url: {base_url}  vision: {use_vision}")
+    ui.muted(f"base_url: {base_url}  vision: {use_vision}  mode: {detected_mode}")
     if use_vision:
         frames_dir = SC.frames_dir_for(of_base)
         frame_paths = [frames_dir / e.frame for e in (entries or []) if e.frame]
@@ -876,7 +970,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     # Write the .analysis.md (prompt + response) and print response to stdout.
     out_path = _analysis_output_path(of_base)
     md = f"# whiz analysis — {in_path.name}\n\n"
-    md += f"**Model:** {model}  **Vision:** {use_vision}\n\n"
+    md += f"**Model:** {model}  **Vision:** {use_vision}  **Mode:** {detected_mode}\n\n"
     md += "## Prompt\n\n```\n" + prompt_template.replace("{transcript}", "<transcript omitted>") + "\n```\n\n"
     md += "## Response\n\n" + response + "\n"
     out_path.write_text(md, encoding="utf-8")
@@ -1282,7 +1376,7 @@ def build_parser() -> argparse.ArgumentParser:
     mdiar.set_defaults(func=cmd_models_download_diarization)
 
     # analyze
-    an = sub.add_parser("analyze", aliases=["a"], help="Analyze a prior transcript (and optional frames) with an AI model via Ollama/OpenAI-compatible API")
+    an = sub.add_parser("analyze", aliases=["a"], help="AI-analyze a prior transcript (+ frames): auto-detects meeting vs implementation-plan, or use --summary/--actions/--plan/--prompt")
     an.add_argument("file", help="Input file (used to find the .frames.json manifest or .speakers.txt alongside it)")
     an.add_argument("--model", default="", help="AI model name (default: config ai_model, e.g. llava, qwen2.5-vl, gpt-4o-mini)")
     an.add_argument("--base-url", dest="base_url", default="", help="Chat API base URL (default: config ai_base_url, http://localhost:11434/v1)")
@@ -1290,7 +1384,8 @@ def build_parser() -> argparse.ArgumentParser:
     an.add_argument("--max-frames", dest="max_frames", type=int, default=None, help="Max frames sent to a vision model, spread evenly (default: config ai_max_frames, 50)")
     an.add_argument("--summary", action="store_true", help="Use the built-in summary prompt")
     an.add_argument("--actions", action="store_true", help="Use the built-in action-items prompt")
-    an.add_argument("--prompt", default="", help="Freeform prompt (overrides --summary/--actions; use {transcript} placeholder for the transcript)")
+    an.add_argument("--plan", action="store_true", help="Use the built-in implementation-plan prompt (Overview → Goal → Proposed approach → Steps with owner/effort → Risks → Open questions → Acceptance criteria)")
+    an.add_argument("--prompt", default="", help="Freeform prompt (overrides --summary/--actions/--plan; use {transcript} placeholder for the transcript)")
     an.add_argument("--vision", action="store_true", help="Send on-screen frames as images to a vision model (requires a prior --screenshots run)")
     an.set_defaults(func=cmd_analyze)
 

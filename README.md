@@ -399,18 +399,30 @@ Naming precedence when profiles exist: voice-profile auto-match seeds the names,
 
 The embedding pass reuses the diarization cache, so on a cached run profile matching adds only seconds. Tune the threshold with `whiz config set speaker_match_threshold=0.85` (higher = stricter, fewer auto-assignments) or disable saving with `whiz config set save_voice_profiles=false`.
 
-## AI analysis (summary, action items, vision)
+## AI analysis (auto-detect, summary, action items, implementation plans, vision)
 
 `whiz analyze` sends a prior transcript (and optionally on-screen frames) to a chat model via an OpenAI-compatible API ([Ollama](https://ollama.com) by default). It produces a markdown analysis (`.analysis.md`) alongside the input and prints the response to stdout. Requires a prior `whiz transcribe` of a video (which auto-produces speakers + screenshots) or an audio run with `--speakers` (and `--screenshots` for `--vision`).
 
-### Setup
+### Auto-detect (the default)
+
+When you run `whiz analyze` with **no mode flag**, whiz first asks the model to classify the transcript as one of:
+
+- **MEETING** — a standup, review, decision meeting, interview, or general conversation → summary + action items.
+- **PLAN** — a discussion about building, implementing, fixing, or changing a specific feature/bug/task → a structured implementation plan.
+
+The detected mode is shown in the terminal and written to the `.analysis.md` header. If the classifier call fails (Ollama down, model error), whiz falls back to summary + actions with a warning rather than aborting. Explicit flags (`--summary` / `--actions` / `--plan` / `--prompt`) skip the classifier and go straight to their prompt.
+
+### Setup: interactive model picker
+
+If you haven't set `ai_model` yet, the first `whiz analyze` run asks the running Ollama server for its available models, shows them in a table with a recommended default highlighted, and lets you pick one (by number or name). The choice is saved to config (`ai_model`) so you're only asked once. If Ollama isn't running, whiz prints a hint and exits cleanly instead of crashing.
 
 ```bash
-# 1. Tell whiz which model to use (text-only for --summary/--actions)
-whiz config set ai_model=gpt-4o-mini        # or any Ollama / OpenAI-compatible model
+# First run with no model configured — whiz lists models and saves your choice
+whiz analyze recording.mov
 
-# For vision (--vision), use a vision-capable model
-whiz config set ai_model=llava              # or qwen2.5-vl, minicpm-v, etc.
+# Or set one explicitly upfront (skips the picker)
+whiz config set ai_model=gpt-4o-mini        # any Ollama / OpenAI-compatible model
+whiz config set ai_model=llava              # vision-capable model for --vision
 
 # Optional: point at a different server / set an API key for cloud providers
 whiz config set ai_base_url=http://localhost:11434/v1
@@ -420,7 +432,7 @@ whiz config set ai_api_key=your-key          # Ollama ignores this
 ### Usage
 
 ```bash
-# Summary + action items (default when neither --summary nor --actions is set)
+# Auto-detect: one command handles both meetings and feature discussions
 whiz analyze recording.mov
 
 # Just a summary
@@ -428,6 +440,9 @@ whiz analyze recording.mov --summary
 
 # Just action items
 whiz analyze recording.mov --actions
+
+# Force an implementation plan (auto-detected by default for feature/task talks)
+whiz analyze recording.mov --plan
 
 # Freeform question (use {transcript} where the transcript should go)
 whiz analyze recording.mov --prompt "What risks did the team raise? Transcript: {transcript}"
@@ -437,6 +452,16 @@ whiz analyze recording.mov --prompt "What risks did the team raise? Transcript: 
 # evenly, capped at ai_max_frames=50)
 whiz analyze recording.mov --vision --summary
 ```
+
+The implementation-plan output (from `--plan` or auto-detected `PLAN`) follows this structure:
+
+- **Overview** — what is being built/changed and why (2-4 sentences)
+- **Goal** — the single concrete outcome that 'done' looks like
+- **Proposed approach** — the key design choice and its rationale
+- **Steps** — numbered list, each with **Owner** (speaker who raised/owns it, or `?`) and **Effort** (S / M / L with a one-line justification)
+- **Risks** — bullet list with a short mitigation each
+- **Open questions** — unresolved questions that need a decision or more info
+- **Acceptance criteria** — a checklist (`- [ ] ...`) of 'done' conditions
 
 `--vision` requires a vision-capable model (`llava`, `qwen2.5-vl`, `minicpm-v`, `gpt-4o`, ...). whiz detects a text-only model rejecting images and prints a clear hint. Frames are base64-encoded only at send time, so the on-disk `.frames.json` manifest stays small (paths only).
 

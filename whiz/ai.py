@@ -1,8 +1,14 @@
 """AI analysis via an OpenAI-compatible chat API (Ollama by default).
 
 Sends a transcript (and optionally on-screen frames) to a chat model for
-summary, action items, or freeform analysis. Uses only ``urllib.request`` —
-no new dependency. The request format is the OpenAI vision message shape:
+summary, action items, implementation plans, or freeform analysis. The
+default analyze path auto-detects whether the transcript is a meeting (→
+summary + action items) or a feature/task discussion (→ a structured
+implementation plan); explicit ``--summary`` / ``--actions`` / ``--plan`` /
+``--prompt`` flags override the detector.
+
+Uses only ``urllib.request`` — no new dependency. The request format is the
+OpenAI vision message shape:
 
     content: [
         {"type": "text", "text": ...},
@@ -59,12 +65,67 @@ SUMMARY_AND_ACTIONS_PROMPT = (
     "Transcript:\n{transcript}"
 )
 
+PLAN_PROMPT = (
+    "You are an expert technical lead. Below is a transcript of a discussion "
+    "(with speaker labels and timestamps) that is about building a feature, "
+    "fixing a bug, or carrying out a technical task. Turn it into a concrete, "
+    "actionable implementation plan.\n\n"
+    "Produce exactly these sections, in this order, using Markdown headings:\n\n"
+    "## Overview\n"
+    "2-4 sentences: what is being built/changed and why.\n\n"
+    "## Goal\n"
+    "The single concrete outcome that 'done' looks like.\n\n"
+    "## Proposed approach\n"
+    "A short narrative of how the work will be done — the key design choice and "
+    "its rationale.\n\n"
+    "## Steps\n"
+    "A numbered list. Each step MUST have:\n"
+    "- **Step N.** <title> — one line of what to do.\n"
+    "- **Owner:** the speaker who raised/owns it, or '?' if unclear.\n"
+    "- **Effort:** S / M / L with a one-line justification.\n"
+    "List every concrete task inferred from the transcript; if a task is only "
+    "implied, mark it '(inferred)'. Keep the list in a sensible execution order.\n\n"
+    "## Risks\n"
+    "Bullet list of risks and unknowns raised or implied, each with a short "
+    "mitigation.\n\n"
+    "## Open questions\n"
+    "Bullet list of unresolved questions that need a decision or more info. "
+    "If none, write 'None.'\n\n"
+    "## Acceptance criteria\n"
+    "A checklist ('- [ ] ...') of the conditions the finished work must meet to "
+    "be considered done. Pull these from the transcript; infer reasonable ones if "
+    "the discussion was thin.\n\n"
+    "Transcript:\n{transcript}"
+)
+
+CLASSIFY_PROMPT = (
+    "You are a fast content classifier. Read the transcript below and decide "
+    "which of these two categories it belongs to:\n"
+    "- MEETING — people discussing a past/ongoing topic, a standup, a review, a "
+    "decision meeting, an interview, or general conversation.\n"
+    "- PLAN — people discussing building, implementing, fixing, or changing a "
+    "specific feature, bug, product, or technical task, where the output should "
+    "be an actionable implementation plan rather than meeting notes.\n\n"
+    "Reply with EXACTLY ONE token: MEETING or PLAN. No other text, no "
+    "punctuation.\n\n"
+    "Transcript:\n{transcript}\n\nClassification:"
+)
+
 
 def resolve_prompt(args) -> str:
-    """Pick the prompt based on --summary/--actions/--prompt flags."""
-    # --prompt wins; else --summary/--actions combine; default = summary+actions.
+    """Pick the prompt based on --summary/--actions/--plan/--prompt flags.
+
+    Explicit flags skip the auto-detect path. Precedence:
+      --prompt > --plan > --summary/--actions combos > default (auto-detect).
+    The default branch returns ``SUMMARY_AND_ACTIONS_PROMPT`` so callers that
+    just need a static prompt (and existing tests) keep working; the auto path
+    that actually runs the classifier is ``resolve_prompt_auto``.
+    """
+    # --prompt wins; then --plan; then --summary/--actions combine; default = summary+actions.
     if getattr(args, "prompt", None):
         return args.prompt
+    if getattr(args, "plan", False):
+        return PLAN_PROMPT
     want_summary = getattr(args, "summary", False)
     want_actions = getattr(args, "actions", False)
     if want_summary and want_actions:
@@ -73,8 +134,59 @@ def resolve_prompt(args) -> str:
         return SUMMARY_PROMPT
     if want_actions:
         return ACTIONS_PROMPT
-    # Default: summary + actions.
+    # Default: summary + actions (auto-detect is layered on by resolve_prompt_auto).
     return SUMMARY_AND_ACTIONS_PROMPT
+
+
+def _explicit_mode_set(args) -> set[str]:
+    """Names of the explicit mode flags the user passed (for auto-detect gating)."""
+    modes: set[str] = set()
+    if getattr(args, "prompt", None):
+        modes.add("prompt")
+    if getattr(args, "plan", False):
+        modes.add("plan")
+    if getattr(args, "summary", False):
+        modes.add("summary")
+    if getattr(args, "actions", False):
+        modes.add("actions")
+    return modes
+
+
+def resolve_prompt_auto(transcript: str, *, base_url: str, model: str, api_key: str = "") -> tuple[str, str]:
+    """Auto-detect and return (prompt_template, detected_mode).
+
+    Runs ``CLASSIFY_PROMPT`` against the model and routes to ``PLAN_PROMPT`` if the
+    reply is ``PLAN`` (case-insensitive, single token), else to
+    ``SUMMARY_AND_ACTIONS_PROMPT``. ``detected_mode`` is the lowercased token we
+    actually routed on (``'plan'`` or ``'meeting'``).
+
+    On any failure (network/model error, empty/garbled reply), falls back to
+    ``SUMMARY_AND_ACTIONS_PROMPT`` with ``detected_mode`` set to ``'meeting'`` plus
+    the suffix ``' (fallback)'`` so callers can surface that the detector failed.
+    """
+    try:
+        reply = chat_text(CLASSIFY_PROMPT, transcript, base_url=base_url, model=model, api_key=api_key)
+    except RuntimeError as exc:
+        # Caller logs the warning; we just pick the safe default.
+        _last_classifier_error[0] = str(exc)
+        return SUMMARY_AND_ACTIONS_PROMPT, "meeting (fallback)"
+    token = reply.strip().splitlines()[0].strip().upper() if reply else ""
+    # The model may prepend a stray label or wrap the token in prose; accept the
+    # first occurrence of either keyword to be forgiving.
+    if "PLAN" in token and "MEETING" not in token:
+        return PLAN_PROMPT, "plan"
+    if "MEETING" in token:
+        return SUMMARY_AND_ACTIONS_PROMPT, "meeting"
+    if token == "PLAN":
+        return PLAN_PROMPT, "plan"
+    # Anything else (including empty) -> safe default.
+    return SUMMARY_AND_ACTIONS_PROMPT, "meeting"
+
+
+# Last classifier error text, stashed here so resolve_prompt_auto stays pure-ish
+# while still letting cmd_analyze surface the reason in its warning. Reset on
+# each call to resolve_prompt_auto before the classifier runs.
+_last_classifier_error: list[str] = [""]
 
 
 def transcript_text(entries) -> str:
@@ -192,6 +304,53 @@ def chat_vision(
             })
     messages = [{"role": "user", "content": content}]
     return _post_chat(base_url, model, messages, api_key)
+
+
+def list_ollama_models(base_url: str, *, timeout: int = 10) -> list[str]:
+    """List model names available on an Ollama / OpenAI-compatible server.
+
+    ``base_url`` is the chat base URL (e.g. ``http://localhost:11434/v1``); the
+    Ollama native tags endpoint lives at the server root, so we strip a trailing
+    ``/v1`` and query ``/api/tags`` first (``{"models":[{"name":...}]}``), then
+    fall back to ``/v1/models`` (OpenAI shape ``{"data":[{"id":...}]}``) if the
+    native endpoint is unavailable.
+
+    Returns model names in server order (empty list on any failure).
+    """
+    root = base_url.rstrip("/")
+    if root.endswith("/v1"):
+        root = root[:-3]
+    # Try the native Ollama tags endpoint first.
+    names = _get_json(root + "/api/tags", timeout)
+    if names is not None:
+        return names
+    # Fallback to the OpenAI-style list endpoint.
+    return _get_json(base_url.rstrip("/") + "/models", timeout) or []
+
+
+def _get_json(url: str, timeout: int) -> list[str] | None:
+    """GET ``url`` and return model names, or None if the endpoint failed.
+
+    Handles both the Ollama shape (``models[].name``) and the OpenAI shape
+    (``data[].id``); returns the first shape that matches.
+    """
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - local server
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, ValueError):
+        return None
+    models = data.get("models") if isinstance(data, dict) else None
+    if isinstance(models, list):
+        out = [m.get("name", "") for m in models if isinstance(m, dict)]
+        if any(out):
+            return [n for n in out if n]
+    data_list = data.get("data") if isinstance(data, dict) else None
+    if isinstance(data_list, list):
+        out = [m.get("id", "") for m in data_list if isinstance(m, dict)]
+        if any(out):
+            return [n for n in out if n]
+    return None
 
 
 def _subsample(frames: list[Path], max_frames: int) -> list[Path]:

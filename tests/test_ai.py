@@ -45,6 +45,29 @@ def test_resolve_prompt_summary_and_actions_explicit():
     assert AI.resolve_prompt(args) == AI.SUMMARY_AND_ACTIONS_PROMPT
 
 
+def test_resolve_prompt_plan_flag():
+    args = SimpleNamespace(prompt="", plan=True, summary=False, actions=False)
+    assert AI.resolve_prompt(args) == AI.PLAN_PROMPT
+
+
+def test_resolve_prompt_plan_overridden_by_prompt():
+    args = SimpleNamespace(prompt="custom {transcript}", plan=True, summary=True, actions=True)
+    assert AI.resolve_prompt(args) == "custom {transcript}"
+
+
+def test_plan_prompt_has_required_sections():
+    for heading in ("Overview", "Goal", "Proposed approach", "Steps", "Risks",
+                    "Open questions", "Acceptance criteria"):
+        assert heading in AI.PLAN_PROMPT
+    assert "{transcript}" in AI.PLAN_PROMPT
+
+
+def test_classify_prompt_has_tokens():
+    assert "MEETING" in AI.CLASSIFY_PROMPT
+    assert "PLAN" in AI.CLASSIFY_PROMPT
+    assert "{transcript}" in AI.CLASSIFY_PROMPT
+
+
 # ---------- transcript_text ----------
 
 def test_transcript_text_with_frame_entries():
@@ -222,3 +245,143 @@ def test_chat_text_no_choices_raises(monkeypatch):
         assert False, "expected RuntimeError"
     except RuntimeError as e:
         assert "no choices" in str(e)
+
+
+# ---------- resolve_prompt_auto (classifier routing) ----------
+
+def test_resolve_prompt_auto_routes_to_plan(monkeypatch):
+    calls = []
+
+    def fake_chat_text(prompt_template, transcript, *, base_url, model, api_key):
+        calls.append(prompt_template)
+        if prompt_template is AI.CLASSIFY_PROMPT:
+            return "PLAN"
+        return "plan body"
+
+    monkeypatch.setattr(AI, "chat_text", fake_chat_text)
+    prompt, mode = AI.resolve_prompt_auto(
+        "some transcript", base_url="http://x/v1", model="m", api_key="",
+    )
+    assert prompt is AI.PLAN_PROMPT
+    assert mode == "plan"
+    assert calls and calls[0] is AI.CLASSIFY_PROMPT
+
+
+def test_resolve_prompt_auto_routes_to_meeting(monkeypatch):
+    monkeypatch.setattr(AI, "chat_text", lambda pt, t, **kw: "MEETING"
+                       if pt is AI.CLASSIFY_PROMPT else "meeting body")
+    prompt, mode = AI.resolve_prompt_auto(
+        "some transcript", base_url="http://x/v1", model="m", api_key="",
+    )
+    assert prompt is AI.SUMMARY_AND_ACTIONS_PROMPT
+    assert mode == "meeting"
+
+
+def test_resolve_prompt_auto_lowercase_token(monkeypatch):
+    monkeypatch.setattr(AI, "chat_text", lambda pt, t, **kw: "plan" if pt is AI.CLASSIFY_PROMPT else "x")
+    prompt, mode = AI.resolve_prompt_auto(
+        "t", base_url="http://x/v1", model="m", api_key="",
+    )
+    assert prompt is AI.PLAN_PROMPT
+    assert mode == "plan"
+
+
+def test_resolve_prompt_auto_fallback_on_error(monkeypatch):
+    def fake_chat_text(prompt_template, transcript, *, base_url, model, api_key):
+        if prompt_template is AI.CLASSIFY_PROMPT:
+            raise RuntimeError("boom")
+        return "x"
+
+    monkeypatch.setattr(AI, "chat_text", fake_chat_text)
+    prompt, mode = AI.resolve_prompt_auto(
+        "t", base_url="http://x/v1", model="m", api_key="",
+    )
+    assert prompt is AI.SUMMARY_AND_ACTIONS_PROMPT
+    assert "fallback" in mode
+
+
+def test_resolve_prompt_auto_garbled_reply_defaults_to_meeting(monkeypatch):
+    monkeypatch.setattr(AI, "chat_text", lambda pt, t, **kw: "banana" if pt is AI.CLASSIFY_PROMPT else "x")
+    prompt, mode = AI.resolve_prompt_auto(
+        "t", base_url="http://x/v1", model="m", api_key="",
+    )
+    assert prompt is AI.SUMMARY_AND_ACTIONS_PROMPT
+    assert mode == "meeting"
+
+
+def test_explicit_mode_set_detects_flags():
+    args = SimpleNamespace(prompt="", plan=True, summary=False, actions=False)
+    assert AI._explicit_mode_set(args) == {"plan"}
+    args = SimpleNamespace(prompt="custom", plan=False, summary=True, actions=False)
+    assert AI._explicit_mode_set(args) == {"prompt", "summary"}
+    args = SimpleNamespace(prompt="", plan=False, summary=False, actions=False)
+    assert AI._explicit_mode_set(args) == set()
+
+
+# ---------- list_ollama_models ----------
+
+def test_list_ollama_models_native_tags(monkeypatch):
+    payload = json.dumps({"models": [
+        {"name": "llava:latest"},
+        {"name": "qwen2.5:3b"},
+    ]}).encode()
+    resp = io.BytesIO(payload); resp.status = 200
+    resp.__enter__ = lambda: resp; resp.__exit__ = lambda *a: None
+
+    seen = []
+    def fake_urlopen(req, timeout=10):
+        seen.append(req.full_url)
+        return resp
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    names = AI.list_ollama_models("http://localhost:11434/v1")
+    assert names == ["llava:latest", "qwen2.5:3b"]
+    assert seen and seen[0] == "http://localhost:11434/api/tags"
+
+
+def test_list_ollama_models_fallback_to_openai_shape(monkeypatch):
+    tags_resp = urllib.error.HTTPError(
+        "http://x/api/tags", 404, "NF", hdrs=None, fp=io.BytesIO(b"{}"),
+    )
+    models_payload = json.dumps({"data": [
+        {"id": "gpt-4o-mini"},
+        {"id": "llama3"},
+    ]}).encode()
+    models_resp = io.BytesIO(models_payload); models_resp.status = 200
+    models_resp.__enter__ = lambda: models_resp; models_resp.__exit__ = lambda *a: None
+
+    calls = []
+    def fake_urlopen(req, timeout=10):
+        calls.append(req.full_url)
+        if req.full_url.endswith("/api/tags"):
+            raise tags_resp
+        return models_resp
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    names = AI.list_ollama_models("http://x/v1")
+    assert names == ["gpt-4o-mini", "llama3"]
+    assert any(u.endswith("/api/tags") for u in calls)
+    assert any(u.endswith("/v1/models") for u in calls)
+
+
+def test_list_ollama_models_server_down_returns_empty(monkeypatch):
+    def fake_urlopen(req, timeout=10):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    assert AI.list_ollama_models("http://localhost:11434/v1") == []
+
+
+def test_list_ollama_models_strips_base_url_without_v1(monkeypatch):
+    payload = json.dumps({"models": [{"name": "m1"}]}).encode()
+    resp = io.BytesIO(payload); resp.status = 200
+    resp.__enter__ = lambda: resp; resp.__exit__ = lambda *a: None
+
+    seen = []
+    def fake_urlopen(req, timeout=10):
+        seen.append(req.full_url)
+        return resp
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    AI.list_ollama_models("http://localhost:11434/")
+    assert seen[0] == "http://localhost:11434/api/tags"
