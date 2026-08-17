@@ -62,6 +62,12 @@ class Config:
     ai_api_key: str = ""
     # Max frames sent to a vision model (spread evenly across the video).
     ai_max_frames: int = 50
+    # --- Speaker voice profiles ---
+    # Cosine-similarity threshold for auto-matching a cluster to a stored profile.
+    # Higher = stricter (fewer auto-assignments); 0.8 suits 3D-Speaker embeddings.
+    speaker_match_threshold: float = 0.8
+    # When True, save a voice profile for each named speaker after transcription/merge.
+    save_voice_profiles: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

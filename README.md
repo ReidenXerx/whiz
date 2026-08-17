@@ -80,6 +80,7 @@ Transcribe an audio or video file.
 | `--speakers-names Enric,Vadim,...` | off | Non-interactive speaker names assigned by total talk time (most talkative first) |
 | `--screenshots` | off | For video inputs, extract one on-screen frame per segment into `<stem>.frames/` + write `<stem>.frames.json` (for AI analysis / HTML output) |
 | `--screenshot-width` | `1280` | Frame width in pixels (0 = native resolution) |
+| `--no-voice-profiles` | off | Don't compute voice-profile embeddings or auto-match/save speaker profiles this run |
 | `--extra ...` | — | Extra flags passed verbatim to whisper-cli |
 | `--dry-run` | off | Print the command without executing |
 
@@ -96,6 +97,7 @@ Re-run only diarization + the merge against an existing whisper JSON, skipping t
 | `--speakers-names Enric,Vadim,...` | off | Non-interactive speaker names assigned by total talk time (most talkative first) |
 | `--screenshots` | off | Re-extract on-screen frames per segment into `<stem>.frames/` + write `<stem>.frames.json` |
 | `--screenshot-width` | `1280` | Frame width in pixels (0 = native resolution) |
+| `--no-voice-profiles` | off | Don't compute voice-profile embeddings or auto-match/save speaker profiles this run |
 | `--outputs` | `srt,json` | Comma-separated output formats; add `html` for a self-contained transcript (requires `--speakers`) |
 
 ### `whiz models list`
@@ -186,6 +188,9 @@ ai_base_url = "http://localhost:11434/v1"
 ai_model = ""
 ai_api_key = ""
 ai_max_frames = 50
+# --- Speaker voice profiles ---
+speaker_match_threshold = 0.8
+save_voice_profiles = true
 ```
 
 If `model` is empty, whiz auto-picks the best available model by this preference:
@@ -307,6 +312,33 @@ whiz merge --speakers 4 --speakers-names Enric,Vadim,Thomas,Dziyana recording.mo
 whiz merge --speakers 4 --screenshots recording.mov
 ```
 
+## Speaker voice profiles (cross-recording recognition)
+
+When you name a speaker (with `--name-speakers` or `--speakers-names`), whiz can save a **voice profile**: a fixed-size embedding vector for that speaker's audio, computed with the same sherpa-onnx embedding extractor used for diarization. On later recordings, each detected cluster's embedding is compared (cosine similarity) to the stored profiles and a name is auto-assigned when the best match exceeds `speaker_match_threshold` (default `0.8`).
+
+Profiles live at `~/.config/whiz/speakers/<Name>.json` (one file per name, inspectable and easy to delete). whiz saves a profile automatically whenever a speaker receives a real name — so the first time you transcribe a meeting with `--speakers-names Enric,Vadim,Thomas,Dziyana`, those four voice profiles are stored; the next recording with the same people is labeled automatically, no flags needed.
+
+```bash
+# First recording: name speakers explicitly — profiles are saved automatically
+whiz transcribe --speakers 4 --speakers-names Enric,Vadim,Thomas,Dziyana meeting1.mov
+
+# Later recording: speakers auto-matched from stored profiles, no flags needed
+whiz transcribe --speakers 4 meeting2.mov
+
+# See what's stored
+whiz speakers list
+
+# Check how a recording matches before committing (dry run)
+whiz speakers match meeting2.mov --speakers 4
+
+# Remove a profile (e.g. someone left the team)
+whiz speakers forget Dziyana
+```
+
+Naming precedence when profiles exist: voice-profile auto-match seeds the names, `--speakers-names` overrides them, and `--name-speakers` prompts interactively with the auto-matched names shown as defaults. Pass `--no-voice-profiles` to skip both auto-matching and profile saving for a run. Auto-matched clusters that don't reach the threshold keep their `Speaker A/B/C` labels for you to name manually.
+
+The embedding pass reuses the diarization cache, so on a cached run profile matching adds only seconds. Tune the threshold with `whiz config set speaker_match_threshold=0.85` (higher = stricter, fewer auto-assignments) or disable saving with `whiz config set save_voice_profiles=false`.
+
 ## AI analysis (summary, action items, vision)
 
 `whiz analyze` sends a prior transcript (and optionally on-screen frames) to a chat model via an OpenAI-compatible API ([Ollama](https://ollama.com) by default). It produces a markdown analysis (`.analysis.md`) alongside the input and prints the response to stdout. Requires a prior `whiz transcribe --speakers` (and `--screenshots` for `--vision`).
@@ -348,6 +380,26 @@ whiz analyze recording.mov --vision --summary
 `--vision` requires a vision-capable model (`llava`, `qwen2.5-vl`, `minicpm-v`, `gpt-4o`, ...). whiz detects a text-only model rejecting images and prints a clear hint. Frames are base64-encoded only at send time, so the on-disk `.frames.json` manifest stays small (paths only).
 
 Output is written to `<stem>.analysis.md` (the prompt + the response) and the response is also printed to stdout.
+
+### `whiz speakers list`
+
+List stored speaker voice profiles (name, embedding dimension, creation time, file path). See [Speaker voice profiles](#speaker-voice-profiles-cross-recording-recognition).
+
+### `whiz speakers forget <name>`
+
+Delete a stored voice profile by name.
+
+```bash
+whiz speakers forget Enric
+```
+
+### `whiz speakers match <file>`
+
+Run diarization on the given file and print, for each detected cluster, the cosine-similarity score against every stored profile plus the auto-assignment decision at the configured threshold. This is a dry run — it relabels nothing and saves nothing. Useful for tuning `speaker_match_threshold` or checking whether a recording's speakers are already known.
+
+```bash
+whiz speakers match recording.mov --speakers 4
+```
 
 ## License
 

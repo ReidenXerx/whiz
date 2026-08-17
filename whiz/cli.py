@@ -4,6 +4,7 @@ Subcommands:
   whiz transcribe <file>   Transcribe an audio/video file.
   whiz models list         Show discovered models.
   whiz models download N   Download a model from HuggingFace.
+  whiz speakers list       List stored voice profiles.
   whiz config show         Show current config.
   whiz config edit         Open config in $EDITOR.
   whiz config set K=V      Set a config value.
@@ -28,6 +29,7 @@ from whiz import merge as MR
 from whiz import models as M
 from whiz import screenshots as SC
 from whiz import ai as AI
+from whiz import profiles as P
 
 # whisper-cli output-format flags. "html" is whiz-only (post-merge, not a
 # whisper-cli flag) — handled in _write_labeled_outputs via merge.format_speakers_html.
@@ -357,6 +359,39 @@ def _extract_and_manifest_screenshots(
     return frames_dir, manifest_path
 
 
+def _save_named_profiles(
+    name_map: dict[str, str],
+    cluster_embeddings: dict[int, list[float]],
+) -> None:
+    """Save a voice profile for each speaker that received a real name.
+
+    ``name_map`` is keyed by ``Speaker A/B/...`` labels; we map those back to
+    cluster ids via the merge module's letter ordering and persist the
+    corresponding embedding under the chosen name.
+    """
+    from whiz.merge import _SPEAKER_LETTERS
+
+    label_to_cid: dict[str, int] = {
+        f"Speaker {letter}": i for i, letter in enumerate(_SPEAKER_LETTERS)
+    }
+    saved = 0
+    for label, name in name_map.items():
+        cid = label_to_cid.get(label)
+        if cid is None or cid not in cluster_embeddings:
+            continue
+        # Don't save a profile whose "name" is just the default Speaker label.
+        if not name or name.startswith("Speaker "):
+            continue
+        try:
+            path = P.save_profile(name, cluster_embeddings[cid])
+            saved += 1
+            print(f"Saved voice profile: {name} -> {path}", file=sys.stderr)
+        except Exception as e:  # noqa: BLE001
+            print(f"Warning: could not save voice profile for {name}: {e}", file=sys.stderr)
+    if saved:
+        print(f"Saved {saved} voice profile(s) to {P.profiles_dir()}", file=sys.stderr)
+
+
 def _write_labeled_outputs(
     merged: list[tuple[MR.WhisperSeg, str]],
     of_base: Path,
@@ -365,26 +400,46 @@ def _write_labeled_outputs(
     html: bool = False,
     frames_dir: Path | None = None,
     title: str = "whiz transcript",
+    profile_names: dict[str, str] | None = None,
+    cluster_embeddings: dict[int, list[float]] | None = None,
+    save_profiles: bool = False,
 ) -> tuple[Path, Path, dict[str, str]]:
     """Optionally relabel speakers, then write .speakers.srt and .speakers.txt.
 
     Returns the (srt_path, txt_path, name_map) used. When ``html`` is True also
     writes a self-contained ``.speakers.html`` (frames inlined as base64 if
-    ``frames_dir`` is given). Naming precedence: ``--speakers-names`` supplies
-    a non-interactive list (assigned by total talk time); ``--name-speakers``
-    then prompts interactively, with the list names shown as defaults.
+    ``frames_dir`` is given). Naming precedence:
+
+    1. Voice-profile auto-match (``profile_names``) seeds defaults.
+    2. ``--speakers-names`` supplies a non-interactive list (assigned by total
+       talk time) that overrides profile matches.
+    3. ``--name-speakers`` then prompts interactively, with the combined names
+       shown as defaults.
+
+    When ``save_profiles`` is True and ``cluster_embeddings`` is provided, a
+    voice profile is saved for each speaker that ended up with a real name
+    (i.e. not ``Speaker X``), so later recordings can auto-match them.
     """
     name_map: dict[str, str] = {}
-    # Non-interactive names from --speakers-names are applied first.
+    # 1. Voice-profile auto-match seeds the defaults.
+    if profile_names and merged:
+        name_map.update(profile_names)
+        print(f"Auto-matched {len(profile_names)} speaker(s) from voice profiles.", file=sys.stderr)
+        for lbl, nm in profile_names.items():
+            print(f"  {lbl} -> {nm}", file=sys.stderr)
+    # 2. Non-interactive --speakers-names override profile matches.
     if speakers_names and merged:
         merged, list_map = _apply_speaker_names_list(merged, speakers_names)
         name_map.update(list_map)
-    # Interactive prompt overrides/augments the list when both are given.
+    # 3. Interactive prompt overrides/augments when both are given.
     if name_speakers and merged:
         interactive_map = _prompt_speaker_names(merged, default_names=name_map or None)
         if interactive_map:
             name_map.update(interactive_map)
-            merged = MR.relabel(merged, name_map)
+    # Apply the combined names to the merged list so labels reflect every
+    # source (profile matches alone wouldn't relabel otherwise).
+    if name_map and merged:
+        merged = MR.relabel(merged, name_map)
     labeled_srt = MR.format_labeled_srt(merged)
     dialogue = MR.format_dialogue_txt(merged)
     # Append (not Path.with_suffix) so dots in the stem like "...16.03.40"
@@ -400,6 +455,9 @@ def _write_labeled_outputs(
             encoding="utf-8",
         )
         print(f"Wrote HTML transcript: {html_out}", file=sys.stderr)
+    # Save voice profiles for speakers that received a real name.
+    if save_profiles and cluster_embeddings and name_map:
+        _save_named_profiles(name_map, cluster_embeddings)
     return srt_out, txt_out, name_map
 
 
@@ -449,6 +507,21 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                 merged = MR.assign_speakers(whisper_segs, diar_segments)
                 want_html = _outputs_include(args, config, "html")
                 want_frames = args.screenshots and aud.needs_extraction(in_path)
+                # Voice profiles: compute per-cluster embeddings and auto-match
+                # against any stored profiles. The match seeds speaker names
+                # (used as defaults); --speakers-names/--name-speakers can override.
+                profile_names: dict[str, str] = {}
+                cluster_embeddings: dict[int, list[float]] = {}
+                if not args.no_voice_profiles:
+                    try:
+                        cluster_embeddings = P.compute_speaker_embeddings(wav, diar_segments, config)
+                        if cluster_embeddings:
+                            profile_names, matches = P.auto_assign_names(
+                                cluster_embeddings, threshold=config.speaker_match_threshold,
+                            )
+                            profile_names = {k: v for k, v in profile_names.items() if v}
+                    except Exception as e:  # noqa: BLE001
+                        print(f"Warning: voice-profile matching skipped: {e}", file=sys.stderr)
                 # Frames must be extracted before writing HTML so they can be
                 # inlined; for the diarized path we extract after the labeled
                 # outputs but before HTML if both are requested.
@@ -458,6 +531,9 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                     speakers_names=args.speakers_names,
                     html=want_html and not want_frames,
                     title=in_path.name,
+                    profile_names=profile_names or None,
+                    cluster_embeddings=cluster_embeddings or None,
+                    save_profiles=config.save_voice_profiles and not args.no_voice_profiles,
                 )
                 print(f"Wrote labeled SRT:  {srt_out}", file=sys.stderr)
                 print(f"Wrote dialogue TXT: {txt_out}", file=sys.stderr)
@@ -734,12 +810,31 @@ def cmd_merge(args: argparse.Namespace) -> int:
     for label, n in tally.most_common():
         print(f"  {label}: {n} segments", file=sys.stderr)
 
+    # Voice profiles: compute per-cluster embeddings and auto-match against any
+    # stored profiles. Matched names seed the speaker labels; --speakers-names
+    # / --name-speakers can override. Embeddings are reused for profile saving.
+    profile_names: dict[str, str] = {}
+    cluster_embeddings: dict[int, list[float]] = {}
+    if not args.no_voice_profiles:
+        try:
+            cluster_embeddings = P.compute_speaker_embeddings(wav, diar_segments, config)
+            if cluster_embeddings:
+                profile_names, _matches = P.auto_assign_names(
+                    cluster_embeddings, threshold=config.speaker_match_threshold,
+                )
+                profile_names = {k: v for k, v in profile_names.items() if v}
+        except Exception as e:  # noqa: BLE001
+            print(f"Warning: voice-profile matching skipped: {e}", file=sys.stderr)
+
     srt_out, txt_out, name_map = _write_labeled_outputs(
         merged, of_base,
         name_speakers=args.name_speakers,
         speakers_names=args.speakers_names,
         html=_outputs_include(args, config, "html") and not (args.screenshots and aud.needs_extraction(in_path)),
         title=in_path.name,
+        profile_names=profile_names or None,
+        cluster_embeddings=cluster_embeddings or None,
+        save_profiles=config.save_voice_profiles and not args.no_voice_profiles,
     )
     print(f"Wrote labeled SRT:  {srt_out}", file=sys.stderr)
     print(f"Wrote dialogue TXT: {txt_out}", file=sys.stderr)
@@ -767,6 +862,87 @@ def cmd_merge(args: argparse.Namespace) -> int:
             frames_dir=frames_dir,
             title=in_path.name,
         )
+    return 0
+
+
+# ---------- speakers (voice profiles) ----------
+
+def cmd_speakers_list(args: argparse.Namespace) -> int:
+    """List stored speaker voice profiles."""
+    profiles = P.load_profiles()
+    if not profiles:
+        print(f"No voice profiles found in {P.profiles_dir()}")
+        print("Profiles are saved automatically when you name speakers with")
+        print("--name-speakers or --speakers-names (unless --no-voice-profiles).")
+        return 0
+    print(f"{'NAME':<24} {'DIM':>5}  {'CREATED':<22}  PATH")
+    for prof in profiles:
+        path = P._profile_path(prof.name)
+        print(f"{prof.name:<24} {prof.dim:>5}  {prof.created:<22}  {path}")
+    print(f"\n{len(profiles)} profile(s) in {P.profiles_dir()}")
+    print(f"Match threshold: {cfg.load().speaker_match_threshold} (whiz config set speaker_match_threshold=...)")
+    return 0
+
+
+def cmd_speakers_forget(args: argparse.Namespace) -> int:
+    """Delete a stored speaker voice profile by name."""
+    name = args.name
+    removed = P.forget_profile(name)
+    if removed:
+        print(f"Forgot voice profile: {name}")
+        return 0
+    print(f"No voice profile named {name!r} in {P.profiles_dir()}")
+    return 1
+
+
+def cmd_speakers_match(args: argparse.Namespace) -> int:
+    """Show how a recording's clusters match against stored profiles (dry run).
+
+    Runs diarization on the given file and prints the cosine-similarity scores
+    of each cluster against every stored profile, plus the auto-assignment
+    decision at the configured threshold. Does not relabel or save anything.
+    """
+    config = cfg.load()
+    in_path = Path(args.file).expanduser()
+    if not in_path.exists():
+        raise SystemExit(f"Input file not found: {in_path}")
+    if aud.is_audio(in_path):
+        wav = in_path
+    elif aud.needs_extraction(in_path):
+        wav = in_path.with_suffix(".wav")
+        if not wav.exists():
+            print(f"Extracting audio from {in_path} ...", file=sys.stderr)
+            wav = aud.extract_audio(in_path, aud.find_ffmpeg(config.ffmpeg))
+    else:
+        wav = in_path
+
+    num_sp = args.speakers if args.speakers else 0
+    thr = args.cluster_threshold if args.cluster_threshold is not None else config.cluster_threshold
+    diar_segments = D.run_diarization(wav, config, num_speakers=num_sp, threshold=thr)
+    if not diar_segments:
+        raise SystemExit("Diarization produced no segments.")
+
+    profiles = P.load_profiles()
+    if not profiles:
+        print(f"No stored voice profiles in {P.profiles_dir()}; nothing to match against.")
+        return 0
+
+    cluster_embeddings = P.compute_speaker_embeddings(wav, diar_segments, config)
+    from whiz.merge import speaker_label
+    sep = ", "
+    print(f"\n{'CLUSTER':<12} {'BEST NAME':<20} {'BEST SCORE':>10}  ALL SCORES")
+    matches = P.match_speakers(cluster_embeddings, profiles, threshold=config.speaker_match_threshold)
+    for cid, emb in sorted(cluster_embeddings.items()):
+        scores = sorted(
+            ((P.cosine_similarity(emb, prof.embedding), prof.name) for prof in profiles),
+            reverse=True,
+        )
+        all_str = sep.join(f"{nm}={s:.3f}" for s, nm in scores)
+        m = matches.get(cid)
+        best = f"{m[0]}" if m else "(no match)"
+        best_score = f"{m[1]:.3f}" if m else f"{scores[0][0]:.3f}"
+        print(f"{speaker_label(cid):<12} {best:<20} {best_score:>10}  {all_str}")
+    print(f"\nThreshold: {config.speaker_match_threshold}")
     return 0
 
 
@@ -863,6 +1039,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--speakers-names", dest="speakers_names", nargs="+", default=None, help="Non-interactive speaker names assigned by total talk time (most talkative first), e.g. --speakers-names Enric,Vadim,Thomas,Dziyana")
     t.add_argument("--screenshots", action="store_true", help="For video inputs, extract one on-screen frame per transcribed segment into <stem>.frames/ and write <stem>.frames.json (for AI analysis / HTML output)")
     t.add_argument("--screenshot-width", type=int, default=None, help="Frame width in pixels (default 1280; 0 = native resolution)")
+    t.add_argument("--no-voice-profiles", dest="no_voice_profiles", action="store_true", help="Don't compute voice-profile embeddings or auto-match/save speaker profiles this run")
     t.add_argument("--verbose", action="store_true", help="Verbose whisper-cli output")
     t.add_argument("--extra", nargs=argparse.REMAINDER, default=[], help="Extra flags passed verbatim to whisper-cli")
     t.add_argument("--dry-run", action="store_true", help="Print the command without running it")
@@ -879,6 +1056,7 @@ def build_parser() -> argparse.ArgumentParser:
     mg.add_argument("--speakers-names", dest="speakers_names", nargs="+", default=None, help="Non-interactive speaker names assigned by total talk time (most talkative first), e.g. --speakers-names Enric,Vadim,Thomas,Dziyana")
     mg.add_argument("--screenshots", action="store_true", help="Re-extract on-screen frames per segment into <stem>.frames/ and write <stem>.frames.json")
     mg.add_argument("--screenshot-width", type=int, default=None, help="Frame width in pixels (default 1280; 0 = native resolution)")
+    mg.add_argument("--no-voice-profiles", dest="no_voice_profiles", action="store_true", help="Don't compute voice-profile embeddings or auto-match/save speaker profiles this run")
     mg.set_defaults(func=cmd_merge)
 
     # models
@@ -910,6 +1088,19 @@ def build_parser() -> argparse.ArgumentParser:
     an.add_argument("--prompt", default="", help="Freeform prompt (overrides --summary/--actions; use {transcript} placeholder for the transcript)")
     an.add_argument("--vision", action="store_true", help="Send on-screen frames as images to a vision model (requires a prior --screenshots run)")
     an.set_defaults(func=cmd_analyze)
+
+    # speakers (voice profiles)
+    sp = sub.add_parser("speakers", aliases=["sp"], help="Manage speaker voice profiles (cross-recording recognition)")
+    spsub = sp.add_subparsers(dest="speakers_command", required=True)
+    spsub.add_parser("list", aliases=["ls"]).set_defaults(func=cmd_speakers_list)
+    sf = spsub.add_parser("forget", aliases=["rm"], help="Delete a stored speaker voice profile by name")
+    sf.add_argument("name", help="Speaker name to forget")
+    sf.set_defaults(func=cmd_speakers_forget)
+    sm = spsub.add_parser("match", help="Show how a recording's clusters match stored profiles (dry run)")
+    sm.add_argument("file", help="Input audio/video file")
+    sm.add_argument("--speakers", type=int, default=None, nargs="?", const=0, help="Known speaker count; omit = auto-detect")
+    sm.add_argument("--cluster-threshold", type=float, default=None, help="Clustering threshold when auto-detecting (default 0.9)")
+    sm.set_defaults(func=cmd_speakers_match)
 
     # config
     cp = sub.add_parser("config", aliases=["c"], help="View or edit configuration")
