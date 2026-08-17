@@ -29,7 +29,8 @@ from whiz import models as M
 from whiz import screenshots as SC
 from whiz import ai as AI
 
-# whisper-cli output-format flags.
+# whisper-cli output-format flags. "html" is whiz-only (post-merge, not a
+# whisper-cli flag) — handled in _write_labeled_outputs via merge.format_speakers_html.
 OUTPUT_FLAGS = {
     "txt": "-otxt",
     "srt": "-osrt",
@@ -38,6 +39,7 @@ OUTPUT_FLAGS = {
     "json-full": "-ojf",
     "csv": "-ocsv",
     "lrc": "-olrc",
+    "html": "__whiz_html__",  # sentinel; filtered out before whisper-cli
 }
 
 
@@ -57,6 +59,12 @@ def _find_whisper_cli(configured: str = "") -> str:
 
 def _auto_threads() -> int:
     return min(8, os.cpu_count() or 4)
+
+
+def _outputs_include(args: argparse.Namespace, config: cfg.Config, fmt: str) -> bool:
+    """True if ``fmt`` is in the requested/configured outputs (comma-split)."""
+    raw = args.outputs if args.outputs else ",".join(config.outputs)
+    return fmt in [o.strip() for o in raw.split(",") if o.strip()]
 
 
 def _run_whisper_streaming(cmd: list[str]) -> subprocess.Popen:
@@ -153,6 +161,8 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
         flag = OUTPUT_FLAGS.get(o)
         if flag is None:
             raise SystemExit(f"Unknown output format '{o}'. Valid: {', '.join(OUTPUT_FLAGS)}")
+        if flag == "__whiz_html__":
+            continue  # html is a whiz post-merge output, not a whisper-cli flag
         out_flags.append(flag)
 
     # Output base path.
@@ -352,13 +362,17 @@ def _write_labeled_outputs(
     of_base: Path,
     name_speakers: bool = False,
     speakers_names: list[str] | None = None,
+    html: bool = False,
+    frames_dir: Path | None = None,
+    title: str = "whiz transcript",
 ) -> tuple[Path, Path, dict[str, str]]:
     """Optionally relabel speakers, then write .speakers.srt and .speakers.txt.
 
-    Returns the (srt_path, txt_path, name_map) used. Naming precedence:
-    ``--speakers-names`` supplies a non-interactive list (assigned by total
-    talk time); ``--name-speakers`` then prompts interactively, with the list
-    names shown as defaults.
+    Returns the (srt_path, txt_path, name_map) used. When ``html`` is True also
+    writes a self-contained ``.speakers.html`` (frames inlined as base64 if
+    ``frames_dir`` is given). Naming precedence: ``--speakers-names`` supplies
+    a non-interactive list (assigned by total talk time); ``--name-speakers``
+    then prompts interactively, with the list names shown as defaults.
     """
     name_map: dict[str, str] = {}
     # Non-interactive names from --speakers-names are applied first.
@@ -379,6 +393,13 @@ def _write_labeled_outputs(
     txt_out = Path(str(of_base) + ".speakers.txt")
     srt_out.write_text(labeled_srt + "\n", encoding="utf-8")
     txt_out.write_text(dialogue + "\n", encoding="utf-8")
+    if html:
+        html_out = Path(str(of_base) + ".speakers.html")
+        html_out.write_text(
+            MR.format_speakers_html(merged, frames_dir=frames_dir, title=title),
+            encoding="utf-8",
+        )
+        print(f"Wrote HTML transcript: {html_out}", file=sys.stderr)
     return srt_out, txt_out, name_map
 
 
@@ -426,22 +447,42 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                 whisper_segs = []
             if whisper_segs and diar_segments:
                 merged = MR.assign_speakers(whisper_segs, diar_segments)
+                want_html = _outputs_include(args, config, "html")
+                want_frames = args.screenshots and aud.needs_extraction(in_path)
+                # Frames must be extracted before writing HTML so they can be
+                # inlined; for the diarized path we extract after the labeled
+                # outputs but before HTML if both are requested.
                 srt_out, txt_out, name_map = _write_labeled_outputs(
                     merged, of_base,
                     name_speakers=args.name_speakers,
                     speakers_names=args.speakers_names,
+                    html=want_html and not want_frames,
+                    title=in_path.name,
                 )
                 print(f"Wrote labeled SRT:  {srt_out}", file=sys.stderr)
                 print(f"Wrote dialogue TXT: {txt_out}", file=sys.stderr)
                 # Video screenshots: one frame per segment, using the relabeled
                 # merged list so the manifest carries final speaker names.
-                if args.screenshots and aud.needs_extraction(in_path):
+                frames_dir = None
+                if want_frames:
                     width = args.screenshot_width if args.screenshot_width is not None else 1280
-                    _extract_and_manifest_screenshots(
+                    result = _extract_and_manifest_screenshots(
                         in_path, merged, of_base,
                         ffmpeg=aud.find_ffmpeg(config.ffmpeg),
                         width=width,
                         dry_run=args.dry_run,
+                    )
+                    if result is not None:
+                        frames_dir = result[0]
+                # Write HTML after frames exist so they can be inlined.
+                if want_html and want_frames and frames_dir is not None:
+                    _write_labeled_outputs(
+                        merged, of_base,
+                        name_speakers=False,
+                        speakers_names=None,
+                        html=True,
+                        frames_dir=frames_dir,
+                        title=in_path.name,
                     )
 
     # --- Screenshots without diarization ---
@@ -697,19 +738,34 @@ def cmd_merge(args: argparse.Namespace) -> int:
         merged, of_base,
         name_speakers=args.name_speakers,
         speakers_names=args.speakers_names,
+        html=_outputs_include(args, config, "html") and not (args.screenshots and aud.needs_extraction(in_path)),
+        title=in_path.name,
     )
     print(f"Wrote labeled SRT:  {srt_out}", file=sys.stderr)
     print(f"Wrote dialogue TXT: {txt_out}", file=sys.stderr)
 
     # Video screenshots: re-extract frames against the existing merged list.
     # Frame extraction is cheap (~seconds), so merge --screenshots re-runs it.
+    frames_dir = None
     if args.screenshots and aud.needs_extraction(in_path):
         width = args.screenshot_width if args.screenshot_width is not None else 1280
-        _extract_and_manifest_screenshots(
+        result = _extract_and_manifest_screenshots(
             in_path, merged, of_base,
             ffmpeg=aud.find_ffmpeg(config.ffmpeg),
             width=width,
             dry_run=False,
+        )
+        if result is not None:
+            frames_dir = result[0]
+    # Write HTML after frames exist so they can be inlined.
+    if _outputs_include(args, config, "html") and frames_dir is not None:
+        _write_labeled_outputs(
+            merged, of_base,
+            name_speakers=False,
+            speakers_names=None,
+            html=True,
+            frames_dir=frames_dir,
+            title=in_path.name,
         )
     return 0
 
@@ -816,6 +872,7 @@ def build_parser() -> argparse.ArgumentParser:
     mg = sub.add_parser("merge", help="Re-run diarization + merge against an existing whisper JSON (skip transcription)")
     mg.add_argument("file", help="Input audio/video file (used to find the whisper JSON and re-extract WAV if needed)")
     mg.add_argument("--json", default="", help="Explicit path to the whisper JSON (default: auto-find next to input)")
+    mg.add_argument("--outputs", default=None, help="Comma-separated whiz post-merge output formats: html (others are whisper-cli formats, ignored here)")
     mg.add_argument("--speakers", type=int, default=None, nargs="?", const=0, help="Known speaker count; omit = auto-detect")
     mg.add_argument("--cluster-threshold", type=float, default=None, help="Clustering threshold when auto-detecting (larger = fewer speakers; default 0.9)")
     mg.add_argument("--name-speakers", action="store_true", help="Interactively prompt to name each detected speaker (replaces Speaker A/B/C with real names)")

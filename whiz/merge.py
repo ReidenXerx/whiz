@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 from whiz.diarize import DiarSegment
 
@@ -92,6 +93,7 @@ class WhisperSeg:
     start: float
     end: float
     text: str
+    words: list[dict] | None = None  # per-word timestamps if -ojf/verbose_json provides them
 
 
 def _overlap(a_start: float, a_end: float, b_start: float, b_end: float) -> float:
@@ -182,13 +184,100 @@ def format_dialogue_txt(merged: list[tuple[WhisperSeg, str]]) -> str:
     return "\n\n".join(lines)
 
 
+# ---------- HTML transcript ----------
+
+# Deterministic per-speaker colors (cycle for >8 speakers).
+_SPEAKER_COLORS = [
+    "#e74c3c", "#3498db", "#2ecc71", "#f39c12", "#9b59b6",
+    "#1abc9c", "#e67e22", "#34495e", "#16a085", "#d35400",
+]
+
+
+def _speaker_color(label: str) -> str:
+    """Pick a stable color for a speaker label by its first-appearance index."""
+    # Hash the label to a stable index so colors are consistent across runs.
+    h = sum(ord(c) for c in label)
+    return _SPEAKER_COLORS[h % len(_SPEAKER_COLORS)]
+
+
+def _html_escape(text: str) -> str:
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def format_speakers_html(
+    merged: list[tuple[WhisperSeg, str]],
+    frames_dir: Path | None = None,
+    title: str = "whiz transcript",
+) -> str:
+    """Emit a self-contained HTML transcript.
+
+    Color-coded per-speaker transcript with timestamps. If ``frames_dir`` is
+    given and contains ``segNNNN.jpg`` files (from a prior --screenshots run),
+    frames are inlined as ``data:image/jpeg;base64`` URIs so the single HTML
+    file is portable with every screenshot embedded — no external files needed.
+    """
+    import base64
+
+    parts: list[str] = []
+    parts.append(f"<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">")
+    parts.append(f"<title>{_html_escape(title)}</title>")
+    parts.append("<style>")
+    parts.append(
+        "body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; "
+        "max-width: 900px; margin: 0 auto; padding: 1em; color: #222; line-height: 1.5; }\n"
+        ".cue { display: flex; gap: 1em; margin: 0.5em 0; padding: 0.5em 0; border-bottom: 1px solid #eee; }\n"
+        ".cue img { max-width: 200px; max-height: 130px; border-radius: 4px; object-fit: cover; flex-shrink: 0; }\n"
+        ".cue .body { flex: 1; }\n"
+        ".ts { color: #888; font-size: 0.85em; font-variant-numeric: tabular-nums; text-decoration: none; }\n"
+        ".speaker { font-weight: 600; }\n"
+        ".text { margin-top: 0.15em; }\n"
+        "</style>"
+    )
+    parts.append("</head>\n<body>")
+    parts.append(f"<h1>{_html_escape(title)}</h1>")
+
+    for i, (seg, label) in enumerate(merged, start=1):
+        text = seg.text.strip()
+        if not text:
+            continue
+        color = _speaker_color(label)
+        ts = _fmt_clock(seg.start)
+        parts.append("<div class=\"cue\">")
+        # Inline frame thumbnail if it exists.
+        if frames_dir is not None:
+            frame_path = frames_dir / f"seg{i:04d}.jpg"
+            if frame_path.exists():
+                b64 = base64.b64encode(frame_path.read_bytes()).decode("ascii")
+                parts.append(f"<img src=\"data:image/jpeg;base64,{b64}\" alt=\"frame {i}\">")
+        parts.append("<div class=\"body\">")
+        parts.append(f"<a class=\"ts\" href=\"#cue-{i}\" id=\"cue-{i}\">{ts}</a> ")
+        parts.append(f"<span class=\"speaker\" style=\"color:{color}\">{_html_escape(label)}</span>")
+        parts.append(f"<div class=\"text\">{_html_escape(text)}</div>")
+        parts.append("</div></div>")  # close .body and .cue
+
+    parts.append("</body>\n</html>")
+    return "\n".join(parts)
+
+
 # ---------- whisper-cli output parsing ----------
 
 def parse_whisper_json(path, json_full: bool = False) -> list[WhisperSeg]:
-    """Parse a whisper-cli JSON output file into WhisperSeg list."""
+    """Parse a whisper-cli JSON output file into WhisperSeg list.
+
+    Handles both -oj (standard) and -ojf (json-full) formats. Both use a
+    ``transcription`` array with ``timestamps``/``text`` per segment. The
+    json-full format additionally has ``offsets``; per-word timestamps (when
+    present, e.g. from verbose_json-style ``words`` arrays) are captured on
+    the optional ``words`` field for HTML karaoke-style highlighting.
+    """
     data = json.loads(path.read_text(encoding="utf-8"))
     segs: list[WhisperSeg] = []
-    # whisper-cli -oj produces {"transcription": [{"timestamps":{"from","to"}, "text":"..."}, ...]}
+    # whisper-cli -oj/-ojf produces {"transcription": [{"timestamps":{"from","to"}, "text":"..."}, ...]}
     # -ojf adds more fields but the segment shape is the same.
     transcription = data.get("transcription", [])
     for entry in transcription:
@@ -196,8 +285,9 @@ def parse_whisper_json(path, json_full: bool = False) -> list[WhisperSeg]:
         start = _ts_to_seconds(ts.get("from", "00:00:00,000"))
         end = _ts_to_seconds(ts.get("to", "00:00:00,000"))
         text = entry.get("text", "").strip()
+        words = entry.get("words")  # present in verbose_json-style output
         if text:
-            segs.append(WhisperSeg(start=start, end=end, text=text))
+            segs.append(WhisperSeg(start=start, end=end, text=text, words=words))
     return segs
 
 

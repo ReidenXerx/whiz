@@ -63,7 +63,7 @@ Transcribe an audio or video file.
 |------|---------|-------------|
 | `-m, --model` | auto-pick best | Model alias (`turbo`, `large-v3`, `medium`) or path |
 | `-o, --output` | alongside input | Output base path (no extension) |
-| `--outputs` | `srt,json` | Comma-separated: `txt,srt,vtt,json,json-full,csv,lrc` |
+| `--outputs` | `srt,json` | Comma-separated: `txt,srt,vtt,json,json-full,csv,lrc,html` (`html` requires `--speakers`) |
 | `-l, --language` | `auto` | Spoken language code or `auto` |
 | `-t, --threads` | auto (`min(8, cores)`) | CPU threads |
 | `--vad` / `--no-vad` | on | Enable/disable voice activity detection |
@@ -96,6 +96,7 @@ Re-run only diarization + the merge against an existing whisper JSON, skipping t
 | `--speakers-names Enric,Vadim,...` | off | Non-interactive speaker names assigned by total talk time (most talkative first) |
 | `--screenshots` | off | Re-extract on-screen frames per segment into `<stem>.frames/` + write `<stem>.frames.json` |
 | `--screenshot-width` | `1280` | Frame width in pixels (0 = native resolution) |
+| `--outputs` | `srt,json` | Comma-separated output formats; add `html` for a self-contained transcript (requires `--speakers`) |
 
 ### `whiz models list`
 
@@ -258,6 +259,20 @@ When `--screenshots` is set (video inputs only), whiz also writes:
 - `<stem>.frames.json` — machine manifest referencing frames by path with per-segment metadata `{index, start, end, speaker, text, frame}` (no image bytes; small, re-runnable)
 
 The frames manifest is the join key for AI analysis (`whiz analyze --vision`) and for the self-contained HTML transcript (which inlines frames as base64).
+
+### HTML transcript
+
+Add `html` to `--outputs` (or pass `--outputs html` to `whiz merge`) to write a self-contained `<stem>.speakers.html` alongside the input. Each segment is rendered as a color-coded cue with a timestamp link, the speaker label, and (when `--screenshots` was set) the on-screen frame inlined as a base64 `data:` URI — so the file is fully portable with no external image dependencies.
+
+```bash
+# Transcribe + diarize + capture frames + write HTML transcript
+whiz transcribe --speakers 4 --screenshots --outputs srt,html recording.mov
+
+# Add HTML to an existing run via merge (reuses diarization cache)
+whiz merge --speakers 4 --screenshots --outputs html recording.mov
+```
+
+The HTML file can be large (one base64-encoded JPEG per segment), but it opens in any browser with no server and no missing images. Speaker colors are assigned deterministically by a hash of the speaker label.
 
 When `--speakers` is set, whisper-cli VAD is disabled (sherpa-onnx handles speech segmentation).
 
