@@ -26,6 +26,7 @@ from whiz import config as cfg
 from whiz import diarize as D
 from whiz import merge as MR
 from whiz import models as M
+from whiz import screenshots as SC
 
 # whisper-cli output-format flags.
 OUTPUT_FLAGS = {
@@ -313,6 +314,38 @@ def _prompt_speaker_names(
     return name_map
 
 
+def _extract_and_manifest_screenshots(
+    video: Path,
+    merged: list[tuple[MR.WhisperSeg, str]],
+    of_base: Path,
+    ffmpeg: str,
+    width: int,
+    dry_run: bool = False,
+) -> tuple[Path, Path] | None:
+    """Extract one frame per segment and write the .frames.json manifest.
+
+    Frames go into ``<of_base>.frames/``; the manifest at ``<of_base>.frames.json``
+    references frames by path only (never bytes) so it stays small and
+    re-runnable. Returns (frames_dir, manifest_path) or None if there are no
+    segments. Only valid for video inputs (the caller checks).
+    """
+    if not merged:
+        return None
+    frames_dir = SC.frames_dir_for(of_base)
+    manifest_path = SC.frames_manifest_path(of_base)
+    entries = SC.extract_segment_frames(
+        video, merged, frames_dir,
+        ffmpeg=ffmpeg,
+        width=width,
+        dry_run=dry_run,
+    )
+    SC.write_manifest(entries, frames_dir, manifest_path)
+    ok = sum(1 for e in entries if e.frame)
+    print(f"Extracted {ok}/{len(entries)} frames -> {frames_dir}", file=sys.stderr)
+    print(f"Wrote frames manifest: {manifest_path}", file=sys.stderr)
+    return frames_dir, manifest_path
+
+
 def _write_labeled_outputs(
     merged: list[tuple[MR.WhisperSeg, str]],
     of_base: Path,
@@ -399,6 +432,42 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                 )
                 print(f"Wrote labeled SRT:  {srt_out}", file=sys.stderr)
                 print(f"Wrote dialogue TXT: {txt_out}", file=sys.stderr)
+                # Video screenshots: one frame per segment, using the relabeled
+                # merged list so the manifest carries final speaker names.
+                if args.screenshots and aud.needs_extraction(in_path):
+                    width = args.screenshot_width if args.screenshot_width is not None else 1280
+                    _extract_and_manifest_screenshots(
+                        in_path, merged, of_base,
+                        ffmpeg=aud.find_ffmpeg(config.ffmpeg),
+                        width=width,
+                        dry_run=args.dry_run,
+                    )
+
+    # --- Screenshots without diarization ---
+    # `whiz transcribe --screenshots` without --speakers: one frame per whisper
+    # segment, labeled with a single generic speaker.
+    if (
+        args.screenshots
+        and not diarize_enabled
+        and rc == 0
+        and aud.needs_extraction(in_path)
+    ):
+        json_path = _find_whisper_json(of_base, wav, of_passed=bool(args.output))
+        if json_path.exists():
+            try:
+                whisper_segs = MR.parse_whisper_json(json_path)
+            except Exception as e:  # noqa: BLE001
+                print(f"Warning: failed to parse {json_path}: {e}", file=sys.stderr)
+                whisper_segs = []
+            if whisper_segs:
+                unlabeled = [(seg, "Speaker") for seg in whisper_segs]
+                width = args.screenshot_width if args.screenshot_width is not None else 1280
+                _extract_and_manifest_screenshots(
+                    in_path, unlabeled, of_base,
+                    ffmpeg=aud.find_ffmpeg(config.ffmpeg),
+                    width=width,
+                    dry_run=args.dry_run,
+                )
 
     # Clean up the intermediate WAV unless asked to keep it.
     if wav != in_path and not keep_wav and wav.exists():
@@ -548,6 +617,17 @@ def cmd_merge(args: argparse.Namespace) -> int:
     )
     print(f"Wrote labeled SRT:  {srt_out}", file=sys.stderr)
     print(f"Wrote dialogue TXT: {txt_out}", file=sys.stderr)
+
+    # Video screenshots: re-extract frames against the existing merged list.
+    # Frame extraction is cheap (~seconds), so merge --screenshots re-runs it.
+    if args.screenshots and aud.needs_extraction(in_path):
+        width = args.screenshot_width if args.screenshot_width is not None else 1280
+        _extract_and_manifest_screenshots(
+            in_path, merged, of_base,
+            ffmpeg=aud.find_ffmpeg(config.ffmpeg),
+            width=width,
+            dry_run=False,
+        )
     return 0
 
 
@@ -640,8 +720,10 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--no-auto-vad-download", action="store_true", help="Don't auto-download the Silero VAD model when VAD is enabled and missing")
     t.add_argument("--speakers", type=int, default=None, nargs="?", const=0, help="Enable speaker diarization via sherpa-onnx. Optional integer = known speaker count; omit = auto-detect")
     t.add_argument("--cluster-threshold", type=float, default=None, help="Diarization clustering threshold when auto-detecting (larger = fewer speakers; default 0.9)")
-    t.add_argument("--name-speakers", action="store_true", help="After transcription, prompt to name each detected speaker (replaces Speaker A/B/C with real names)")
+    t.add_argument("--name-speakers", action="store_true", help="After transcription, interactively prompt to name each detected speaker (replaces Speaker A/B/C with real names)")
     t.add_argument("--speakers-names", dest="speakers_names", nargs="+", default=None, help="Non-interactive speaker names assigned by total talk time (most talkative first), e.g. --speakers-names Enric,Vadim,Thomas,Dziyana")
+    t.add_argument("--screenshots", action="store_true", help="For video inputs, extract one on-screen frame per transcribed segment into <stem>.frames/ and write <stem>.frames.json (for AI analysis / HTML output)")
+    t.add_argument("--screenshot-width", type=int, default=None, help="Frame width in pixels (default 1280; 0 = native resolution)")
     t.add_argument("--verbose", action="store_true", help="Verbose whisper-cli output")
     t.add_argument("--extra", nargs=argparse.REMAINDER, default=[], help="Extra flags passed verbatim to whisper-cli")
     t.add_argument("--dry-run", action="store_true", help="Print the command without running it")
@@ -653,8 +735,10 @@ def build_parser() -> argparse.ArgumentParser:
     mg.add_argument("--json", default="", help="Explicit path to the whisper JSON (default: auto-find next to input)")
     mg.add_argument("--speakers", type=int, default=None, nargs="?", const=0, help="Known speaker count; omit = auto-detect")
     mg.add_argument("--cluster-threshold", type=float, default=None, help="Clustering threshold when auto-detecting (larger = fewer speakers; default 0.9)")
-    mg.add_argument("--name-speakers", action="store_true", help="Prompt to name each detected speaker (replaces Speaker A/B/C with real names)")
+    mg.add_argument("--name-speakers", action="store_true", help="Interactively prompt to name each detected speaker (replaces Speaker A/B/C with real names)")
     mg.add_argument("--speakers-names", dest="speakers_names", nargs="+", default=None, help="Non-interactive speaker names assigned by total talk time (most talkative first), e.g. --speakers-names Enric,Vadim,Thomas,Dziyana")
+    mg.add_argument("--screenshots", action="store_true", help="Re-extract on-screen frames per segment into <stem>.frames/ and write <stem>.frames.json")
+    mg.add_argument("--screenshot-width", type=int, default=None, help="Frame width in pixels (default 1280; 0 = native resolution)")
     mg.set_defaults(func=cmd_merge)
 
     # models

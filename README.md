@@ -78,6 +78,8 @@ Transcribe an audio or video file.
 | `--cluster-threshold` | `0.9` | Diarization clustering threshold when auto-detecting (larger = fewer speakers) |
 | `--name-speakers` | off | After transcription, interactively prompt to name each detected speaker |
 | `--speakers-names Enric,Vadim,...` | off | Non-interactive speaker names assigned by total talk time (most talkative first) |
+| `--screenshots` | off | For video inputs, extract one on-screen frame per segment into `<stem>.frames/` + write `<stem>.frames.json` (for AI analysis / HTML output) |
+| `--screenshot-width` | `1280` | Frame width in pixels (0 = native resolution) |
 | `--extra ...` | — | Extra flags passed verbatim to whisper-cli |
 | `--dry-run` | off | Print the command without executing |
 
@@ -92,6 +94,8 @@ Re-run only diarization + the merge against an existing whisper JSON, skipping t
 | `--cluster-threshold` | `0.9` | Clustering threshold when auto-detecting (larger = fewer speakers) |
 | `--name-speakers` | off | Interactively prompt to name each detected speaker |
 | `--speakers-names Enric,Vadim,...` | off | Non-interactive speaker names assigned by total talk time (most talkative first) |
+| `--screenshots` | off | Re-extract on-screen frames per segment into `<stem>.frames/` + write `<stem>.frames.json` |
+| `--screenshot-width` | `1280` | Frame width in pixels (0 = native resolution) |
 
 ### `whiz models list`
 
@@ -243,6 +247,13 @@ This produces the normal whisper-cli outputs (SRT, JSON) plus two labeled files 
 - `*.speakers.txt` — readable dialogue transcript (`Speaker A (00:01:23): text`), consecutive same-speaker lines merged
 - `*.wav.diar.json` — cached diarization result (reused by later `whiz merge` runs with the same `--speakers`/`--cluster-threshold`)
 
+When `--screenshots` is set (video inputs only), whiz also writes:
+
+- `<stem>.frames/` — one JPEG per segment (`seg0001.jpg` ...), taken at each segment's start timestamp
+- `<stem>.frames.json` — machine manifest referencing frames by path with per-segment metadata `{index, start, end, speaker, text, frame}` (no image bytes; small, re-runnable)
+
+The frames manifest is the join key for AI analysis (`whiz analyze --vision`) and for the self-contained HTML transcript (which inlines frames as base64).
+
 When `--speakers` is set, whisper-cli VAD is disabled (sherpa-onnx handles speech segmentation).
 
 **Tip:** if you know the speaker count, always pass `--speakers N`. It locks clustering to exactly N speakers and ignores the threshold — this is the single biggest accuracy lever.
@@ -271,6 +282,9 @@ whiz merge --speakers 4 --name-speakers recording.mov
 
 # Name speakers non-interactively (instant — diarization cache is reused)
 whiz merge --speakers 4 --speakers-names Enric,Vadim,Thomas,Dziyana recording.mov
+
+# Capture on-screen frames per segment (for AI analysis / HTML output)
+whiz merge --speakers 4 --screenshots recording.mov
 ```
 
 ## License
