@@ -1,3 +1,3 @@
-"""whiz — a handy CLI wrapper around whisper-cli."""
+"""whiz — a transcription CLI for meetings, screen recordings, and interviews."""
 
-__version__ = "0.9.3"
+__version__ = "0.10.0"

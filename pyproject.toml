@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "whiz"
-version = "0.9.3"
-description = "A handy CLI wrapper around whisper-cli (whisper.cpp) — auto-finds models, extracts audio from video, sensible defaults."
+version = "0.10.0"
+description = "A transcription CLI for meetings, screen recordings, and interviews — powered by whisper.cpp, with diarization, speaker naming, screenshots, HTML transcripts, and AI analysis."
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "ReidenXerx" }]
 requires-python = ">=3.11"
-keywords = ["whisper", "whisper.cpp", "speech-to-text", "transcription", "cli", "ffmpeg"]
+keywords = ["whisper", "whisper.cpp", "speech-to-text", "transcription", "cli", "ffmpeg", "diarization", "speakers", "sherpa-onnx", "rich"]
 classifiers = [
     "Environment :: Console",
     "Intended Audience :: End Users/Desktop",
@@ -24,7 +24,7 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Topic :: Multimedia :: Sound/Audio :: Speech",
 ]
-dependencies = []
+dependencies = ["rich>=13"]
 
 [project.optional-dependencies]
 test = ["pytest>=7"]

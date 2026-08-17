@@ -1,10 +1,12 @@
-"""whiz CLI — a handy wrapper around whisper-cli.
+"""whiz CLI — transcription subcommands.
 
 Subcommands:
   whiz transcribe <file>   Transcribe an audio/video file.
+  whiz merge <file>        Re-run diarization + merge against an existing JSON.
   whiz models list         Show discovered models.
   whiz models download N   Download a model from HuggingFace.
   whiz speakers list       List stored voice profiles.
+  whiz analyze <file>      AI-analyze a prior transcript (+ frames).
   whiz config show         Show current config.
   whiz config edit         Open config in $EDITOR.
   whiz config set K=V      Set a config value.
@@ -30,6 +32,7 @@ from whiz import models as M
 from whiz import screenshots as SC
 from whiz import ai as AI
 from whiz import profiles as P
+from whiz import ui
 
 # whisper-cli output-format flags. "html" is whiz-only (post-merge, not a
 # whisper-cli flag) — handled in _write_labeled_outputs via merge.format_speakers_html.
@@ -73,8 +76,9 @@ def _run_whisper_streaming(cmd: list[str]) -> subprocess.Popen:
     """Run whisper-cli, streaming its stdout/stderr line-by-line to our stderr.
 
     Each line is prefixed with elapsed time since the process started so long
-    transcriptions show progress pacing. stderr is unbuffered so progress
-    updates appear immediately. Returns the Popen object after completion.
+    transcriptions show progress pacing. Output is styled via the ui module
+    (dimmed timestamp prefix + muted content) and degrades to plain text when
+    piped. Returns the Popen object after completion.
     """
     import time
 
@@ -87,11 +91,10 @@ def _run_whisper_streaming(cmd: list[str]) -> subprocess.Popen:
         bufsize=1,
     )
     assert proc.stdout is not None
-    for line in proc.stdout:
-        elapsed = time.monotonic() - start
-        prefix = f"[{_fmt_elapsed(elapsed)}] "
-        sys.stderr.write(prefix + line if line.endswith("\n") else prefix + line + "\n")
-        sys.stderr.flush()
+    with ui.streaming_progress(cmd) as write:
+        for line in proc.stdout:
+            elapsed = time.monotonic() - start
+            write(line, elapsed)
     proc.wait()
     return proc
 
@@ -175,11 +178,10 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
     # requested) but sherpa-onnx/models aren't available, skip it silently with
     # a hint instead of crashing. VAD then stays on and screenshots still run.
     if speakers_auto and args.speakers is None and not _diarization_available(config):
-        print("Speakers: diarization not available (sherpa-onnx or models missing); "
-              "skipping speaker labels for this run.", file=sys.stderr)
-        print("  Enable with:  pipx inject whiz sherpa-onnx && whiz models download-diarization",
-              file=sys.stderr)
-        print("  Or silence this with: --no-speakers", file=sys.stderr)
+        ui.status("Speakers: diarization not available (sherpa-onnx or models missing); skipping speaker labels for this run.",
+                  kind="hint",
+                  detail="Enable with: pipx inject whiz sherpa-onnx && whiz models download-diarization")
+        ui.muted("  Or silence this with: --no-speakers")
         diarize_enabled = False
         speakers_auto = False
     # Resolve model.
@@ -203,16 +205,17 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
     if aud.needs_extraction(in_path):
         if args.dry_run:
             wav = aud.extract_audio(in_path, aud.find_ffmpeg(config.ffmpeg), dry_run=True)
-            print(f"DRY-RUN: would extract audio -> {wav}")
+            print(f"DRY-RUN: would extract audio ->> {wav}")
         else:
-            print(f"Input is a video container ({in_path.suffix}); extracting audio ...", file=sys.stderr)
+            ui.phase("extracting audio")
+            ui.kv("Video", in_path.name)
             wav = aud.extract_audio(in_path, aud.find_ffmpeg(config.ffmpeg))
-            print(f"Extracted -> {wav}", file=sys.stderr)
+            ui.kv("Audio", str(wav))
     elif aud.is_audio(in_path):
         wav = in_path
     else:
         # Unknown extension — let whisper-cli try; it may still work.
-        print(f"Unrecognized extension {in_path.suffix}; passing directly to whisper-cli.", file=sys.stderr)
+        ui.info(f"Unrecognized extension {in_path.suffix}; passing directly to whisper-cli.")
         wav = in_path
 
     # Threads.
@@ -247,22 +250,23 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
     # VAD. When diarizing, sherpa-onnx handles speech segmentation, so skip whisper-cli VAD.
     vad_enabled = (args.vad if args.vad is not None else config.vad) and not diarize_enabled
     if diarize_enabled:
-        print("Diarization enabled; disabling whisper-cli VAD (sherpa-onnx handles segmentation).", file=sys.stderr)
+        ui.info("Diarization enabled; disabling whisper-cli VAD (sherpa-onnx handles segmentation).")
     vad_flags: list[str] = []
     if vad_enabled:
         vad_flags = ["--vad", "-vt", str(args.vad_threshold if args.vad_threshold is not None else config.vad_threshold)]
         # Resolve the Silero VAD model. Auto-download if missing and not dry-run.
         vad_model_path = M.find_vad_model(config)
         if vad_model_path is None and not args.dry_run and not args.no_auto_vad_download:
-            print("VAD enabled but no Silero VAD model found; downloading ggml-silero-vad.bin ...", file=sys.stderr)
+            ui.info("VAD enabled but no Silero VAD model found; downloading ggml-silero-vad.bin ...")
             vad_model_path = M.ensure_vad_model(config, auto_download=True)
         if vad_model_path is not None:
             vad_flags += ["--vad-model", str(vad_model_path)]
         elif not args.dry_run:
-            print("Warning: VAD enabled but no VAD model available; whisper-cli may fail. "
-                  "Run `whiz models download-vad` or disable with --no-vad.", file=sys.stderr)
+            ui.status("Warning: VAD enabled but no VAD model available; whisper-cli may fail.",
+                      kind="warn",
+                      detail="Run `whiz models download-vad` or disable with --no-vad.")
         elif args.dry_run and vad_model_path is None:
-            print("DRY-RUN: no VAD model found; would download ggml-silero-vad.bin at run time.", file=sys.stderr)
+            ui.muted("DRY-RUN: no VAD model found; would download ggml-silero-vad.bin at run time.")
             vad_flags += ["--vad-model", "<PATH-TO-VAD-MODEL>"]
 
     cmd = [
@@ -368,17 +372,15 @@ def _prompt_speaker_names(
     speakers = MR.speakers_in_order(merged)
     quotes = MR.representative_quotes(merged)
     name_map: dict[str, str] = {}
-    print("\n" + "=" * 60, file=sys.stderr)
-    print("Name the speakers", file=sys.stderr)
-    print("=" * 60, file=sys.stderr)
-    print("A representative quote is shown for each. Enter a real name", file=sys.stderr)
-    print("(or press Enter to keep the default).", file=sys.stderr)
+    ui.header("whiz", "name the speakers")
+    ui.muted("A representative quote is shown for each. Enter a real name")
+    ui.muted("(or press Enter to keep the default).")
     for label in speakers:
         quote = quotes.get(label, "(no quote)")
         suggestion = (default_names or {}).get(label)
-        print("\n" + "-" * 60, file=sys.stderr)
-        print(f"{label} said:", file=sys.stderr)
-        print(f'  "{quote}"', file=sys.stderr)
+        ui.note("")
+        ui.speaker_label_line(label)
+        ui.muted(f'  "{quote}"')
         prompt_text = f"Name for {label}"
         if suggestion:
             prompt_text = f"Name for {label} [{suggestion}]"
@@ -391,7 +393,7 @@ def _prompt_speaker_names(
             name_map[label] = name
         elif suggestion:
             name_map[label] = suggestion
-    print("\n" + "-" * 60, file=sys.stderr)
+    ui.note("")
     return name_map
 
 
@@ -422,8 +424,7 @@ def _extract_and_manifest_screenshots(
     )
     SC.write_manifest(entries, frames_dir, manifest_path)
     ok = sum(1 for e in entries if e.frame)
-    print(f"Extracted {ok}/{len(entries)} frames -> {frames_dir}", file=sys.stderr)
-    print(f"Wrote frames manifest: {manifest_path}", file=sys.stderr)
+    ui.muted(f"Extracted {ok}/{len(entries)} frames -> {frames_dir}")
     return frames_dir, manifest_path
 
 
@@ -453,11 +454,11 @@ def _save_named_profiles(
         try:
             path = P.save_profile(name, cluster_embeddings[cid])
             saved += 1
-            print(f"Saved voice profile: {name} -> {path}", file=sys.stderr)
+            ui.status(f"Saved voice profile: {name}", kind="ok", detail=str(path))
         except Exception as e:  # noqa: BLE001
-            print(f"Warning: could not save voice profile for {name}: {e}", file=sys.stderr)
+            ui.status(f"Warning: could not save voice profile for {name}: {e}", kind="warn")
     if saved:
-        print(f"Saved {saved} voice profile(s) to {P.profiles_dir()}", file=sys.stderr)
+        ui.muted(f"Saved {saved} voice profile(s) to {P.profiles_dir()}")
 
 
 def _write_labeled_outputs(
@@ -492,9 +493,9 @@ def _write_labeled_outputs(
     # 1. Voice-profile auto-match seeds the defaults.
     if profile_names and merged:
         name_map.update(profile_names)
-        print(f"Auto-matched {len(profile_names)} speaker(s) from voice profiles.", file=sys.stderr)
+        ui.info(f"Auto-matched {len(profile_names)} speaker(s) from voice profiles.")
         for lbl, nm in profile_names.items():
-            print(f"  {lbl} -> {nm}", file=sys.stderr)
+            ui.muted(f"  {lbl} -> {nm}")
     # 2. Non-interactive --speakers-names override profile matches.
     if speakers_names and merged:
         merged, list_map = _apply_speaker_names_list(merged, speakers_names)
@@ -522,7 +523,6 @@ def _write_labeled_outputs(
             MR.format_speakers_html(merged, frames_dir=frames_dir, title=title),
             encoding="utf-8",
         )
-        print(f"Wrote HTML transcript: {html_out}", file=sys.stderr)
     # Save voice profiles for speakers that received a real name.
     if save_profiles and cluster_embeddings and name_map:
         _save_named_profiles(name_map, cluster_embeddings)
@@ -544,13 +544,13 @@ def _run_diarize_or_fallback(wav: Path, config: cfg.Config, args: argparse.Names
     except RuntimeError as e:
         msg = str(e)
         if "sherpa_onnx" in msg or "models not found" in msg or "download-diarization" in msg:
-            print(f"Speakers: diarization unavailable — {msg.splitlines()[0]}", file=sys.stderr)
-            print("  Skipping speaker labels for this run. Enable with:", file=sys.stderr)
-            print("    pipx inject whiz sherpa-onnx && whiz models download-diarization", file=sys.stderr)
+            ui.status(f"Speakers: diarization unavailable — {msg.splitlines()[0]}",
+                      kind="hint",
+                      detail="Skipping speaker labels for this run. Enable with: pipx inject whiz sherpa-onnx && whiz models download-diarization")
             return []
         raise
     if not diar_segments:
-        print("Warning: diarization produced no segments; falling back to unlabeled output.", file=sys.stderr)
+        ui.status("Warning: diarization produced no segments; falling back to unlabeled output.", kind="warn")
     return diar_segments
 
 
@@ -558,10 +558,11 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     config = cfg.load()
     cmd, model_path, wav, in_path, keep_wav, of_base, diarize_enabled, screenshots = _build_transcribe_args(args, config)
 
-    print(f"Model:  {model_path}", file=sys.stderr)
-    print(f"Input:  {in_path}", file=sys.stderr)
+    ui.header("whiz", "transcription")
+    ui.kv("Model", model_path)
+    ui.kv("Input", in_path)
     if wav != in_path:
-        print(f"Audio:  {wav}", file=sys.stderr)
+        ui.kv("Audio", str(wav))
     if aud.needs_extraction(in_path):
         flags = []
         if screenshots:
@@ -571,16 +572,15 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
         if diarize_enabled and not getattr(args, "no_name_speakers", False):
             flags.append("name-speakers=on" + (" (explicit)" if args.name_speakers else ""))
         if flags:
-            print(f"Video input — auto-enabled: {', '.join(flags)}", file=sys.stderr)
-    print(f"Run:    {' '.join(cmd)}", file=sys.stderr)
-    print("-" * 60, file=sys.stderr)
+            ui.info(f"Video input — auto-enabled: {', '.join(flags)}")
+    ui.muted(f"Run:    {' '.join(cmd)}")
 
     if args.dry_run:
         if diarize_enabled:
             num_sp = args.speakers if args.speakers else 0
             thr = args.cluster_threshold if args.cluster_threshold is not None else config.cluster_threshold
             D.run_diarization(wav, config, num_speakers=num_sp, threshold=thr, dry_run=True)
-        print("\nDRY-RUN: not executing whisper-cli.", file=sys.stderr)
+        ui.muted("\nDRY-RUN: not executing whisper-cli.")
         return 0
 
     # --- Resumability: skip transcription if a whisper JSON already exists ---
@@ -591,7 +591,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     resuming = bool(getattr(args, "resume", False) and json_path.exists())
     diar_segments: list[D.DiarSegment] = []
     if resuming:
-        print(f"--resume: found existing whisper JSON {json_path}; skipping transcription.", file=sys.stderr)
+        ui.info(f"--resume: found existing whisper JSON {json_path}; skipping transcription.")
         rc = 0
         # Diarization still runs so a new --speakers count / threshold takes
         # effect against the existing transcription.
@@ -602,21 +602,25 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
         if diarize_enabled:
             diar_segments = _run_diarize_or_fallback(wav, config, args)
 
+        ui.phase("transcribing")
         proc = _run_whisper_streaming(cmd)
         rc = proc.returncode
 
     # --- Merge diarization with whisper output ---
+    written: list[str] = []
     if diarize_enabled and rc == 0:
         json_path = _find_whisper_json(of_base, wav, of_passed=bool(args.output))
         if not json_path.exists():
-            print(f"Warning: expected whisper JSON output at {json_path} but it's missing; skipping merge.", file=sys.stderr)
+            ui.status(f"Warning: expected whisper JSON output at {json_path} but it's missing; skipping merge.",
+                      kind="warn")
         else:
             try:
                 whisper_segs = MR.parse_whisper_json(json_path)
             except Exception as e:  # noqa: BLE001
-                print(f"Warning: failed to parse {json_path}: {e}", file=sys.stderr)
+                ui.status(f"Warning: failed to parse {json_path}: {e}", kind="warn")
                 whisper_segs = []
             if whisper_segs and diar_segments:
+                ui.phase("merging speakers")
                 merged = MR.assign_speakers(whisper_segs, diar_segments)
                 want_html = _outputs_include(args, config, "html")
                 want_frames = screenshots and aud.needs_extraction(in_path)
@@ -634,7 +638,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                             )
                             profile_names = {k: v for k, v in profile_names.items() if v}
                     except Exception as e:  # noqa: BLE001
-                        print(f"Warning: voice-profile matching skipped: {e}", file=sys.stderr)
+                        ui.status(f"Warning: voice-profile matching skipped: {e}", kind="warn")
                 # Frames must be extracted before writing HTML so they can be
                 # inlined; for the diarized path we extract after the labeled
                 # outputs but before HTML if both are requested.
@@ -648,8 +652,10 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                     cluster_embeddings=cluster_embeddings or None,
                     save_profiles=config.save_voice_profiles and not args.no_voice_profiles,
                 )
-                print(f"Wrote labeled SRT:  {srt_out}", file=sys.stderr)
-                print(f"Wrote dialogue TXT: {txt_out}", file=sys.stderr)
+                ui.status(f"Wrote labeled SRT:  {srt_out}", kind="ok")
+                ui.status(f"Wrote dialogue TXT: {txt_out}", kind="ok")
+                written.append(str(srt_out))
+                written.append(str(txt_out))
                 # Apply the resolved names to the caller's merged list so the
                 # screenshots manifest and the HTML pass carry real names too
                 # (_write_labeled_outputs relabels a local copy only).
@@ -659,6 +665,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                 # merged list so the manifest carries final speaker names.
                 frames_dir = None
                 if want_frames:
+                    ui.phase("capturing frames")
                     width = args.screenshot_width if args.screenshot_width is not None else 1280
                     result = _extract_and_manifest_screenshots(
                         in_path, merged, of_base,
@@ -668,8 +675,11 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                     )
                     if result is not None:
                         frames_dir = result[0]
+                        ui.status(f"Wrote frames manifest: {result[1]}", kind="ok")
+                        written.append(str(result[1]))
                 # Write HTML after frames exist so they can be inlined.
                 if want_html and want_frames and frames_dir is not None:
+                    ui.phase("writing HTML transcript")
                     _write_labeled_outputs(
                         merged, of_base,
                         name_speakers=False,
@@ -678,6 +688,9 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                         frames_dir=frames_dir,
                         title=in_path.name,
                     )
+                    html_path = Path(str(of_base) + ".speakers.html")
+                    ui.status(f"Wrote HTML transcript: {html_path}", kind="ok")
+                    written.append(str(html_path))
 
     # --- Screenshots without diarization ---
     # Video input (or explicit --screenshots) without usable diarization: one
@@ -693,26 +706,31 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             try:
                 whisper_segs = MR.parse_whisper_json(json_path)
             except Exception as e:  # noqa: BLE001
-                print(f"Warning: failed to parse {json_path}: {e}", file=sys.stderr)
+                ui.status(f"Warning: failed to parse {json_path}: {e}", kind="warn")
                 whisper_segs = []
             if whisper_segs:
+                ui.phase("capturing frames")
                 unlabeled = [(seg, "Speaker") for seg in whisper_segs]
                 width = args.screenshot_width if args.screenshot_width is not None else 1280
-                _extract_and_manifest_screenshots(
+                result = _extract_and_manifest_screenshots(
                     in_path, unlabeled, of_base,
                     ffmpeg=aud.find_ffmpeg(config.ffmpeg),
                     width=width,
                     dry_run=args.dry_run,
                 )
+                if result is not None:
+                    ui.status(f"Wrote frames manifest: {result[1]}", kind="ok")
+                    written.append(str(result[1]))
 
     # Clean up the intermediate WAV unless asked to keep it.
     if wav != in_path and not keep_wav and wav.exists():
         try:
             wav.unlink()
-            print(f"Removed intermediate {wav}", file=sys.stderr)
+            ui.muted(f"Removed intermediate {wav}")
         except OSError:
             pass
 
+    ui.summary(written)
     return rc
 
 
@@ -722,14 +740,16 @@ def cmd_models_list(args: argparse.Namespace) -> int:
     config = cfg.load()
     found = M.discover(config)
     if not found:
-        print("No models found in:")
+        ui.status("No models found in:", kind="warn")
         for d in cfg.model_search_dirs(config):
-            print(f"  {d}")
-        print("\nDownload one with: whiz models download turbo")
+            ui.muted(f"  {d}")
+        ui.info("Download one with: whiz models download turbo")
         return 0
-    print(f"{'ALIAS':<32} {'SIZE':>8}  PATH")
-    for m in found:
-        print(f"{m.alias:<32} {m.size_mb:>7.1f}M  {m.path}")
+    ui.table(
+        "Discovered models",
+        [("Alias", "left"), ("Size", "right"), ("Path", "left")],
+        [[m.alias, f"{m.size_mb:.1f}M", str(m.path)] for m in found],
+    )
     return 0
 
 
@@ -820,10 +840,10 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     entries = SC.load_manifest(manifest_path)
     if entries:
         transcript = AI.transcript_text(entries)
-        print(f"Loaded frames manifest: {manifest_path} ({len(entries)} segments)", file=sys.stderr)
+        ui.info(f"Loaded frames manifest: {manifest_path} ({len(entries)} segments)")
     elif txt_path.exists():
         transcript = txt_path.read_text(encoding="utf-8")
-        print(f"Loaded transcript: {txt_path}", file=sys.stderr)
+        ui.info(f"Loaded transcript: {txt_path}")
     else:
         raise SystemExit(
             f"No transcript found. Looked for:\n  {manifest_path}\n  {txt_path}\n"
@@ -833,14 +853,16 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     prompt_template = AI.resolve_prompt(args)
     use_vision = args.vision and entries is not None
     if args.vision and entries is None:
-        print("--vision requested but no frames manifest found; falling back to text-only.", file=sys.stderr)
+        ui.status("--vision requested but no frames manifest found; falling back to text-only.", kind="warn")
         use_vision = False
 
-    print(f"Model: {model}  base_url: {base_url}  vision: {use_vision}", file=sys.stderr)
+    ui.phase("analyzing")
+    ui.kv("Model", model)
+    ui.muted(f"base_url: {base_url}  vision: {use_vision}")
     if use_vision:
         frames_dir = SC.frames_dir_for(of_base)
         frame_paths = [frames_dir / e.frame for e in (entries or []) if e.frame]
-        print(f"Sending {len(frame_paths)} frames (cap {max_frames}) ...", file=sys.stderr)
+        ui.info(f"Sending {len(frame_paths)} frames (cap {max_frames}) ...")
         response = AI.chat_vision(
             prompt_template, transcript, frame_paths,
             base_url=base_url, model=model, api_key=api_key, max_frames=max_frames,
@@ -858,7 +880,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     md += "## Prompt\n\n```\n" + prompt_template.replace("{transcript}", "<transcript omitted>") + "\n```\n\n"
     md += "## Response\n\n" + response + "\n"
     out_path.write_text(md, encoding="utf-8")
-    print(f"Wrote analysis: {out_path}", file=sys.stderr)
+    ui.status(f"Wrote analysis: {out_path}", kind="ok")
     print(response)
     return 0
 
@@ -887,8 +909,10 @@ def cmd_merge(args: argparse.Namespace) -> int:
     elif aud.needs_extraction(in_path):
         wav = in_path.with_suffix(".wav")
         if not wav.exists():
-            print(f"Extracting audio from {in_path} ...", file=sys.stderr)
+            ui.phase("extracting audio")
+            ui.kv("Video", in_path.name)
             wav = aud.extract_audio(in_path, aud.find_ffmpeg(config.ffmpeg))
+            ui.kv("Audio", str(wav))
     else:
         wav = in_path
 
@@ -899,7 +923,8 @@ def cmd_merge(args: argparse.Namespace) -> int:
             f"No whisper JSON found (looked for {json_path}).\n"
             "Run `whiz transcribe <file>` first to produce one, or pass --json <path>."
         )
-    print(f"Whisper JSON:  {json_path}", file=sys.stderr)
+    ui.header("whiz", "merge")
+    ui.kv("JSON", json_path)
 
     try:
         whisper_segs = MR.parse_whisper_json(json_path)
@@ -907,7 +932,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         raise SystemExit(f"Failed to parse {json_path}: {e}")
     if not whisper_segs:
         raise SystemExit(f"No segments parsed from {json_path}.")
-    print(f"Whisper segments: {len(whisper_segs)}", file=sys.stderr)
+    ui.kv("Segs", f"{len(whisper_segs)} whisper segments")
 
     of_base = json_path.with_suffix("")  # e.g. ...16.03.40.wav -> ...16.03.40
     # For the wav.json case, of_base should be the input stem without .json.
@@ -918,18 +943,19 @@ def cmd_merge(args: argparse.Namespace) -> int:
     # Diarization params.
     num_sp = args.speakers if args.speakers else 0
     thr = args.cluster_threshold if args.cluster_threshold is not None else config.cluster_threshold
-    print(f"Diarize: num_speakers={num_sp or 'auto'} cluster_threshold={thr}", file=sys.stderr)
+    ui.muted(f"Diarize: num_speakers={num_sp or 'auto'} cluster_threshold={thr}")
 
     try:
+        ui.phase("diarizing")
         diar_segments = D.run_diarization(wav, config, num_speakers=num_sp, threshold=thr)
     except RuntimeError as e:
         msg = str(e)
         if "sherpa_onnx" in msg or "models not found" in msg or "download-diarization" in msg:
             if speakers_auto and args.speakers is None:
                 # Auto-enabled only: fall back to screenshots-only, don't crash.
-                print(f"Speakers: diarization unavailable — {msg.splitlines()[0]}", file=sys.stderr)
-                print("  Skipping speaker labels. Enable with:", file=sys.stderr)
-                print("    pipx inject whiz sherpa-onnx && whiz models download-diarization", file=sys.stderr)
+                ui.status(f"Speakers: diarization unavailable — {msg.splitlines()[0]}",
+                          kind="hint",
+                          detail="Skipping speaker labels. Enable with: pipx inject whiz sherpa-onnx && whiz models download-diarization")
                 diar_segments = []
             else:
                 raise SystemExit(
@@ -940,7 +966,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
             raise
     if not diar_segments:
         if speakers_requested:
-            print("Diarization produced no segments; writing screenshots only.", file=sys.stderr)
+            ui.status("Diarization produced no segments; writing screenshots only.", kind="warn")
         else:
             raise SystemExit("Diarization produced no segments; cannot merge.")
 
@@ -949,10 +975,8 @@ def cmd_merge(args: argparse.Namespace) -> int:
     # Speaker tally to stderr for quick tuning feedback (before relabeling).
     if merged:
         from collections import Counter
-        tally = Counter(label for _, label in merged)
-        print(f"Detected speakers: {len(tally)}", file=sys.stderr)
-        for label, n in tally.most_common():
-            print(f"  {label}: {n} segments", file=sys.stderr)
+        counts = Counter(label for _, label in merged)
+        ui.tally(counts.most_common())
 
     # Voice profiles: compute per-cluster embeddings and auto-match against any
     # stored profiles. Matched names seed the speaker labels; --speakers-names
@@ -968,9 +992,11 @@ def cmd_merge(args: argparse.Namespace) -> int:
                 )
                 profile_names = {k: v for k, v in profile_names.items() if v}
         except Exception as e:  # noqa: BLE001
-            print(f"Warning: voice-profile matching skipped: {e}", file=sys.stderr)
+            ui.status(f"Warning: voice-profile matching skipped: {e}", kind="warn")
 
+    written: list[str] = []
     if merged:
+        ui.phase("merging speakers")
         srt_out, txt_out, name_map = _write_labeled_outputs(
             merged, of_base,
             name_speakers=_name_speakers_enabled(args, diarize_enabled=True),
@@ -981,8 +1007,10 @@ def cmd_merge(args: argparse.Namespace) -> int:
             cluster_embeddings=cluster_embeddings or None,
             save_profiles=config.save_voice_profiles and not args.no_voice_profiles,
         )
-        print(f"Wrote labeled SRT:  {srt_out}", file=sys.stderr)
-        print(f"Wrote dialogue TXT: {txt_out}", file=sys.stderr)
+        ui.status(f"Wrote labeled SRT:  {srt_out}", kind="ok")
+        ui.status(f"Wrote dialogue TXT: {txt_out}", kind="ok")
+        written.append(str(srt_out))
+        written.append(str(txt_out))
         # Apply the resolved names to the caller's merged list so the
         # screenshots manifest and the HTML pass carry real names too.
         if name_map:
@@ -992,6 +1020,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
     # Frame extraction is cheap (~seconds), so merge --screenshots re-runs it.
     frames_dir = None
     if screenshots and aud.needs_extraction(in_path):
+        ui.phase("capturing frames")
         width = args.screenshot_width if args.screenshot_width is not None else 1280
         shot_list = merged if merged else [(seg, "Speaker") for seg in whisper_segs]
         result = _extract_and_manifest_screenshots(
@@ -1002,8 +1031,11 @@ def cmd_merge(args: argparse.Namespace) -> int:
         )
         if result is not None:
             frames_dir = result[0]
+            ui.status(f"Wrote frames manifest: {result[1]}", kind="ok")
+            written.append(str(result[1]))
     # Write HTML after frames exist so they can be inlined.
     if _outputs_include(args, config, "html") and frames_dir is not None and merged:
+        ui.phase("writing HTML transcript")
         _write_labeled_outputs(
             merged, of_base,
             name_speakers=False,
@@ -1012,6 +1044,10 @@ def cmd_merge(args: argparse.Namespace) -> int:
             frames_dir=frames_dir,
             title=in_path.name,
         )
+        html_path = Path(str(of_base) + ".speakers.html")
+        ui.status(f"Wrote HTML transcript: {html_path}", kind="ok")
+        written.append(str(html_path))
+    ui.summary(written)
     return 0
 
 
@@ -1021,16 +1057,20 @@ def cmd_speakers_list(args: argparse.Namespace) -> int:
     """List stored speaker voice profiles."""
     profiles = P.load_profiles()
     if not profiles:
-        print(f"No voice profiles found in {P.profiles_dir()}")
-        print("Profiles are saved automatically when you name speakers with")
-        print("--name-speakers or --speakers-names (unless --no-voice-profiles).")
+        ui.info(f"No voice profiles found in {P.profiles_dir()}")
+        ui.muted("Profiles are saved automatically when you name speakers with")
+        ui.muted("--name-speakers or --speakers-names (unless --no-voice-profiles).")
         return 0
-    print(f"{'NAME':<24} {'DIM':>5}  {'CREATED':<22}  PATH")
+    rows = []
     for prof in profiles:
         path = P._profile_path(prof.name)
-        print(f"{prof.name:<24} {prof.dim:>5}  {prof.created:<22}  {path}")
-    print(f"\n{len(profiles)} profile(s) in {P.profiles_dir()}")
-    print(f"Match threshold: {cfg.load().speaker_match_threshold} (whiz config set speaker_match_threshold=...)")
+        rows.append([prof.name, str(prof.dim), prof.created, str(path)])
+    ui.table(
+        f"Voice profiles ({len(profiles)})",
+        [("Name", "left"), ("Dim", "right"), ("Created", "left"), ("Path", "left")],
+        rows,
+    )
+    ui.muted(f"Match threshold: {cfg.load().speaker_match_threshold} (whiz config set speaker_match_threshold=...)")
     return 0
 
 
@@ -1039,9 +1079,9 @@ def cmd_speakers_forget(args: argparse.Namespace) -> int:
     name = args.name
     removed = P.forget_profile(name)
     if removed:
-        print(f"Forgot voice profile: {name}")
+        ui.status(f"Forgot voice profile: {name}", kind="ok")
         return 0
-    print(f"No voice profile named {name!r} in {P.profiles_dir()}")
+    ui.status(f"No voice profile named {name!r} in {P.profiles_dir()}", kind="warn")
     return 1
 
 
@@ -1061,38 +1101,45 @@ def cmd_speakers_match(args: argparse.Namespace) -> int:
     elif aud.needs_extraction(in_path):
         wav = in_path.with_suffix(".wav")
         if not wav.exists():
-            print(f"Extracting audio from {in_path} ...", file=sys.stderr)
+            ui.phase("extracting audio")
+            ui.kv("Video", in_path.name)
             wav = aud.extract_audio(in_path, aud.find_ffmpeg(config.ffmpeg))
+            ui.kv("Audio", str(wav))
     else:
         wav = in_path
 
     num_sp = args.speakers if args.speakers else 0
     thr = args.cluster_threshold if args.cluster_threshold is not None else config.cluster_threshold
+    ui.phase("diarizing")
     diar_segments = D.run_diarization(wav, config, num_speakers=num_sp, threshold=thr)
     if not diar_segments:
         raise SystemExit("Diarization produced no segments.")
 
     profiles = P.load_profiles()
     if not profiles:
-        print(f"No stored voice profiles in {P.profiles_dir()}; nothing to match against.")
+        ui.info(f"No stored voice profiles in {P.profiles_dir()}; nothing to match against.")
         return 0
 
     cluster_embeddings = P.compute_speaker_embeddings(wav, diar_segments, config)
     from whiz.merge import speaker_label
-    sep = ", "
-    print(f"\n{'CLUSTER':<12} {'BEST NAME':<20} {'BEST SCORE':>10}  ALL SCORES")
     matches = P.match_speakers(cluster_embeddings, profiles, threshold=config.speaker_match_threshold)
+    rows = []
     for cid, emb in sorted(cluster_embeddings.items()):
         scores = sorted(
             ((P.cosine_similarity(emb, prof.embedding), prof.name) for prof in profiles),
             reverse=True,
         )
-        all_str = sep.join(f"{nm}={s:.3f}" for s, nm in scores)
+        all_str = ", ".join(f"{nm}={s:.3f}" for s, nm in scores)
         m = matches.get(cid)
         best = f"{m[0]}" if m else "(no match)"
         best_score = f"{m[1]:.3f}" if m else f"{scores[0][0]:.3f}"
-        print(f"{speaker_label(cid):<12} {best:<20} {best_score:>10}  {all_str}")
-    print(f"\nThreshold: {config.speaker_match_threshold}")
+        rows.append([speaker_label(cid), best, best_score, all_str])
+    ui.table(
+        "Speaker match (dry run)",
+        [("Cluster", "left"), ("Best name", "left"), ("Best score", "right"), ("All scores", "left")],
+        rows,
+    )
+    ui.muted(f"Threshold: {config.speaker_match_threshold}")
     return 0
 
 
@@ -1160,8 +1207,9 @@ def cmd_config_set(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="whiz",
-        description="A handy CLI wrapper around whisper-cli (whisper.cpp). "
-                    "Auto-finds models, extracts audio from video, sensible defaults.",
+        description="whiz — transcription CLI. Transcribe, diarize, name speakers, "
+                    "capture frames, build HTML transcripts, and run AI analysis. "
+                    "Powered by whisper.cpp.",
     )
     p.add_argument("-V", "--version", action="version", version=f"whiz {__version__}")
     sub = p.add_subparsers(dest="command", required=True)

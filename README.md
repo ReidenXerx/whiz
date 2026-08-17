@@ -1,13 +1,55 @@
 # whiz
 
-A handy CLI wrapper around [whisper-cli](https://github.com/ggerganov/whisper.cpp) (whisper.cpp) that fixes the common headaches so you can just say `whiz transcribe recording.mov` and get on with your day:
+**A transcription CLI for meetings, screen recordings, and interviews — from audio/video to a labeled, named, frame-illustrated transcript in one command.**
 
-1. **`failed to open 'large-v3'`** — whiz auto-discovers models across your filesystem and resolves friendly aliases (`turbo`, `large-v3`, `medium`) to the actual `.bin` file.
-2. **whisper-cli choking on `.mov`/`.mp4`** — whiz extracts a 16 kHz mono WAV with ffmpeg and hands *that* to whisper-cli, then cleans up.
-3. **No multi-speaker labels** — for video inputs, speaker diarization, on-screen frame capture, and the interactive speaker-naming prompt are **on by default** (opt out with `--no-speakers` / `--no-screenshots` / `--no-name-speakers`). whiz runs true diarization via sherpa-onnx and emits labeled `Speaker A:` / `Speaker B:` output (or real names — see [Speaker naming](#naming-speakers)). Diarization results are cached so re-tuning names/thresholds via `whiz merge` is instant.
-4. **VAD model download moved** — whiz auto-downloads the current Silero VAD model from the new `ggml-org/whisper-vad` repo when VAD is enabled and no model is found.
+```
+whiz transcribe recording.mov
+```
 
-Zero runtime dependencies — pure Python 3.11+ stdlib. Speaker diarization requires the optional `sherpa-onnx` package (see below).
+whiz transcribes, detects who spoke when, prompts you to name each speaker, captures an on-screen frame per segment, and emits a self-contained HTML transcript — all from that single command. It's powered by [whisper.cpp](https://github.com/ggerganov/whisper.cpp) for transcription and [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) for diarization, with a polished terminal UI built on [rich](https://rich.readthedocs.io).
+
+## What it does
+
+- **Transcribe** audio or video — auto-finds the best Whisper model, extracts audio from video containers, resolves friendly model aliases (`turbo`, `large-v3`).
+- **Diarize** mono recordings (meetings, screen recordings) into `Speaker A/B/C…` labels via sherpa-onnx. Auto-on for video inputs.
+- **Name speakers** — interactively prompt for real names, or pass them non-interactively. Names replace the raw labels everywhere.
+- **Voice profiles** — save a speaker's embedding once you name them; later recordings with the same people are labeled automatically, no flags needed.
+- **Screenshots** — capture one on-screen frame per segment into a manifest + HTML transcript. Auto-on for video inputs.
+- **HTML transcript** — a self-contained, color-coded, frame-illustrated `.speakers.html` you can open in any browser (no server, no external images).
+- **AI analysis** — send a transcript (and optionally frames) to an OpenAI-compatible chat model ([Ollama](https://ollama.com) by default) for summaries, action items, or freeform questions.
+- **Re-tune cheaply** — `whiz merge` re-runs only diarization + merge against an existing transcription, reusing a cached diarization result, so adjusting speaker count / threshold / names is instant.
+
+## Terminal output
+
+whiz has a branded, colorized terminal UI (degrades to clean plain text when piped):
+
+```
+⚡ whiz transcription
+Model   ggml-large-v3-turbo-q5_0.bin
+Input   recording.mov
+Audio   recording.wav
+Video input — auto-enabled: screenshots=on, speakers=on, name-speakers=on
+▸ transcribing
+[0:12] whispertimings ...
+▸ diarizing
+Speakers 4 detected
+    ● Alice 181 segments
+    ● Bob   152 segments
+    ● Carol  12 segments
+    ● Dave    6 segments
+▸ merging speakers
+Wrote labeled SRT:  recording.speakers.srt
+Wrote dialogue TXT: recording.speakers.txt
+▸ capturing frames
+Wrote frames manifest: recording.frames.json
+▸ writing HTML transcript
+Wrote HTML transcript: recording.speakers.html
+✓ Done
+  · recording.speakers.srt
+  · recording.speakers.txt
+  · recording.frames.json
+  · recording.speakers.html
+```
 
 ## Requirements
 
@@ -77,7 +119,7 @@ Transcribe an audio or video file.
 | `--vad-threshold` | `0.5` | VAD threshold |
 | `--no-auto-vad-download` | off | Don't auto-download the Silero VAD model when VAD is enabled and missing |
 | `--translate` | off | Translate to English instead of transcribing |
-| `--no-timestamps` | off | Strip timestamps from output |
+| `--no-timestamps` | off | Strip timestamp from output |
 | `--print-progress` | on (TTY) | Print whisper-cli progress; default on when stderr is a TTY, off otherwise |
 | `--no-progress` | off | Disable whisper-cli progress passthrough (forces `-np`) |
 | `--keep-wav` | off | Keep the intermediate extracted WAV |
@@ -226,13 +268,6 @@ whiz scans these for `ggml-*.bin` files:
 - `/usr/local/share/whisper`, `/opt/homebrew/share/whisper`, `/usr/share/whisper`
 - Any dirs you add via `model_dirs` in config
 
-## Why?
-
-Because `whisper-cli --model large-v3 -f recording.mov` fails twice — once because
-`large-v3` isn't a file path, and again because whisper-cli can't demux a `.mov`.
-whiz handles both so you can just say `whiz transcribe recording.mov` and get on
-with your day.
-
 ## Speaker diarization (multi-speaker labels)
 
 whiz can label who spoke when on mono recordings (meetings, screen recordings) via [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx), which combines a pyannote segmentation model with speaker-embedding clustering.
@@ -268,7 +303,7 @@ whiz transcribe --speakers --cluster-threshold 0.95 call.m4a
 whiz transcribe --speakers 4 --name-speakers meeting.mov
 
 # Name speakers non-interactively (assigned by total talk time, most talkative first)
-whiz transcribe --speakers 4 --speakers-names Alice,Bob,Carol,Dave meeting.mov
+whiz transcribe recording.mov --speakers-names Alice,Bob,Carol,Dave
 ```
 
 If diarization is auto-enabled but sherpa-onnx or its models aren't installed yet, whiz skips speaker labeling with a one-line hint (and still transcribes + captures screenshots) instead of crashing — run the one-time setup above to turn it on.
@@ -334,7 +369,7 @@ whiz merge --no-speakers --no-screenshots recording.mov
 whiz merge --speakers 4 --name-speakers recording.mov
 
 # Name speakers non-interactively (instant — diarization cache is reused)
-whiz merge --speakers 4 --speakers-names Alice,Bob,Carol,Dave recording.mov
+whiz merge recording.mov --speakers-names Alice,Bob,Carol,Dave
 ```
 
 ## Speaker voice profiles (cross-recording recognition)
@@ -425,23 +460,6 @@ Run diarization on the given file and print, for each detected cluster, the cosi
 
 ```bash
 whiz speakers match recording.mov --speakers 4
-```
-
-## Testing
-
-whiz ships a pytest suite covering the pure-Python modules (merge, models, screenshots, ai, diarize cache, profiles) — no sherpa-onnx, ffmpeg, or network required. Install the test extras and run:
-
-```bash
-pipx install --force --editable '.[test]'
-pytest tests/
-```
-
-Tests isolate the filesystem (via `monkeypatch` and `tmp_path`) so host-installed models don't leak into model-discovery assertions. The suite runs in under a second.
-
-## License
-
-MIT © ReidenXerx
-akers 4
 ```
 
 ## Testing

@@ -200,6 +200,16 @@ def _speaker_color(label: str) -> str:
     return _SPEAKER_COLORS[h % len(_SPEAKER_COLORS)]
 
 
+def speaker_palette(label: str) -> str:
+    """Public alias for the HTML/terminal speaker color palette.
+
+    Returns a hex color string (e.g. ``#e74c3c``) stable across runs for a
+    given label. Used by both the HTML transcript and the terminal speaker
+    tally so colors match between the two.
+    """
+    return _speaker_color(label)
+
+
 def _html_escape(text: str) -> str:
     return (
         text.replace("&", "&amp;")
