@@ -650,6 +650,11 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                 )
                 print(f"Wrote labeled SRT:  {srt_out}", file=sys.stderr)
                 print(f"Wrote dialogue TXT: {txt_out}", file=sys.stderr)
+                # Apply the resolved names to the caller's merged list so the
+                # screenshots manifest and the HTML pass carry real names too
+                # (_write_labeled_outputs relabels a local copy only).
+                if name_map:
+                    merged = MR.relabel(merged, name_map)
                 # Video screenshots: one frame per segment, using the relabeled
                 # merged list so the manifest carries final speaker names.
                 frames_dir = None
@@ -978,6 +983,10 @@ def cmd_merge(args: argparse.Namespace) -> int:
         )
         print(f"Wrote labeled SRT:  {srt_out}", file=sys.stderr)
         print(f"Wrote dialogue TXT: {txt_out}", file=sys.stderr)
+        # Apply the resolved names to the caller's merged list so the
+        # screenshots manifest and the HTML pass carry real names too.
+        if name_map:
+            merged = MR.relabel(merged, name_map)
 
     # Video screenshots: re-extract frames against the existing merged list.
     # Frame extraction is cheap (~seconds), so merge --screenshots re-runs it.
