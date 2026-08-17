@@ -880,11 +880,15 @@ def _recommend_model(models: list[str], prefer_vision: bool) -> int:
 # both by the model-recommend heuristic and the analyze-time vision gate so a
 # single source of truth decides whether sending images is safe.
 _VISION_TOKENS = ("vl", "vision", "llava", "minicpm-v", "qwen2.5-vl", "qwen-vl",
-                  "multimodal", "gpt-4o", "gpt-4-vision", "llama-3.2-vision",
-                  "pixtral", "cogvlm", "internvl", "phi-3.5-vision", "phi-3-vision")
-# Substrings that signal a strong text/coder model (non-vision).
-_TEXT_TOKENS = ("gpt", "qwen", "llama", "mistral", "mixtral", "glm", "deepseek",
-                "devstral", "codestral", "coder")
+                  "qwen3-vl", "qwen3.5", "multimodal", "gpt-4o", "gpt-4-vision",
+                  "llama-3.2-vision", "pixtral", "cogvlm", "internvl",
+                  "phi-3.5-vision", "phi-3-vision", "gemma3", "gemma4",
+                  "mistral-large-3", "minimax-m3", "kimi-k2.5", "kimi-k2.6",
+                  "kimi-k2.7")
+# Substrings that signal a strong text/coder model (non-vision). Kept narrow
+# so cloud vision-capable models (qwen3.5, kimi-k2.6, gemma4, ...) are NOT
+# misclassified as text-only.
+_TEXT_TOKENS = ("deepseek", "devstral", "codestral", "coder", "gpt-oss")
 
 
 def _looks_vision_capable(model: str) -> bool:
@@ -908,23 +912,26 @@ def _resolve_vision(*, explicit_vision: bool, no_vision: bool, has_frames: bool,
 
     Priority:
       * ``--no-vision`` always disables (opt out), even if ``--vision`` was set.
-      * ``--vision`` explicitly requests it; if no frames manifest exists we
-        fall back to text-only with a warning.
+      * ``--vision`` explicitly requests it and frames exist: always enable
+        (a true user override — we don't second-guess the model name; the HTTP
+        layer prints a clear rejection hint if the model actually rejects the
+        images). If no frames manifest exists, fall back to text-only.
       * Otherwise: when frames exist AND the configured model looks vision-
         capable, auto-enable (info). When frames exist but the model looks
-        text-only, stay text-only with a hint to switch models (we never send
-        images to a model that will reject them).
+        text-only, stay text-only with a hint to switch models (we never auto-
+        send images to a model that might reject them).
       * No frames: text-only, silently.
     """
     if no_vision:
         return False, "", ""
     if explicit_vision:
+        # Explicit --vision is a user override: always send frames if they
+        # exist. We don't second-guess the model name here (the HTTP layer's
+        # _post_chat already prints a clear rejection hint if a text-only model
+        # actually rejects the images). Only fall back to text-only when there
+        # are no frames to send.
         if not has_frames:
             return False, "warn", "--vision requested but no frames manifest found; falling back to text-only."
-        if not _looks_vision_capable(model):
-            return False, "warn", ("--vision requested but the model '{m}' doesn't look "
-                                   "vision-capable; falling back to text-only to avoid a "
-                                   "image-rejection error.").format(m=model)
         return True, "", ""
     if not has_frames:
         return False, "", ""
