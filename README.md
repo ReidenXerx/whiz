@@ -378,6 +378,8 @@ When you name a speaker (with `--name-speakers` or `--speakers-names`), whiz can
 
 Profiles live at `~/.config/whiz/speakers/<Name>.json` (one file per name, inspectable and easy to delete). whiz saves a profile automatically whenever a speaker receives a real name — so the first time you transcribe a meeting with `--speakers-names Alice,Bob,Carol,Dave`, those four voice profiles are stored; the next recording with the same people is labeled automatically, no flags needed.
 
+Profiles **merge across recordings** rather than being overwritten: when you confirm the same speaker's name again on a later recording, the new cluster's embedding is combined with the stored one via a sample-weighted running mean (the old weight is capped at 5 samples, so the profile keeps adapting to a changed mic/voice instead of freezing). Re-confirming a speaker across several recordings makes their stored voice profile more accurate over time and more robust to one-off noisy recordings. If you ever swap the embedding model (different vector dimension), the old profile is discarded and a fresh one starts. Inspect the sample count with `whiz speakers list` (`samples` field).
+
 ```bash
 # First recording: name speakers explicitly — profiles are saved automatically
 whiz transcribe --speakers 4 --speakers-names Alice,Bob,Carol,Dave meeting1.mov

@@ -433,11 +433,14 @@ def _save_named_profiles(
     name_map: dict[str, str],
     cluster_embeddings: dict[int, list[float]],
 ) -> None:
-    """Save a voice profile for each speaker that received a real name.
+    """Save (or merge) a voice profile for each speaker that received a real name.
 
     ``name_map`` is keyed by ``Speaker A/B/...`` labels; we map those back to
     cluster ids via the merge module's letter ordering and persist the
-    corresponding embedding under the chosen name.
+    corresponding embedding under the chosen name. If a profile already exists
+    for that name, ``P.save_profile`` merges the new embedding with the stored
+    one via a sample-weighted running mean, so re-confirming a speaker across
+    recordings makes their profile more accurate over time.
     """
     from whiz.merge import _SPEAKER_LETTERS
 
@@ -445,6 +448,7 @@ def _save_named_profiles(
         f"Speaker {letter}": i for i, letter in enumerate(_SPEAKER_LETTERS)
     }
     saved = 0
+    merged_count = 0
     for label, name in name_map.items():
         cid = label_to_cid.get(label)
         if cid is None or cid not in cluster_embeddings:
@@ -453,13 +457,21 @@ def _save_named_profiles(
         if not name or name.startswith("Speaker "):
             continue
         try:
-            path = P.save_profile(name, cluster_embeddings[cid])
+            existed = P._profile_path(name).exists()
+            path = P.save_profile(name, cluster_embeddings[cid], samples=1)
             saved += 1
-            ui.status(f"Saved voice profile: {name}", kind="ok", detail=str(path))
+            if existed:
+                merged_count += 1
+                ui.status(f"Merged voice profile: {name}", kind="ok", detail=str(path))
+            else:
+                ui.status(f"Saved voice profile: {name}", kind="ok", detail=str(path))
         except Exception as e:  # noqa: BLE001
             ui.status(f"Warning: could not save voice profile for {name}: {e}", kind="warn")
     if saved:
-        ui.muted(f"Saved {saved} voice profile(s) to {P.profiles_dir()}")
+        note = f"Saved {saved} voice profile(s)"
+        if merged_count:
+            note += f" ({merged_count} merged with existing)"
+        ui.muted(note + f" to {P.profiles_dir()}")
 
 
 def _write_labeled_outputs(
@@ -1186,10 +1198,10 @@ def cmd_speakers_list(args: argparse.Namespace) -> int:
     rows = []
     for prof in profiles:
         path = P._profile_path(prof.name)
-        rows.append([prof.name, str(prof.dim), prof.created, str(path)])
+        rows.append([prof.name, str(prof.dim), str(prof.samples), prof.created, str(path)])
     ui.table(
         f"Voice profiles ({len(profiles)})",
-        [("Name", "left"), ("Dim", "right"), ("Created", "left"), ("Path", "left")],
+        [("Name", "left"), ("Dim", "right"), ("Samples", "right"), ("Created", "left"), ("Path", "left")],
         rows,
     )
     ui.muted(f"Match threshold: {cfg.load().speaker_match_threshold} (whiz config set speaker_match_threshold=...)")

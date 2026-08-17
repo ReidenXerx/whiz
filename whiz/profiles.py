@@ -19,7 +19,11 @@ Profiles live at ``~/.config/whiz/speakers/<Name>.json``::
     }
 
 The store uses simple JSON files (one per name) so they're inspectable and
-easy to delete. sherpa-onnx is an optional dependency, imported lazily.
+easy to delete. Profiles **merge** across recordings: each time a speaker is
+re-named, the new cluster's embedding is combined with any existing one via a
+sample-weighted running mean (see ``save_profile``), so the stored voice
+profile grows more accurate over time instead of being overwritten by each
+run. sherpa-onnx is an optional dependency, imported lazily.
 """
 
 from __future__ import annotations
@@ -82,16 +86,80 @@ def load_profiles() -> list[Profile]:
     return out
 
 
-def save_profile(name: str, embedding: list[float], samples: int = 0) -> Path:
-    """Persist a voice profile for ``name`` (overwrites an existing one)."""
+def _load_profile_raw(name: str) -> dict | None:
+    """Load a single stored profile's raw JSON, or None if it doesn't exist."""
+    path = _profile_path(name)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+# Cap on how much historical samples can outweigh a new one. Keeps the profile
+# adapting to a changed mic/voice instead of freezing after a few recordings.
+_MAX_HISTORY_WEIGHT = 5
+
+
+def merge_embeddings(
+    old: list[float],
+    old_samples: int,
+    new: list[float],
+    new_samples: int = 1,
+) -> tuple[list[float], int]:
+    """Combine two speaker embeddings via a sample-weighted running mean.
+
+    The old vector's weight is capped at ``_MAX_HISTORY_WEIGHT`` so a new
+    recording still moves the centroid once enough history has accumulated —
+    the profile keeps adapting to a changed mic/voice instead of freezing.
+    Returns the merged embedding and the new total sample count. The two vectors
+    must be equal-length; the caller is responsible for the dimension check
+    (mismatched dims should discard the old profile rather than average).
+    """
+    if not old:
+        return [float(x) for x in new], int(new_samples)
+    if not new:
+        return [float(x) for x in old], int(old_samples)
+    w_old = float(min(max(0, old_samples), _MAX_HISTORY_WEIGHT))
+    w_new = float(max(1, new_samples))
+    total = w_old + w_new
+    out = [(o * w_old + n * w_new) / total for o, n in zip(old, new)]
+    return out, int(old_samples + new_samples)
+
+
+def save_profile(name: str, embedding: list[float], samples: int = 1) -> Path:
+    """Persist a voice profile for ``name``, merging with any existing one.
+
+    If a profile already exists for ``name`` with the same embedding dimension,
+    the new embedding is combined with the stored one via a sample-weighted
+    running mean (see ``merge_embeddings``) so the profile grows more accurate
+    across recordings instead of being overwritten. If the dimension differs
+    (e.g. the embedding model was swapped), the old profile is discarded and
+    the new one replaces it. ``samples`` is the count this run contributes.
+    """
     d = profiles_dir()
     d.mkdir(parents=True, exist_ok=True)
+    prior = _load_profile_raw(name)
+    total_samples = int(samples)
+    final_embedding = [float(x) for x in embedding]
+    if prior is not None:
+        old_emb = prior.get("embedding")
+        old_dim = int(prior.get("dim", len(old_emb) if isinstance(old_emb, list) else 0))
+        if isinstance(old_emb, list) and old_emb and old_dim == len(final_embedding):
+            final_embedding, total_samples = merge_embeddings(
+                [float(x) for x in old_emb],
+                int(prior.get("samples", 0)),
+                final_embedding,
+                new_samples=samples,
+            )
+        # Dim mismatch: drop the old profile (incompatible model) and start fresh.
     payload = {
         "name": name,
-        "dim": len(embedding),
-        "embedding": [float(x) for x in embedding],
+        "dim": len(final_embedding),
+        "embedding": final_embedding,
         "created": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "samples": int(samples),
+        "samples": total_samples,
     }
     path = _profile_path(name)
     path.write_text(json.dumps(payload), encoding="utf-8")
