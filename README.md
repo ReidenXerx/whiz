@@ -4,7 +4,7 @@ A handy CLI wrapper around [whisper-cli](https://github.com/ggerganov/whisper.cp
 
 1. **`failed to open 'large-v3'`** — whiz auto-discovers models across your filesystem and resolves friendly aliases (`turbo`, `large-v3`, `medium`) to the actual `.bin` file.
 2. **whisper-cli choking on `.mov`/`.mp4`** — whiz extracts a 16 kHz mono WAV with ffmpeg and hands *that* to whisper-cli, then cleans up.
-3. **No multi-speaker labels** — `whiz transcribe --speakers` runs true diarization via sherpa-onnx and emits labeled `Speaker A:` / `Speaker B:` output (or real names — see [Speaker naming](#naming-speakers)).
+3. **No multi-speaker labels** — `whiz transcribe --speakers` runs true diarization via sherpa-onnx and emits labeled `Speaker A:` / `Speaker B:` output (or real names — see [Speaker naming](#naming-speakers)). Diarization results are cached so re-tuning names/thresholds via `whiz merge` is instant.
 4. **VAD model download moved** — whiz auto-downloads the current Silero VAD model from the new `ggml-org/whisper-vad` repo when VAD is enabled and no model is found.
 
 Zero runtime dependencies — pure Python 3.11+ stdlib. Speaker diarization requires the optional `sherpa-onnx` package (see below).
@@ -71,24 +71,27 @@ Transcribe an audio or video file.
 | `--no-auto-vad-download` | off | Don't auto-download the Silero VAD model when VAD is enabled and missing |
 | `--translate` | off | Translate to English instead of transcribing |
 | `--no-timestamps` | off | Strip timestamps from output |
-| `--print-progress` | off | Print whisper-cli progress |
+| `--print-progress` | on (TTY) | Print whisper-cli progress; default on when stderr is a TTY, off otherwise |
+| `--no-progress` | off | Disable whisper-cli progress passthrough (forces `-np`) |
 | `--keep-wav` | off | Keep the intermediate extracted WAV |
 | `--speakers [N]` | off | Enable speaker diarization; optional integer = known speaker count, omit = auto-detect |
 | `--cluster-threshold` | `0.9` | Diarization clustering threshold when auto-detecting (larger = fewer speakers) |
-| `--name-speakers` | off | After transcription, prompt to name each detected speaker |
+| `--name-speakers` | off | After transcription, interactively prompt to name each detected speaker |
+| `--speakers-names Enric,Vadim,...` | off | Non-interactive speaker names assigned by total talk time (most talkative first) |
 | `--extra ...` | — | Extra flags passed verbatim to whisper-cli |
 | `--dry-run` | off | Print the command without executing |
 
 ### `whiz merge <file>`
 
-Re-run only diarization + the merge against an existing whisper JSON, skipping the expensive transcription. Lets you tune speaker count / threshold / names cheaply after a first run.
+Re-run only diarization + the merge against an existing whisper JSON, skipping the expensive transcription. Lets you tune speaker count / threshold / names cheaply after a first run. Diarization results are cached in `<file>.wav.diar.json`, so a second `whiz merge` with the same `--speakers`/`--cluster-threshold` reuses the cache and skips the ~3 min embedding pass — only the cheap merge step runs. Changing either parameter re-runs diarization and overwrites the cache.
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--json` | auto-find | Explicit path to the whisper JSON |
 | `--speakers [N]` | auto-detect | Known speaker count; omit = auto-detect |
 | `--cluster-threshold` | `0.9` | Clustering threshold when auto-detecting (larger = fewer speakers) |
-| `--name-speakers` | off | Prompt to name each detected speaker |
+| `--name-speakers` | off | Interactively prompt to name each detected speaker |
+| `--speakers-names Enric,Vadim,...` | off | Non-interactive speaker names assigned by total talk time (most talkative first) |
 
 ### `whiz models list`
 
@@ -229,12 +232,16 @@ whiz transcribe --speakers --cluster-threshold 0.95 call.m4a
 
 # Name the speakers interactively after transcription
 whiz transcribe --speakers 4 --name-speakers meeting.mov
+
+# Name speakers non-interactively (assigned by total talk time, most talkative first)
+whiz transcribe --speakers 4 --speakers-names Enric,Vadim,Thomas,Dziyana meeting.mov
 ```
 
 This produces the normal whisper-cli outputs (SRT, JSON) plus two labeled files alongside the input:
 
 - `*.speakers.srt` — SRT with `Speaker A: ...` (or real names) per cue
 - `*.speakers.txt` — readable dialogue transcript (`Speaker A (00:01:23): text`), consecutive same-speaker lines merged
+- `*.wav.diar.json` — cached diarization result (reused by later `whiz merge` runs with the same `--speakers`/`--cluster-threshold`)
 
 When `--speakers` is set, whisper-cli VAD is disabled (sherpa-onnx handles speech segmentation).
 
@@ -242,11 +249,12 @@ When `--speakers` is set, whisper-cli VAD is disabled (sherpa-onnx handles speec
 
 ### Naming speakers
 
-Pass `--name-speakers` and, after transcription + diarization, whiz shows one
-representative quote per detected speaker and prompts for a real name. The
-quotes are the longest utterance per speaker (most identifying), and blank
-input keeps the default `Speaker A` label. Real names then replace the
-`Speaker A/B/C` labels in both `*.speakers.srt` and `*.speakers.txt`.
+There are two ways to name speakers:
+
+- **Interactive** — pass `--name-speakers` and, after transcription + diarization, whiz shows one representative quote per detected speaker (the longest utterance — most identifying) and prompts for a real name. Blank input keeps the default `Speaker A` label.
+- **Non-interactive** — pass `--speakers-names Enric,Vadim,Thomas,Dziyana` to name speakers in a single command. Names are assigned to speakers ordered by total speaking time (most talkative gets the first name). Extra names beyond the detected speaker count are ignored; speakers beyond the provided names keep their `Speaker A/B/C` labels.
+
+Both can be combined: `--speakers-names` provides defaults that are shown in the `--name-speakers` prompt, so you can confirm or override each one. Real names replace the `Speaker A/B/C` labels in both `*.speakers.srt` and `*.speakers.txt`.
 
 ### Re-tuning without re-transcribing: `whiz merge`
 
@@ -260,6 +268,9 @@ whiz merge --speakers 4 recording.mov
 
 # Name speakers at merge time too
 whiz merge --speakers 4 --name-speakers recording.mov
+
+# Name speakers non-interactively (instant — diarization cache is reused)
+whiz merge --speakers 4 --speakers-names Enric,Vadim,Thomas,Dziyana recording.mov
 ```
 
 ## License

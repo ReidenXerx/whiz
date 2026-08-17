@@ -57,6 +57,43 @@ def _auto_threads() -> int:
     return min(8, os.cpu_count() or 4)
 
 
+def _run_whisper_streaming(cmd: list[str]) -> subprocess.Popen:
+    """Run whisper-cli, streaming its stdout/stderr line-by-line to our stderr.
+
+    Each line is prefixed with elapsed time since the process started so long
+    transcriptions show progress pacing. stderr is unbuffered so progress
+    updates appear immediately. Returns the Popen object after completion.
+    """
+    import time
+
+    start = time.monotonic()
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        elapsed = time.monotonic() - start
+        prefix = f"[{_fmt_elapsed(elapsed)}] "
+        sys.stderr.write(prefix + line if line.endswith("\n") else prefix + line + "\n")
+        sys.stderr.flush()
+    proc.wait()
+    return proc
+
+
+def _fmt_elapsed(seconds: float) -> str:
+    """Format elapsed seconds as M:SS or H:MM:SS."""
+    total = int(seconds)
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
 # ---------- transcribe ----------
 
 def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list[str]:
@@ -160,10 +197,20 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
         cmd.append("-tr")
     if args.no_timestamps:
         cmd.append("-nt")
-    if args.print_progress:
+    # Progress: whisper-cli uses -pp (print progress) and -np (no progress).
+    # They are mutually exclusive. When stderr is a TTY we default to -pp so
+    # the user sees live progress; otherwise -np keeps logs clean. --no-progress
+    # forces -np even on a TTY; --print-progress forces -pp even off a TTY.
+    progress_enabled = args.print_progress or (
+        sys.stderr.isatty() and not args.no_progress
+    )
+    if progress_enabled:
         cmd.append("-pp")
-    if not config.verbose and not args.verbose:
+    elif not config.verbose and not args.verbose:
         cmd.append("-np")
+    if config.verbose or args.verbose:
+        # verbose => let whisper-cli print everything; don't suppress.
+        pass
     if config.extra_args:
         cmd += config.extra_args
     if args.extra:
@@ -202,12 +249,39 @@ def _find_whisper_json(of_base: Path, wav: Path, of_passed: bool) -> Path | None
     return candidates[0]
 
 
-def _prompt_speaker_names(merged: list[tuple[MR.WhisperSeg, str]]) -> dict[str, str]:
+def _apply_speaker_names_list(
+    merged: list[tuple[MR.WhisperSeg, str]],
+    names: list[str],
+) -> tuple[list[tuple[MR.WhisperSeg, str]], dict[str, str]]:
+    """Assign names to speakers by total talk time (most talkative first).
+
+    Returns the relabeled merged list and the {label: name} map used. Speakers
+    beyond the provided names keep their default ``Speaker X`` label.
+    ``names`` may be a single comma-separated token (``["Enric,Vadim"]``) or
+    multiple tokens; both are flattened into a flat name list.
+    """
+    flat: list[str] = []
+    for token in names:
+        flat.extend(part.strip() for part in str(token).split(",") if part.strip())
+    order = MR.speakers_by_talk_time(merged)
+    name_map: dict[str, str] = {}
+    for i, label in enumerate(order):
+        if i < len(flat):
+            name_map[label] = flat[i]
+    return MR.relabel(merged, name_map), name_map
+
+
+def _prompt_speaker_names(
+    merged: list[tuple[MR.WhisperSeg, str]],
+    default_names: dict[str, str] | None = None,
+) -> dict[str, str]:
     """Interactively ask the user to name each detected speaker.
 
     Shows one representative quote per speaker (the longest utterance) and
     prompts for a real name. Returns a {"Speaker A": "Enric", ...} map.
-    Blank input keeps the default label.
+    Blank input keeps the default label. When ``default_names`` is supplied
+    (from ``--speakers-names``), the suggested name is shown in the prompt
+    and used as the value if the user presses Enter.
     """
     speakers = MR.speakers_in_order(merged)
     quotes = MR.representative_quotes(merged)
@@ -216,19 +290,25 @@ def _prompt_speaker_names(merged: list[tuple[MR.WhisperSeg, str]]) -> dict[str, 
     print("Name the speakers", file=sys.stderr)
     print("=" * 60, file=sys.stderr)
     print("A representative quote is shown for each. Enter a real name", file=sys.stderr)
-    print("(or press Enter to keep the default label).", file=sys.stderr)
+    print("(or press Enter to keep the default).", file=sys.stderr)
     for label in speakers:
         quote = quotes.get(label, "(no quote)")
+        suggestion = (default_names or {}).get(label)
         print("\n" + "-" * 60, file=sys.stderr)
         print(f"{label} said:", file=sys.stderr)
         print(f'  "{quote}"', file=sys.stderr)
+        prompt_text = f"Name for {label}"
+        if suggestion:
+            prompt_text = f"Name for {label} [{suggestion}]"
         try:
-            name = input(f"Name for {label}: ").strip()
+            name = input(prompt_text + ": ").strip()
         except (EOFError, KeyboardInterrupt):
             print(file=sys.stderr)
             break
         if name:
             name_map[label] = name
+        elif suggestion:
+            name_map[label] = suggestion
     print("\n" + "-" * 60, file=sys.stderr)
     return name_map
 
@@ -237,15 +317,25 @@ def _write_labeled_outputs(
     merged: list[tuple[MR.WhisperSeg, str]],
     of_base: Path,
     name_speakers: bool = False,
+    speakers_names: list[str] | None = None,
 ) -> tuple[Path, Path, dict[str, str]]:
     """Optionally relabel speakers, then write .speakers.srt and .speakers.txt.
 
-    Returns the (srt_path, txt_path, name_map) used.
+    Returns the (srt_path, txt_path, name_map) used. Naming precedence:
+    ``--speakers-names`` supplies a non-interactive list (assigned by total
+    talk time); ``--name-speakers`` then prompts interactively, with the list
+    names shown as defaults.
     """
     name_map: dict[str, str] = {}
+    # Non-interactive names from --speakers-names are applied first.
+    if speakers_names and merged:
+        merged, list_map = _apply_speaker_names_list(merged, speakers_names)
+        name_map.update(list_map)
+    # Interactive prompt overrides/augments the list when both are given.
     if name_speakers and merged:
-        name_map = _prompt_speaker_names(merged)
-        if name_map:
+        interactive_map = _prompt_speaker_names(merged, default_names=name_map or None)
+        if interactive_map:
+            name_map.update(interactive_map)
             merged = MR.relabel(merged, name_map)
     labeled_srt = MR.format_labeled_srt(merged)
     dialogue = MR.format_dialogue_txt(merged)
@@ -286,7 +376,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
         if not diar_segments:
             print("Warning: diarization produced no segments; falling back to unlabeled output.", file=sys.stderr)
 
-    proc = subprocess.run(cmd)
+    proc = _run_whisper_streaming(cmd)
     rc = proc.returncode
 
     # --- Merge diarization with whisper output ---
@@ -303,7 +393,9 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             if whisper_segs and diar_segments:
                 merged = MR.assign_speakers(whisper_segs, diar_segments)
                 srt_out, txt_out, name_map = _write_labeled_outputs(
-                    merged, of_base, name_speakers=args.name_speakers
+                    merged, of_base,
+                    name_speakers=args.name_speakers,
+                    speakers_names=args.speakers_names,
                 )
                 print(f"Wrote labeled SRT:  {srt_out}", file=sys.stderr)
                 print(f"Wrote dialogue TXT: {txt_out}", file=sys.stderr)
@@ -450,7 +542,9 @@ def cmd_merge(args: argparse.Namespace) -> int:
         print(f"  {label}: {n} segments", file=sys.stderr)
 
     srt_out, txt_out, name_map = _write_labeled_outputs(
-        merged, of_base, name_speakers=args.name_speakers
+        merged, of_base,
+        name_speakers=args.name_speakers,
+        speakers_names=args.speakers_names,
     )
     print(f"Wrote labeled SRT:  {srt_out}", file=sys.stderr)
     print(f"Wrote dialogue TXT: {txt_out}", file=sys.stderr)
@@ -540,12 +634,14 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--vad-threshold", type=float, default=None, help="VAD threshold (default: 0.5)")
     t.add_argument("--translate", action="store_true", help="Translate to English instead of transcribing")
     t.add_argument("--no-timestamps", action="store_true", help="Suppress timestamps in output")
-    t.add_argument("--print-progress", action="store_true", help="Print progress")
+    t.add_argument("--print-progress", action="store_true", help="Print progress (force on; default on when stderr is a TTY)")
+    t.add_argument("--no-progress", dest="no_progress", action="store_true", help="Disable whisper-cli progress passthrough (forces -np)")
     t.add_argument("--keep-wav", action="store_true", help="Keep the intermediate extracted WAV (default: deleted after)")
     t.add_argument("--no-auto-vad-download", action="store_true", help="Don't auto-download the Silero VAD model when VAD is enabled and missing")
     t.add_argument("--speakers", type=int, default=None, nargs="?", const=0, help="Enable speaker diarization via sherpa-onnx. Optional integer = known speaker count; omit = auto-detect")
     t.add_argument("--cluster-threshold", type=float, default=None, help="Diarization clustering threshold when auto-detecting (larger = fewer speakers; default 0.9)")
     t.add_argument("--name-speakers", action="store_true", help="After transcription, prompt to name each detected speaker (replaces Speaker A/B/C with real names)")
+    t.add_argument("--speakers-names", dest="speakers_names", nargs="+", default=None, help="Non-interactive speaker names assigned by total talk time (most talkative first), e.g. --speakers-names Enric,Vadim,Thomas,Dziyana")
     t.add_argument("--verbose", action="store_true", help="Verbose whisper-cli output")
     t.add_argument("--extra", nargs=argparse.REMAINDER, default=[], help="Extra flags passed verbatim to whisper-cli")
     t.add_argument("--dry-run", action="store_true", help="Print the command without running it")
@@ -558,6 +654,7 @@ def build_parser() -> argparse.ArgumentParser:
     mg.add_argument("--speakers", type=int, default=None, nargs="?", const=0, help="Known speaker count; omit = auto-detect")
     mg.add_argument("--cluster-threshold", type=float, default=None, help="Clustering threshold when auto-detecting (larger = fewer speakers; default 0.9)")
     mg.add_argument("--name-speakers", action="store_true", help="Prompt to name each detected speaker (replaces Speaker A/B/C with real names)")
+    mg.add_argument("--speakers-names", dest="speakers_names", nargs="+", default=None, help="Non-interactive speaker names assigned by total talk time (most talkative first), e.g. --speakers-names Enric,Vadim,Thomas,Dziyana")
     mg.set_defaults(func=cmd_merge)
 
     # models

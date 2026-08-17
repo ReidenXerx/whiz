@@ -34,6 +34,23 @@ def speakers_in_order(merged: list[tuple[WhisperSeg, str]]) -> list[str]:
     return seen
 
 
+def speakers_by_talk_time(merged: list[tuple[WhisperSeg, str]]) -> list[str]:
+    """Unique speaker labels ordered by total speaking time (most first).
+
+    Used by `--speakers-names Enric,Vadim,...`: names are assigned to speakers
+    in this order so the most talkative speaker gets the first name. Falls
+    back to order-of-appearance for ties (stable sort).
+    """
+    totals: dict[str, float] = {}
+    first_seen: dict[str, int] = {}
+    for i, (seg, label) in enumerate(merged):
+        dur = max(0.0, seg.end - seg.start)
+        totals[label] = totals.get(label, 0.0) + dur
+        if label not in first_seen:
+            first_seen[label] = i
+    return sorted(totals, key=lambda lbl: (-totals[lbl], first_seen[lbl]))
+
+
 def representative_quotes(
     merged: list[tuple[WhisperSeg, str]],
     max_chars: int = 140,

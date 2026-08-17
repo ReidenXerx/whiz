@@ -9,6 +9,7 @@ model files, downloads them if needed, and returns structured segments.
 
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import tarfile
@@ -17,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from whiz import config as cfg
+
+_DIAR_CACHE_VERSION = 1
 
 # GitHub release asset URLs.
 SEG_URL = (
@@ -136,18 +139,98 @@ def download_diarization_models(dest_dir: Path | None = None) -> tuple[Path, Pat
     return seg_path, emb_path
 
 
+def diar_cache_path(wav: Path) -> Path:
+    """Path of the diarization cache file for a given WAV."""
+    # Append (not with_suffix) so dots in stems like "...16.03.40" survive.
+    return Path(str(wav) + ".diar.json")
+
+
+def load_diarization_cache(
+    wav: Path,
+    num_speakers: int = 0,
+    threshold: float = 0.5,
+) -> list[DiarSegment] | None:
+    """Load a cached diarization result if params match.
+
+    Returns the cached segments when the cache exists and was produced with
+    the same num_speakers/threshold; otherwise returns None. The expensive
+    part of diarization is embedding extraction, so reusing a matching cache
+    skips the ~3 minute embedding pass and only needs the cheap merge step.
+    """
+    path = diar_cache_path(wav)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if data.get("version") != _DIAR_CACHE_VERSION:
+        return None
+    if data.get("num_speakers") != num_speakers:
+        return None
+    # Compare threshold with a small epsilon for float formatting round-trips.
+    cached_thr = data.get("threshold")
+    if cached_thr is None or abs(float(cached_thr) - threshold) > 1e-9:
+        return None
+    segs = data.get("segments", [])
+    out: list[DiarSegment] = []
+    for s in segs:
+        try:
+            out.append(DiarSegment(start=float(s["start"]), end=float(s["end"]), speaker=int(s["speaker"])))
+        except (KeyError, TypeError, ValueError):
+            return None
+    return out
+
+
+def _write_diarization_cache(
+    wav: Path,
+    segments: list[DiarSegment],
+    num_speakers: int,
+    threshold: float,
+) -> Path:
+    """Persist the diarization result so later `whiz merge` runs can reuse it."""
+    path = diar_cache_path(wav)
+    payload = {
+        "version": _DIAR_CACHE_VERSION,
+        "num_speakers": num_speakers,
+        "threshold": threshold,
+        "segments": [
+            {"start": s.start, "end": s.end, "speaker": s.speaker} for s in segments
+        ],
+    }
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return path
+
+
 def run_diarization(
     wav: Path,
     config: cfg.Config,
     num_speakers: int = 0,
     threshold: float = 0.5,
     dry_run: bool = False,
+    use_cache: bool = True,
 ) -> list[DiarSegment]:
     """Run sherpa-onnx diarization on a 16kHz mono WAV.
 
     Returns parsed segments sorted by start time. If dry_run, returns []
     and prints what would run.
+
+    When ``use_cache`` is True (the default) and a matching cache exists for
+    this WAV + (num_speakers, threshold), the embedding pass is skipped and
+    the cached segments are returned. A fresh result is always written back
+    to the cache after a real run.
     """
+    if use_cache and not dry_run:
+        cached = load_diarization_cache(wav, num_speakers=num_speakers, threshold=threshold)
+        if cached is not None:
+            print(
+                f"Reusing diarization cache ({len(cached)} segments, "
+                f"num_speakers={num_speakers or 'auto'}, threshold={threshold}): "
+                f"{diar_cache_path(wav)}",
+                file=sys.stderr,
+            )
+            return cached
+
     seg_model = find_segmentation_model(config)
     emb_model = find_embedding_model(config)
     if seg_model is None or emb_model is None:
@@ -199,6 +282,8 @@ def run_diarization(
         DiarSegment(start=r.start, end=r.end, speaker=r.speaker) for r in result
     ]
     print(f"Diarization found {len(segments)} segments.", file=sys.stderr)
+    cache_path = _write_diarization_cache(wav, segments, num_speakers, threshold)
+    print(f"Saved diarization cache: {cache_path}", file=sys.stderr)
     return segments
 
 
