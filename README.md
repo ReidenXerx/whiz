@@ -1,12 +1,109 @@
 # whiz
 
+[![Version](https://img.shields.io/badge/version-0.11.10-blue)](https://github.com/ReidenXerx/whiz/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Python ≥3.11](https://img.shields.io/badge/python-%E2%89%A53.11-blue)](https://www.python.org/)
+[![macOS](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](#requirements)
+[![Powered by whisper.cpp](https://img.shields.io/badge/powered%20by-whisper.cpp%20%2B%20sherpa--onnx-orange)](https://github.com/ggerganov/whisper.cpp)
+
 **A transcription CLI for meetings, screen recordings, and interviews — from audio/video to a labeled, named, frame-illustrated transcript in one command.**
 
 ```
 whiz transcribe recording.mov
 ```
 
-whiz transcribes, detects who spoke when, prompts you to name each speaker, captures an on-screen frame per segment, and emits a self-contained HTML transcript — all from that single command. It's powered by [whisper.cpp](https://github.com/ggerganov/whisper.cpp) for transcription and [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) for diarization, with a polished terminal UI built on [rich](https://rich.readthedocs.io).
+<p align="center">
+  <em>Terminal demo coming soon</em><br>
+  <img src="docs/images/terminal-demo.gif" alt="whiz terminal demo" width="720">
+</p>
+
+whiz transcribes, detects who spoke when, prompts you to name each speaker, captures an on-screen frame per segment, and emits a self-contained HTML transcript — all from that single command. Then it can AI-analyze the whole thing (with the frames) and write a concentrated Essentials section you feed back to a later analysis. It's powered by [whisper.cpp](https://github.com/ggerganov/whisper.cpp) for transcription and [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) for diarization, with a polished terminal UI built on [rich](https://rich.readthedocs.io).
+
+<p align="center">
+  <em>HTML transcript + AI analysis screenshots coming soon</em><br>
+  <img src="docs/images/html-transcript.png" alt="frame-illustrated HTML transcript" width="720">
+  <img src="docs/images/analysis-md.png" alt="AI analysis with Essentials section" width="720">
+</p>
+
+---
+
+## Why whiz?
+
+Most transcription tools stop at text. whiz is the one-command path from a screen recording to a **labeled, named, frame-illustrated HTML transcript plus an AI analysis with a concentrated Essentials section** — all local, no server, no API keys required.
+
+- **One command, everything** — transcribe + diarize + name speakers + capture frames + write HTML, automatically.
+- **Knows your speakers** — voice profiles save each speaker once you name them; later recordings with the same people are labeled automatically, no flags needed. Profiles even merge across recordings and get more accurate over time.
+- **Sees the screen** — auto-enables vision analysis when frames exist and your model is vision-capable. The analyst posture actively reconciles what's visible on screen with what was said, surfacing discrepancies.
+- **Made for long videos** — a rolling-context map-reduce keeps each model call focused on a small, coherent window so analysis quality stays high even on hour-long recordings. Zero extra calls.
+- **Essentials you feed back** — every analysis appends a dense `## Essentials` bullet list (every fact, decision, number, UI detail) designed as concentrated context for a later `whiz analyze`. No flag, no second file.
+- **Local-first & private** — runs entirely on your machine via [Ollama](https://ollama.com) by default. No uploads, no API keys unless you point it at a cloud provider.
+
+## Table of contents
+
+- [Quick start](#quick-start)
+- [Requirements](#requirements)
+- [Install](#install)
+- [What it does](#what-it-does)
+- [Recipes](#recipes)
+- [Commands](#commands)
+- [Configuration](#configuration)
+- [Speaker diarization](#speaker-diarization-multi-speaker-labels)
+- [Speaker voice profiles](#speaker-voice-profiles-cross-recording-recognition)
+- [AI analysis](#ai-analysis-auto-detect-summary-action-items-implementation-plans-vision)
+- [Essentials (always on)](#essentials-always-on-concentrated-context-for-a-later-analysis)
+- [Testing](#testing)
+- [License](#license)
+
+## Quick start
+
+```bash
+# Auto-picks the best available model, extracts audio if it's a video,
+# and (for video) auto-enables speaker diarization + on-screen screenshots
+# + the interactive speaker-naming prompt.
+# Writes SRT + JSON + labeled speakers.srt/.txt + frames alongside the input.
+whiz transcribe ~/Desktop/recording.mov
+
+# Add a self-contained, frame-illustrated HTML transcript:
+whiz transcribe --outputs srt,html recording.mov
+
+# Transcribe + chain straight into AI analysis (one command):
+whiz transcribe --analyze recording.mov
+
+# Analyze a prior transcript — auto-detects meeting vs implementation-plan,
+# and always appends a dense ## Essentials section:
+whiz analyze recording.mov
+```
+
+> **Video inputs** auto-enable `--screenshots`, `--speakers` (auto-detect), and the interactive `--name-speakers` prompt so you get a labeled transcript plus per-segment frames plus a chance to name speakers without extra flags. Pass `--no-screenshots`, `--no-speakers`, and/or `--no-name-speakers` to opt out. Audio inputs are unaffected (unless you pass `--speakers`).
+
+For the full set of flags, run `whiz transcribe --help`, `whiz merge --help`, or `whiz analyze --help`.
+
+## Requirements
+
+- Python ≥ 3.11
+- [`whisper-cli`](https://github.com/ggerganov/whisper.cpp) on `PATH` (e.g. `brew install whisper-cpp`)
+- [`ffmpeg`](https://ffmpeg.org) on `PATH` (e.g. `brew install ffmpeg`) — only needed for video inputs
+- At least one ggml Whisper model (see [Install](#install) below)
+
+## Install
+
+```bash
+pipx install git+https://github.com/ReidenXerx/whiz.git
+```
+
+Or from a clone:
+
+```bash
+git clone https://github.com/ReidenXerx/whiz.git
+cd whiz
+pipx install .
+```
+
+Then make sure a model is available — download one from the official whisper.cpp HuggingFace repo:
+
+```bash
+whiz models download turbo      # ggml-large-v3-turbo-q5_0.bin — fast & accurate
+```
 
 ## What it does
 
@@ -16,7 +113,7 @@ whiz transcribes, detects who spoke when, prompts you to name each speaker, capt
 - **Voice profiles** — save a speaker's embedding once you name them; later recordings with the same people are labeled automatically, no flags needed.
 - **Screenshots** — capture one on-screen frame per segment into a manifest + HTML transcript. Auto-on for video inputs.
 - **HTML transcript** — a self-contained, color-coded, frame-illustrated `.speakers.html` you can open in any browser (no server, no external images).
-- **AI analysis** — send a transcript (and optionally frames) to an OpenAI-compatible chat model ([Ollama](https://ollama.com) by default) for summaries, action items, or freeform questions.
+- **AI analysis** — send a transcript (and optionally frames) to an OpenAI-compatible chat model ([Ollama](https://ollama.com) by default) for summaries, action items, implementation plans, or freeform questions. Every analysis also appends a dense `## Essentials` section.
 - **Re-tune cheaply** — `whiz merge` re-runs only diarization + merge against an existing transcription, reusing a cached diarization result, so adjusting speaker count / threshold / names is instant.
 
 ## Terminal output
@@ -51,169 +148,105 @@ Wrote HTML transcript: recording.speakers.html
   · recording.speakers.html
 ```
 
-## Requirements
-
-- Python ≥ 3.11
-- [`whisper-cli`](https://github.com/ggerganov/whisper.cpp) on `PATH` (e.g. `brew install whisper-cpp`)
-- [`ffmpeg`](https://ffmpeg.org) on `PATH` (e.g. `brew install ffmpeg`) — only needed for video inputs
-- At least one ggml Whisper model (see below)
-
-## Install
+## Recipes
 
 ```bash
-pipx install git+https://github.com/ReidenXerx/whiz.git
+# --- The happy path (video) ---
+whiz transcribe recording.mov                       # → SRT + labeled speakers + frames
+whiz transcribe --outputs srt,html recording.mov    # → + self-contained HTML transcript
+whiz transcribe --analyze recording.mov             # → + AI analysis (auto-detect) + Essentials
+
+# --- Audio meetings ---
+whiz transcribe --speakers 4 --name-speakers meeting.m4a   # diarize + name speakers
+whiz transcribe --speakers-names Alice,Bob,Carol,Dave meeting.m4a   # non-interactive names
+
+# --- Re-tune without re-transcribing ---
+whiz merge --speakers 4 recording.mov               # re-diarize, reuse the transcription
+whiz merge --speakers-names Alice,Bob recording.mov # rename speakers (instant, cache reused)
+
+# --- Voice profiles (cross-recording recognition) ---
+whiz transcribe --speakers 4 --speakers-names Alice,Bob,Carol,Dave meeting1.mov  # saves profiles
+whiz transcribe --speakers 4 meeting2.mov           # speakers auto-matched, no flags needed
+
+# --- AI analysis ---
+whiz analyze recording.mov                          # auto-detect: meeting or plan
+whiz analyze recording.mov --plan                   # force an implementation plan
+whiz analyze recording.mov --prompt "What risks? {transcript}"   # freeform question
+whiz analyze recording.mov --no-vision              # stay text-only even with frames
 ```
-
-Or from a clone:
-
-```bash
-git clone https://github.com/ReidenXerx/whiz.git
-cd whiz
-pipx install .
-```
-
-Then make sure a model is available — download one from the official whisper.cpp HuggingFace repo:
-
-```bash
-whiz models download turbo      # ggml-large-v3-turbo-q5_0.bin — fast & accurate
-```
-
-## Quick start
-
-```bash
-# Auto-picks the best available model, extracts audio if it's a video,
-# and (for video) auto-enables speaker diarization + on-screen screenshots
-# + the interactive speaker-naming prompt.
-# Writes SRT + JSON + labeled speakers.srt/.txt + frames alongside the input.
-whiz transcribe ~/Desktop/recording.mov
-
-# Opt out of the video defaults if you don't need them
-whiz transcribe --no-speakers --no-screenshots --no-name-speakers recording.mov
-
-# Be explicit
-whiz transcribe -m turbo -l en --outputs srt,vtt recording.mp4
-
-# See what it would run, without running it
-whiz transcribe --dry-run recording.mov
-
-# Plain text, no timestamps (audio input — no auto screenshots/speakers)
-whiz transcribe --outputs txt --no-timestamps meeting.m4a
-```
-
-> **Video inputs** auto-enable `--screenshots`, `--speakers` (auto-detect), and the interactive `--name-speakers` prompt so you get a labeled transcript plus per-segment frames plus a chance to name speakers without extra flags. Pass `--no-screenshots`, `--no-speakers`, and/or `--no-name-speakers` to opt out. Audio inputs are unaffected (unless you pass `--speakers`).
 
 ## Commands
 
 ### `whiz transcribe <file>`
 
-Transcribe an audio or video file.
+Transcribe an audio or video file. For video inputs, speaker diarization, on-screen screenshots, and the interactive speaker-naming prompt are all auto-enabled — one command does everything.
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-m, --model` | auto-pick best | Model alias (`turbo`, `large-v3`, `medium`) or path |
-| `-o, --output` | alongside input | Output base path (no extension) |
-| `--outputs` | `srt,json` | Comma-separated output formats: `txt,srt,vtt,json,json-full,csv,lrc,html` (`html` requires diarization, which is auto-on for video) |
-| `-l, --language` | `auto` | Spoken language code or `auto` |
-| `-t, --threads` | auto (`min(8, cores)`) | CPU threads |
-| `--vad` / `--no-vad` | on | Enable/disable voice activity detection |
-| `--vad-threshold` | `0.5` | VAD threshold |
-| `--no-auto-vad-download` | off | Don't auto-download the Silero VAD model when VAD is enabled and missing |
-| `--translate` | off | Translate to English instead of transcribing |
-| `--no-timestamps` | off | Strip timestamp from output |
-| `--print-progress` | on (TTY) | Print whisper-cli progress; default on when stderr is a TTY, off otherwise |
-| `--no-progress` | off | Disable whisper-cli progress passthrough (forces `-np`) |
-| `--keep-wav` | off | Keep the intermediate extracted WAV |
-| `--speakers [N]` | on (video) | Enable speaker diarization; optional integer = known speaker count, omit = auto-detect. Auto-enabled for video inputs |
-| `--no-speakers` | off | Disable the auto-enabled diarization for video inputs (opt out) |
-| `--cluster-threshold` | `0.9` | Diarization clustering threshold when auto-detecting (larger = fewer speakers) |
-| `--name-speakers` | on (diarized) | Interactively prompt to name each detected speaker. Auto-enabled whenever diarization runs |
-| `--no-name-speakers` | off | Disable the auto-enabled interactive speaker-naming prompt (opt out) |
-| `--speakers-names Alice,Bob,...` | off | Non-interactive speaker names assigned by total talk time (most talkative first) |
-| `--screenshots` | on (video) | For video inputs, extract one on-screen frame per segment into `<stem>.frames/` + write `<stem>.frames.json` (for AI analysis / HTML output). Auto-enabled for video inputs |
-| `--no-screenshots` | off | Disable the auto-enabled on-screen frame extraction for video inputs (opt out) |
-| `--screenshot-width` | `1280` | Frame width in pixels (0 = native resolution) |
-| `--no-voice-profiles` | off | Don't compute voice-profile embeddings or auto-match/save speaker profiles this run |
-| `--resume` | off | Skip whisper-cli transcription if its JSON output already exists and go straight to diarization + merge |
-| `--extra ...` | — | Extra flags passed verbatim to whisper-cli |
-| `--dry-run` | off | Print the command without executing |
+```bash
+whiz transcribe recording.mov                       # the happy path
+whiz transcribe --no-speakers --no-screenshots recording.mov   # opt out of the video defaults
+whiz transcribe -m turbo -l en --outputs srt,vtt recording.mp4 # be explicit
+whiz transcribe --dry-run recording.mov             # see what it would run, without running it
+```
+
+Run `whiz transcribe --help` for the full flag reference.
 
 ### `whiz merge <file>`
 
-Re-run only diarization + the merge against an existing whisper JSON, skipping the expensive transcription. Lets you tune speaker count / threshold / names cheaply after a first run. Diarization results are cached in `<file>.wav.diar.json`, so a second `whiz merge` with the same `--speakers`/`--cluster-threshold` reuses the cache and skips the ~3 min embedding pass — only the cheap merge step runs. Changing either parameter re-runs diarization and overwrites the cache.
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--json` | auto-find | Explicit path to the whisper JSON |
-| `--speakers [N]` | on (video) | Known speaker count; omit = auto-detect. Auto-enabled for video inputs |
-| `--no-speakers` | off | Disable the auto-enabled diarization for video inputs (opt out) |
-| `--cluster-threshold` | `0.9` | Clustering threshold when auto-detecting (larger = fewer speakers) |
-| `--name-speakers` | on (diarized) | Interactively prompt to name each detected speaker. Auto-enabled whenever diarization runs |
-| `--no-name-speakers` | off | Disable the auto-enabled interactive speaker-naming prompt (opt out) |
-| `--speakers-names Alice,Bob,...` | off | Non-interactive speaker names assigned by total talk time (most talkative first) |
-| `--screenshots` | on (video) | Re-extract on-screen frames per segment into `<stem>.frames/` + write `<stem>.frames.json`. Auto-enabled for video inputs |
-| `--no-screenshots` | off | Disable the auto-enabled on-screen frame extraction for video inputs (opt out) |
-| `--screenshot-width` | `1280` | Frame width in pixels (0 = native resolution) |
-| `--no-voice-profiles` | off | Don't compute voice-profile embeddings or auto-match/save speaker profiles this run |
-| `--outputs` | `srt,json` | Comma-separated output formats; add `html` for a self-contained transcript (requires diarization, which is auto-on for video) |
-
-### `whiz models list`
-
-Show all ggml models discovered in the search directories.
-
-### `whiz models download <name>`
-
-Download a model from `huggingface.co/ggerganov/whisper.cpp`. Accepts short names:
-`turbo`, `large-v3`, `medium`, `small`, `base`, `tiny`, or full filenames like
-`ggml-large-v3-turbo-q5_0.bin`. Default destination: `~/.cache/whisper/`.
+Re-run only diarization + the merge against an existing whisper JSON, skipping the expensive transcription. Lets you tune speaker count / threshold / names cheaply after a first run. Diarization results are cached in `<file>.wav.diar.json`, so a second `whiz merge` with the same `--speakers`/`--cluster-threshold` reuses the cache and skips the embedding pass — only the cheap merge step runs. Changing either parameter re-runs diarization and overwrites the cache.
 
 ```bash
-whiz models download turbo
-whiz models download ggml-large-v3.bin
+whiz merge --speakers 4 recording.mov
+whiz merge recording.mov                            # video: diarization + screenshots auto-on
+whiz merge --no-speakers --no-screenshots recording.mov          # opt out
+whiz merge recording.mov --speakers-names Alice,Bob,Carol,Dave   # non-interactive names (instant)
+```
+
+Run `whiz merge --help` for the full flag reference.
+
+### `whiz models ...`
+
+Manage whisper, VAD, and diarization models.
+
+```bash
+whiz models list                       # show discovered ggml models
+whiz models download turbo             # ggml-large-v3-turbo-q5_0.bin — fast & accurate
 whiz models download large-v3 --dest ~/models
+whiz models known                      # canonical whisper.cpp model filenames
+whiz models download-vad               # Silero VAD model (default: v5.1.2)
+whiz models download-vad v6.2.0
+whiz models download-diarization       # pyannote segmentation + 3D-Speaker embedding (~90 MB)
 ```
 
-### `whiz models known`
-
-List the canonical set of whisper.cpp model filenames.
-
-### `whiz models download-vad [version]`
-
-Download the Silero VAD model. The VAD model moved from `ggerganov/whisper.cpp` to
-a separate repo `ggml-org/whisper-vad` with versioned filenames. Default destination:
-`~/.cache/whisper/`.
+### `whiz config show | edit | set`
 
 ```bash
-whiz models download-vad            # ggml-silero-v5.1.2.bin (default)
-whiz models download-vad v6.2.0     # specific version
-```
-
-### `whiz models download-diarization`
-
-Download the diarization models (~90 MB total): a pyannote segmentation model and a
-3D-Speaker embedding extractor. Default destination: `~/.cache/whiz/diarization/`.
-
-```bash
-whiz models download-diarization
-```
-
-### `whiz config show`
-
-Print current config and the model search directories.
-
-### `whiz config edit`
-
-Open the config file (`~/.config/whiz/config.toml`) in `$EDITOR`.
-
-### `whiz config set KEY=VALUE`
-
-Set a value persistently:
-
-```bash
+whiz config show                       # print current config + model search dirs
+whiz config edit                       # open ~/.config/whiz/config.toml in $EDITOR
 whiz config set model=turbo
 whiz config set threads=8
-whiz config set vad=false
-whiz config set outputs=srt,txt
-whiz config set cluster_threshold=0.95
+whiz config set ai_model=llava
+whiz config set speaker_match_threshold=0.85
+```
+
+### `whiz speakers list | forget | match`
+
+Manage and inspect stored voice profiles. See [Speaker voice profiles](#speaker-voice-profiles-cross-recording-recognition).
+
+```bash
+whiz speakers list                     # stored profiles (name, dim, samples, path)
+whiz speakers forget Alice             # delete a profile
+whiz speakers match recording.mov --speakers 4   # dry-run: how clusters match stored profiles
+```
+
+### `whiz analyze <file>`
+
+AI-analyze a prior transcript (+ frames). See [AI analysis](#ai-analysis-auto-detect-summary-action-items-implementation-plans-vision).
+
+```bash
+whiz analyze recording.mov             # auto-detect: meeting or plan
+whiz analyze recording.mov --plan      # force an implementation plan
+whiz analyze recording.mov --summary
+whiz analyze recording.mov --prompt "What risks? {transcript}"
 ```
 
 ## Configuration
@@ -258,7 +291,7 @@ If `model` is empty, whiz auto-picks the best available model by this preference
 5. `large-v3`
 6. `medium-q5_0` → `medium` → `small-q5_0` → `small`
 
-## Model search directories
+### Model search directories
 
 whiz scans these for `ggml-*.bin` files:
 
@@ -353,9 +386,7 @@ Both can be combined: `--speakers-names` provides defaults that are shown in the
 
 ### Re-tuning without re-transcribing: `whiz merge`
 
-`whiz merge` re-runs only diarization + the merge against an existing whisper
-JSON, so you can try different speaker counts / thresholds / names without
-redoing the expensive transcription:
+`whiz merge` re-runs only diarization + the merge against an existing whisper JSON, so you can try different speaker counts / thresholds / names without redoing the expensive transcription:
 
 ```bash
 # Re-diarize with a known count, reusing the prior whisper JSON
@@ -479,6 +510,8 @@ whiz analyze recording.mov --vision --summary
 whiz analyze recording.mov --no-vision
 ```
 
+Run `whiz analyze --help` for the full flag reference.
+
 The implementation-plan output (from `--plan` or auto-detected `PLAN`) follows this structure:
 
 - **Overview** — what is being built/changed and why (2-4 sentences)
@@ -502,11 +535,13 @@ Built-in modes (summary / action items / plan) route through a dedicated map + s
 
 Output is written to `<stem>.analysis.md` (the prompt + the response) and the response is also printed to stdout.
 
-### Essentials (always on): concentrated context for a later analysis
+## Essentials (always on): concentrated context for a later analysis
 
 Every `whiz analyze` run — auto-detect, `--summary`, `--actions`, `--plan`, or `--prompt`, single-call or map-reduce — also produces a dense **`## Essentials`** section appended to the same `.analysis.md`. It extracts **every meaningful point** from the whole recording into one tight bullet list: facts, decisions, requirements, names, numbers, UI/schema details, workflows, open questions, and rejected alternatives. There's no flag for it and no extra model call — it's folded into the analysis you already run.
 
 The Essentials section is designed as **concentrated context you feed back to a later `whiz analyze`** (or any AI): the dense points list preserves the specifics a summary would compress away, so a follow-up analysis can reason about field names, enum values, and decisions without re-watching the video. Each bullet is one concise point, prefixed with a timestamp and speaker when useful (`- [00:12:03] Vadim: must use GET for the Export endpoint`), open questions are marked `OPEN:`, rejected alternatives `REJECTED:`, and inferred points `(inferred)`. With vision (frames present), it also captures on-screen UI/schema/label detail.
+
+The model is also instructed to be exceptionally thorough and attentive, to reason at maximum effort, and — when frames are provided — to actively reconcile what's visible on screen with what was said, surfacing discrepancies marked `SCREEN vs TRANSCRIPT:` (frames authoritative for anything visible, transcript authoritative for intent and discussion).
 
 ```bash
 # Every analyze already appends ## Essentials to the .analysis.md:
@@ -516,26 +551,6 @@ whiz analyze recording.mov --plan
 # Later: feed the essentials back as concentrated context for a focused analysis.
 # Paste the Essentials section into a freeform --prompt, e.g.
 whiz analyze recording.mov --prompt "Given these essentials, draft the migration steps. Essentials:\n$(awk '/^## Essentials/{f=1;next} f' recording.analysis.md)\n\nTranscript: {transcript}"
-```
-
-### `whiz speakers list`
-
-List stored speaker voice profiles (name, embedding dimension, creation time, file path). See [Speaker voice profiles](#speaker-voice-profiles-cross-recording-recognition).
-
-### `whiz speakers forget <name>`
-
-Delete a stored voice profile by name.
-
-```bash
-whiz speakers forget Alice
-```
-
-### `whiz speakers match <file>`
-
-Run diarization on the given file and print, for each detected cluster, the cosine-similarity score against every stored profile plus the auto-assignment decision at the configured threshold. This is a dry run — it relabels nothing and saves nothing. Useful for tuning `speaker_match_threshold` or checking whether a recording's speakers are already known.
-
-```bash
-whiz speakers match recording.mov --speakers 4
 ```
 
 ## Testing
