@@ -25,4 +25,4 @@ env/
 htmlcov/
 
 # whiz local config (uncomment to ignore)
-# ~/.config/whiz/
+# ~/.config/whiz/uv.lock

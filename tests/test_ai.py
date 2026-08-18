@@ -69,6 +69,11 @@ def test_essentials_instruction_has_required_markers():
     assert "reconcile" in AI._ANALYST_POSTURE
     assert AI._ANALYST_POSTURE in AI._ESSENTIALS_TASK_SUFFIX
     assert AI._ANALYST_POSTURE in AI._ESSENTIALS_INSTRUCTION
+    # Conservative screen claims: confidence tags + legibility guard.
+    assert "[HIGH]" in AI._ANALYST_POSTURE
+    assert "[MEDIUM]" in AI._ANALYST_POSTURE
+    assert "[LOW]" in AI._ANALYST_POSTURE
+    assert "legibly readable" in AI._ANALYST_POSTURE
 
 
 def test_plan_prompt_has_required_sections():
@@ -76,6 +81,13 @@ def test_plan_prompt_has_required_sections():
                     "Open questions", "Acceptance criteria"):
         assert heading in AI.PLAN_PROMPT
     assert "{transcript}" in AI.PLAN_PROMPT
+    # Owner must be the named speaker, not a generic role.
+    assert "named speaker" in AI.PLAN_PROMPT
+    assert "NOT a generic role" in AI.PLAN_PROMPT
+    # Effort must include a justification, not a bare size.
+    assert "one-line justification" in AI.PLAN_PROMPT
+    # Open questions must be deduplicated.
+    assert "DEDUPLICATE" in AI.PLAN_PROMPT
 
 
 def test_classify_prompt_has_tokens():
@@ -84,7 +96,17 @@ def test_classify_prompt_has_tokens():
     assert "{transcript}" in AI.CLASSIFY_PROMPT
 
 
-# ---------- transcript_text ----------
+def test_synth_prompt_dedupes_open_questions():
+    # The synth/reduce step must instruct deduplication of Open questions
+    # across partial chunks.
+    assert "Deduplicate" in AI.SYNTH_PROMPT
+    assert "Open questions" in AI.SYNTH_PROMPT
+
+
+def test_plan_task_label_mentions_speaker_and_dedup():
+    label = AI._task_label(AI.PLAN_PROMPT)
+    assert "named speaker" in label
+    assert "deduplicated" in label
 
 def test_transcript_text_with_frame_entries():
     from whiz.screenshots import FrameEntry

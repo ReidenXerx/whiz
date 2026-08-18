@@ -81,8 +81,14 @@ PLAN_PROMPT = (
     "## Steps\n"
     "A numbered list. Each step MUST have:\n"
     "- **Step N.** <title> — one line of what to do.\n"
-    "- **Owner:** the speaker who raised/owns it, or '?' if unclear.\n"
-    "- **Effort:** S / M / L with a one-line justification.\n"
+    "- **Owner:** the named speaker who raised or owns this task, pulled from "
+    "the speaker label on the transcript line where it was discussed. Use the "
+    "actual speaker name/label — NOT a generic role like 'Dev'. If multiple "
+    "speakers contributed, name the one who owns the task. Use '?' ONLY if no "
+    "speaker is identifiable for that step.\n"
+    "- **Effort:** S / M / L, each followed by a one-line justification for "
+    "that estimate (e.g. 'M — new endpoint + 2 tests'). Never give a bare "
+    "size without the reason.\n"
     "List every concrete task inferred from the transcript; if a task is only "
     "implied, mark it '(inferred)'. Keep the list in a sensible execution order.\n\n"
     "## Risks\n"
@@ -90,7 +96,9 @@ PLAN_PROMPT = (
     "mitigation.\n\n"
     "## Open questions\n"
     "Bullet list of unresolved questions that need a decision or more info. "
-    "If none, write 'None.'\n\n"
+    "DEDUPLICATE: merge near-identical questions into one before output — never "
+    "list the same question twice (same meaning, different wording counts as a "
+    "duplicate). If none, write 'None.'\n\n"
     "## Acceptance criteria\n"
     "A checklist ('- [ ] ...') of the conditions the finished work must meet to "
     "be considered done. Pull these from the transcript; infer reasonable ones if "
@@ -128,6 +136,16 @@ _ANALYST_POSTURE = (
     "(mark them 'SCREEN vs TRANSCRIPT:'). Treat the frames as authoritative "
     "for anything visible (schema, code, config, URLs) and the transcript as "
     "authoritative for intent and discussion; use both. "
+    "CRITICAL: be conservative with screen-derived claims. NEVER assert a "
+    "contradiction between screen and transcript unless BOTH the on-screen "
+    "text AND the transcript text are legibly readable. If either is blurry, "
+    "partial, occluded, or you are inferring what it says, do NOT claim a "
+    "discrepancy — note it as an observation instead. Every 'SCREEN vs "
+    "TRANSCRIPT:' item MUST end with a confidence tag: [HIGH] (both clearly "
+    "readable and the mismatch is unambiguous), [MEDIUM] (readable but "
+    "interpretation involved), or [LOW] (one or both sides are unclear/partial). "
+    "If you cannot confidently read both sides, omit the item entirely rather "
+    "than guess. "
 )
 # Essentials: always-on augmentation. Every `whiz analyze` run produces the
 # normal analysis (summary / plan / custom) AND appends a dense `## Essentials`
@@ -235,7 +253,9 @@ SYNTH_PROMPT = (
     "They were produced with rolling context, so later partials already refer back "
     "to earlier ones. Merge them into a single coherent answer: remove duplicates, "
     "reconcile conflicts, keep the chronological order, and preserve specific "
-    "speaker/time references. Produce the final answer in the exact format the task "
+    "speaker/time references. Deduplicate the Open questions section especially: "
+    "merge near-identical questions (same meaning, different wording) into one. "
+    "Produce the final answer in the exact format the task "
     "expects.\n\n"
     "Partial analyses:\n{partials}"
 )
@@ -267,8 +287,9 @@ _BUILT_IN_TASKS: list[tuple[str, str]] = [
      "action items (one bullet per item as '- [owner] action (by deadline)')"),
     (PLAN_PROMPT,
      "produce a structured implementation plan with sections: Overview, Goal, "
-     "Proposed approach, Steps (each with Owner + Effort S/M/L), Risks, Open "
-     "questions, Acceptance criteria"),
+     "Proposed approach, Steps (each with Owner = the named speaker who raised it "
+     "+ Effort S/M/L with a one-line justification), Risks, Open questions "
+     "(deduplicated), Acceptance criteria"),
 ]
 
 
