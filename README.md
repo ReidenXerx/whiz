@@ -20,8 +20,8 @@ whiz transcribe recording.mov
 whiz transcribes, detects who spoke when, prompts you to name each speaker, captures an on-screen frame per segment, and emits a self-contained HTML transcript — all from that single command. Then it can AI-analyze the whole thing (with the frames) and write a concentrated Essentials section you feed back to a later analysis. It's powered by [whisper.cpp](https://github.com/ggerganov/whisper.cpp) for transcription and [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) for diarization, with a polished terminal UI built on [rich](https://rich.readthedocs.io).
 
 <p align="center">
-  <em>HTML transcript + AI analysis screenshots coming soon</em><br>
   <img src="docs/images/html-transcript.png" alt="frame-illustrated HTML transcript" width="720">
+  <br><br>
   <img src="docs/images/analysis-md.png" alt="AI analysis with Essentials section" width="720">
 </p>
 
