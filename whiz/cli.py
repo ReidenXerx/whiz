@@ -7,6 +7,7 @@ Subcommands:
   whiz models list         Show discovered models.
   whiz models download N   Download a model from HuggingFace.
   whiz speakers list       List stored voice profiles.
+  whiz ocr engines         Show OCR engines; `ocr install` / `ocr run` manage them.
   whiz analyze <file>      AI-analyze a prior transcript (+ frames).
   whiz config show         Show current config.
   whiz config edit         Open config in $EDITOR.
@@ -22,6 +23,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from whiz import __version__
@@ -30,6 +32,7 @@ from whiz import config as cfg
 from whiz import diarize as D
 from whiz import merge as MR
 from whiz import models as M
+from whiz import ocr as OCR
 from whiz import screenshots as SC
 from whiz import ai as AI
 from whiz import profiles as P
@@ -148,6 +151,58 @@ def _diarization_available(config: cfg.Config) -> bool:
     except ImportError:
         return False
     return True
+
+
+def _resolve_ocr(args: argparse.Namespace, config: cfg.Config) -> str:
+    """Resolve the OCR engine to use for this run, or "" when OCR is off.
+
+    OCR is strictly opt-in (``--ocr`` or ``ocr = true`` in config) because it is
+    the slowest stage in the pipeline — one pass per segment frame. When it's
+    requested but no engine is installed, this prints the install hint and
+    returns "" so the run continues without OCR rather than failing; the
+    dedicated ``whiz ocr install`` command is the place to fix that.
+    """
+    if getattr(args, "no_ocr", False):
+        return ""
+    requested_engine = (getattr(args, "ocr_engine", "") or "").strip()
+    enabled = bool(getattr(args, "ocr", False)) or config.ocr or bool(requested_engine)
+    if not enabled:
+        return ""
+    try:
+        engine = OCR.resolve_engine(config, requested_engine)
+    except RuntimeError as e:
+        raise SystemExit(str(e))
+    if not engine:
+        hints = [i.install_hint for i in OCR.available_engines() if i.install_hint]
+        ui.status("OCR requested but no OCR engine is installed; skipping on-screen text.",
+                  kind="hint",
+                  detail=(f"Install one with: {hints[0]}" if hints else "")
+                         + "\nOr run: whiz ocr install")
+        return ""
+    info = OCR.detect(engine)
+    if not info.available:
+        ui.status(f"OCR engine '{engine}' is not available ({info.detail}); skipping on-screen text.",
+                  kind="hint",
+                  detail=(f"Install it with: {info.install_hint}" if info.install_hint else "")
+                         + f"\nOr run: whiz ocr install {engine}")
+        return ""
+    return engine
+
+
+def _ocr_frame_width(width: int, engine: str, config: cfg.Config) -> int:
+    """Raise the frame width when OCR is on — small UI text needs the pixels.
+
+    The stored JPEG is what both OCR and the HTML transcript use, so bumping the
+    width costs disk rather than an extra ffmpeg pass. ``0`` means native
+    resolution and is left alone.
+    """
+    if not engine or width <= 0:
+        return width
+    if width < config.ocr_min_width:
+        ui.info(f"OCR on — raising frame width {width} -> {config.ocr_min_width} "
+                f"so small on-screen text stays readable (ocr_min_width).")
+        return config.ocr_min_width
+    return width
 
 
 def _name_speakers_enabled(args: argparse.Namespace, diarize_enabled: bool) -> bool:
@@ -405,12 +460,18 @@ def _extract_and_manifest_screenshots(
     ffmpeg: str,
     width: int,
     dry_run: bool = False,
-) -> tuple[Path, Path] | None:
+    ocr_engine: str = "",
+    config: cfg.Config | None = None,
+) -> tuple[Path, Path, list[SC.FrameEntry]] | None:
     """Extract one frame per segment and write the .frames.json manifest.
 
     Frames go into ``<of_base>.frames/``; the manifest at ``<of_base>.frames.json``
     references frames by path only (never bytes) so it stays small and
-    re-runnable. Returns (frames_dir, manifest_path) or None if there are no
+    re-runnable. When ``ocr_engine`` is set, each frame is also read for
+    on-screen text before the manifest is written, so the manifest is written
+    once with everything in it.
+
+    Returns (frames_dir, manifest_path, entries) or None if there are no
     segments. Only valid for video inputs (the caller checks).
     """
     if not merged:
@@ -423,10 +484,56 @@ def _extract_and_manifest_screenshots(
         width=width,
         dry_run=dry_run,
     )
-    SC.write_manifest(entries, frames_dir, manifest_path)
     ok = sum(1 for e in entries if e.frame)
     ui.muted(f"Extracted {ok}/{len(entries)} frames -> {frames_dir}")
-    return frames_dir, manifest_path
+    if ocr_engine and not dry_run:
+        _ocr_entries(entries, frames_dir, ocr_engine, config or cfg.load())
+    SC.write_manifest(entries, frames_dir, manifest_path, ocr_engine=ocr_engine)
+    return frames_dir, manifest_path, entries
+
+
+def _ocr_entries(
+    entries: list[SC.FrameEntry],
+    frames_dir: Path,
+    engine: str,
+    config: cfg.Config,
+) -> None:
+    """Read on-screen text for each frame, writing it onto ``entries`` in place.
+
+    This is the slowest stage in the pipeline (hundreds of frames), so progress
+    is reported as it goes rather than leaving the terminal silent. Failures are
+    counted, never raised — losing a whole transcription to an OCR error would
+    be a bad trade.
+    """
+    ui.phase("reading screens")
+    ui.muted(f"engine: {engine}  frames: {sum(1 for e in entries if e.frame)}")
+    paths = [frames_dir / e.frame if e.frame else Path("") for e in entries]
+    total = len(paths)
+    # One line per ~10% so long runs show movement without flooding the log.
+    step = max(1, total // 10)
+
+    def on_progress(done: int, count: int, reused: int) -> None:
+        if done % step == 0 or done == count:
+            pct = done / count * 100.0 if count else 100.0
+            ui.muted(f"  OCR {done}/{count} ({pct:.0f}%){f', {reused} reused' if reused else ''}")
+
+    run = OCR.ocr_frames(
+        paths, engine,
+        languages=config.ocr_languages,
+        min_chars=config.ocr_min_chars,
+        max_chars=config.ocr_max_chars,
+        dedupe=config.ocr_dedupe,
+        on_progress=on_progress,
+    )
+    for entry, text in zip(entries, run.texts):
+        entry.ocr = text
+    detail = f"{run.ok} with text, {run.empty} blank"
+    if run.reused:
+        detail += f", {run.reused} reused"
+    if run.failed:
+        detail += f", {run.failed} failed"
+    ui.status(f"Read on-screen text from {total} frames ({detail}) in {run.elapsed:.1f}s",
+              kind="ok" if run.ok else "warn")
 
 
 def _save_named_profiles(
@@ -485,6 +592,7 @@ def _write_labeled_outputs(
     profile_names: dict[str, str] | None = None,
     cluster_embeddings: dict[int, list[float]] | None = None,
     save_profiles: bool = False,
+    entries: list | None = None,
 ) -> tuple[Path, Path, dict[str, str]]:
     """Optionally relabel speakers, then write .speakers.srt and .speakers.txt.
 
@@ -533,7 +641,7 @@ def _write_labeled_outputs(
     if html:
         html_out = Path(str(of_base) + ".speakers.html")
         html_out.write_text(
-            MR.format_speakers_html(merged, frames_dir=frames_dir, title=title),
+            MR.format_speakers_html(merged, frames_dir=frames_dir, title=title, entries=entries),
             encoding="utf-8",
         )
     # Save voice profiles for speakers that received a real name.
@@ -588,6 +696,12 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             ui.info(f"Video input — auto-enabled: {', '.join(flags)}")
     if config.verbose or args.verbose:
         ui.muted(f"Run:    {' '.join(cmd)}")
+
+    # OCR is opt-in; resolve it up front so the frame-width bump is applied
+    # before any frame is extracted.
+    ocr_engine = _resolve_ocr(args, config) if screenshots else ""
+    if ocr_engine:
+        ui.kv("OCR", ocr_engine)
 
     if args.dry_run:
         if diarize_enabled:
@@ -678,19 +792,23 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                 # Video screenshots: one frame per segment, using the relabeled
                 # merged list so the manifest carries final speaker names.
                 frames_dir = None
+                frame_entries: list[SC.FrameEntry] | None = None
                 if want_frames:
                     ui.phase("capturing frames")
                     width = args.screenshot_width if args.screenshot_width is not None else 1280
+                    width = _ocr_frame_width(width, ocr_engine, config)
                     result = _extract_and_manifest_screenshots(
                         in_path, merged, of_base,
                         ffmpeg=aud.find_ffmpeg(config.ffmpeg),
                         width=width,
                         dry_run=args.dry_run,
+                        ocr_engine=ocr_engine,
+                        config=config,
                     )
                     if result is not None:
-                        frames_dir = result[0]
-                        ui.wrote("Wrote frames manifest", result[1])
-                        written.append(str(result[1]))
+                        frames_dir, manifest_path, frame_entries = result
+                        ui.wrote("Wrote frames manifest", manifest_path)
+                        written.append(str(manifest_path))
                 # Write HTML after frames exist so they can be inlined.
                 if want_html and want_frames and frames_dir is not None:
                     ui.phase("writing HTML transcript")
@@ -701,6 +819,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                         html=True,
                         frames_dir=frames_dir,
                         title=in_path.name,
+                        entries=frame_entries,
                     )
                     html_path = Path(str(of_base) + ".speakers.html")
                     ui.wrote("Wrote HTML transcript", html_path)
@@ -726,11 +845,14 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                 ui.phase("capturing frames")
                 unlabeled = [(seg, "Speaker") for seg in whisper_segs]
                 width = args.screenshot_width if args.screenshot_width is not None else 1280
+                width = _ocr_frame_width(width, ocr_engine, config)
                 result = _extract_and_manifest_screenshots(
                     in_path, unlabeled, of_base,
                     ffmpeg=aud.find_ffmpeg(config.ffmpeg),
                     width=width,
                     dry_run=args.dry_run,
+                    ocr_engine=ocr_engine,
+                    config=config,
                 )
         if result is not None:
             ui.wrote("Wrote frames manifest", result[1])
@@ -757,6 +879,8 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             base_url="",
             api_key=None,
             max_frames=None,
+            chunk_chars=None,
+            context_turns=None,
             summary=False,
             actions=False,
             plan=False,
@@ -866,10 +990,16 @@ def _recommend_model(models: list[str], prefer_vision: bool) -> int:
     for i, name in enumerate(models):
         low = name.lower()
         is_cloud = ":cloud" in low
+        is_vision = _looks_vision_capable(name)
         score = 0
         if not is_cloud:
             score += 2
-        if any(tok in low for tok in want_tokens):
+        # Penalize the wrong role: a VLM shouldn't be recommended as the text
+        # model (nor a text model as the vision one). Without this,
+        # 'deepseek-ocr' would win a text pick just by containing 'deepseek'.
+        if is_vision != prefer_vision:
+            score -= 3
+        elif any(tok in low for tok in want_tokens):
             score += 5
         if score > best_score:
             best_score = score
@@ -885,7 +1015,7 @@ _VISION_TOKENS = ("vl", "vision", "llava", "minicpm-v", "qwen2.5-vl", "qwen-vl",
                   "llama-3.2-vision", "pixtral", "cogvlm", "internvl",
                   "phi-3.5-vision", "phi-3-vision", "gemma3", "gemma4",
                   "mistral-large-3", "minimax-m3", "kimi-k2.5", "kimi-k2.6",
-                  "kimi-k2.7")
+                  "kimi-k2.7", "moondream", "deepseek-ocr")
 # Substrings that signal a strong text/coder model (non-vision). Kept narrow
 # so cloud vision-capable models (qwen3.5, kimi-k2.6, gemma4, ...) are NOT
 # misclassified as text-only.
@@ -904,7 +1034,15 @@ def _looks_vision_capable(model: str) -> bool:
     return any(tok in low for tok in _VISION_TOKENS)
 
 
-def _resolve_vision(*, explicit_vision: bool, no_vision: bool, has_frames: bool, model: str) -> tuple[bool, str, str]:
+def _resolve_vision(
+    *,
+    explicit_vision: bool,
+    no_vision: bool,
+    has_frames: bool,
+    model: str,
+    has_ocr: bool = False,
+    is_vision_model=None,
+) -> tuple[bool, str, str]:
     """Decide whether analysis should use vision (feed frames to the model).
 
     Returns ``(use_vision, kind, message)`` where ``kind`` is a ui status kind
@@ -917,12 +1055,18 @@ def _resolve_vision(*, explicit_vision: bool, no_vision: bool, has_frames: bool,
         (a true user override — we don't second-guess the model name; the HTTP
         layer prints a clear rejection hint if the model actually rejects the
         images). If no frames manifest exists, fall back to text-only.
-      * Otherwise: when frames exist AND the configured model looks vision-
-        capable, auto-enable (info). When frames exist but the model looks
-        text-only, stay text-only with a hint to switch models (we never auto-
-        send images to a model that might reject them).
+      * Otherwise: when frames exist AND the configured model is vision-capable,
+        auto-enable (info). When frames exist but the model is text-only, stay
+        text-only (we never auto-send images to a model that might reject them)
+        — with a hint to switch models, or, when OCR already put the on-screen
+        text in the transcript, just an informational note, because nothing is
+        actually being lost in that case.
       * No frames: text-only, silently.
+
+    ``is_vision_model`` is the capability check to use, defaulting to the
+    name heuristic; callers pass a server-backed one where available.
     """
+    check = is_vision_model or _looks_vision_capable
     if no_vision:
         return False, "", ""
     if explicit_vision:
@@ -936,12 +1080,16 @@ def _resolve_vision(*, explicit_vision: bool, no_vision: bool, has_frames: bool,
         return True, "", ""
     if not has_frames:
         return False, "", ""
-    if _looks_vision_capable(model):
+    if check(model):
         return True, "info", ("Frames found and '{m}' is vision-capable; auto-enabling "
                               "vision (use --no-vision to opt out).").format(m=model)
+    if has_ocr:
+        return False, "info", ("Frames found but '{m}' isn't vision-capable; staying text-only. "
+                               "On-screen text is already in the transcript via OCR, so the "
+                               "screen content is still being analyzed.").format(m=model)
     return False, "hint", ("Frames found but '{m}' doesn't look vision-capable; staying "
-                           "text-only. Run `whiz config set ai_model=llava` (or another "
-                           "vision model) and re-analyze to use the frames.").format(m=model)
+                           "text-only. Set a vision model (`whiz config set ai_vision_model=qwen3-vl:8b`) "
+                           "or extract on-screen text instead (`whiz ocr run <file>`).").format(m=model)
 
 
 def _pick_model_interactive(config: cfg.Config, *, prefer_vision: bool) -> str | None:
@@ -1031,6 +1179,16 @@ def _pick_model_interactive(config: cfg.Config, *, prefer_vision: bool) -> str |
     return chosen
 
 
+def _opt_int(args: argparse.Namespace, name: str, fallback: int) -> int:
+    """An explicit int flag when set, else the config default.
+
+    Uses getattr because `transcribe --analyze` builds a partial namespace and
+    doesn't carry every analyze-only knob.
+    """
+    value = getattr(args, name, None)
+    return fallback if value is None else int(value)
+
+
 def cmd_analyze(args: argparse.Namespace) -> int:
     """Analyze a prior transcript (and optionally frames) with an AI model.
 
@@ -1070,6 +1228,10 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             "Run `whiz transcribe --speakers [--screenshots] <file>` first."
         )
     has_frames = entries is not None
+    has_ocr = bool(entries) and any(getattr(e, "ocr", "") for e in entries)
+    if has_ocr:
+        n_ocr = sum(1 for e in entries if getattr(e, "ocr", ""))
+        ui.info(f"On-screen text (OCR) present for {n_ocr} segment(s); included in the transcript.")
 
     # Model picking. prefer_vision mirrors the effective vision intent: if the
     # user explicitly asked for --vision, or frames exist and they haven't opted
@@ -1085,6 +1247,22 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     base_url = args.base_url or config.ai_base_url
     api_key = args.api_key if args.api_key is not None else config.ai_api_key
     max_frames = args.max_frames if args.max_frames is not None else config.ai_max_frames
+    # A dedicated vision model (ai_vision_model) is used only for the frames
+    # path, so the text model can stay small and fast. An explicit --model
+    # overrides both roles.
+    vision_candidate = args.model or config.ai_vision_model or model
+
+    # Decide whether to feed frames to the model *before* probing, so the probe
+    # (and everything downstream) targets whichever model will actually run.
+    # See _resolve_vision for the precedence rules.
+    use_vision, vkind, vmsg = _resolve_vision(
+        explicit_vision=explicit_vision, no_vision=no_vision,
+        has_frames=has_frames, model=vision_candidate, has_ocr=has_ocr,
+    )
+    if use_vision:
+        if vision_candidate != model:
+            ui.muted(f"vision model: {vision_candidate} (ai_vision_model)")
+        model = vision_candidate
 
     # Probe the configured model before doing real work. Ollama's /api/tags can
     # list models that are retired server-side (HTTP 410 at call time); a stored
@@ -1119,17 +1297,17 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         else:
             ui.status(f"Auto-detected: {detected_mode}", kind="info")
 
-    # Decide whether to feed frames to the model. See _resolve_vision for the
-    # full precedence (no-vision > explicit --vision > auto-enable by model type).
-    use_vision, vkind, vmsg = _resolve_vision(
-        explicit_vision=explicit_vision, no_vision=no_vision,
-        has_frames=has_frames, model=model,
-    )
     if vmsg:
         ui.status(vmsg, kind=vkind or "info")
 
+    # Chunking knobs: an explicit flag wins, else config. chunk_chars is the
+    # main cost/latency lever — a big context wants a big chunk (fewer calls).
+    chunk_chars = _opt_int(args, "chunk_chars", config.ai_chunk_chars)
+    context_turns = _opt_int(args, "context_turns", config.ai_context_turns)
+
     ui.kv("Model", model)
     ui.muted(f"base_url: {base_url}  vision: {use_vision}  mode: {detected_mode}")
+    ui.muted(f"chunk_chars: {chunk_chars}  context_turns: {context_turns}")
     frames_dir = SC.frames_dir_for(of_base) if use_vision else None
     with ui.spinner("analyzing") as spin:
         response = AI.analyze(
@@ -1137,6 +1315,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             base_url=base_url, model=model, api_key=api_key,
             entries=entries, frames_dir=frames_dir,
             use_vision=use_vision, max_frames=max_frames,
+            chunk_chars=chunk_chars, context_turns=context_turns,
             on_progress=spin,
         )
 
@@ -1286,20 +1465,25 @@ def cmd_merge(args: argparse.Namespace) -> int:
     # Video screenshots: re-extract frames against the existing merged list.
     # Frame extraction is cheap (~seconds), so merge --screenshots re-runs it.
     frames_dir = None
+    frame_entries: list[SC.FrameEntry] | None = None
     if screenshots and aud.needs_extraction(in_path):
         ui.phase("capturing frames")
+        ocr_engine = _resolve_ocr(args, config)
         width = args.screenshot_width if args.screenshot_width is not None else 1280
+        width = _ocr_frame_width(width, ocr_engine, config)
         shot_list = merged if merged else [(seg, "Speaker") for seg in whisper_segs]
         result = _extract_and_manifest_screenshots(
             in_path, shot_list, of_base,
             ffmpeg=aud.find_ffmpeg(config.ffmpeg),
             width=width,
             dry_run=False,
+            ocr_engine=ocr_engine,
+            config=config,
         )
         if result is not None:
-            frames_dir = result[0]
-            ui.wrote("Wrote frames manifest", result[1])
-            written.append(str(result[1]))
+            frames_dir, manifest_path, frame_entries = result
+            ui.wrote("Wrote frames manifest", manifest_path)
+            written.append(str(manifest_path))
     # Write HTML after frames exist so they can be inlined.
     if _outputs_include(args, config, "html") and frames_dir is not None and merged:
         ui.phase("writing HTML transcript")
@@ -1310,6 +1494,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
             html=True,
             frames_dir=frames_dir,
             title=in_path.name,
+            entries=frame_entries,
         )
         html_path = Path(str(of_base) + ".speakers.html")
         ui.wrote("Wrote HTML transcript", html_path)
@@ -1318,7 +1503,130 @@ def cmd_merge(args: argparse.Namespace) -> int:
     return 0
 
 
-# ---------- speakers (voice profiles) ----------
+# ---------- ocr (on-screen text engines) ----------
+
+def _ensure_ocr_engine_interactive(config: cfg.Config, requested: str = "") -> str:
+    """Resolve an OCR engine, offering to install it when it's missing.
+
+    Unlike ``_resolve_ocr`` (which runs mid-transcription and must never block),
+    the ``whiz ocr`` commands are explicitly about engine setup, so this one
+    prompts. Returns the usable engine name, or "" if it isn't available.
+    """
+    name = (requested or "").strip().lower()
+    if not name or name == "auto":
+        name = OCR.resolve_engine(config) or OCR.preferred_engine()
+    if not name:
+        ui.status("No OCR engine is supported on this platform.", kind="warn")
+        return ""
+    if OCR.ensure_engine(name, interactive=True, on_message=lambda m: ui.muted(m)):
+        return name
+    return ""
+
+
+def cmd_ocr_engines(args: argparse.Namespace) -> int:
+    """Show which OCR engines are installed and how to get the others."""
+    config = cfg.load()
+    infos = OCR.available_engines()
+    rows = [
+        [i.name,
+         "available" if i.available else "-",
+         i.detail,
+         i.install_hint if not i.available else ""]
+        for i in infos
+    ]
+    ui.table("OCR engines", [("Engine", "left"), ("Status", "left"),
+                             ("Detail", "left"), ("Install with", "left")], rows)
+    resolved = OCR.resolve_engine(config) if config.ocr_engine in ("", "auto") else config.ocr_engine
+    ui.kv("Config", f"ocr={config.ocr} ocr_engine={config.ocr_engine or 'auto'}")
+    if resolved:
+        ui.status(f"Would use: {resolved}", kind="ok")
+    else:
+        ui.status("No OCR engine installed.", kind="warn",
+                  detail="Install one with:  whiz ocr install")
+    if not config.ocr:
+        ui.muted("OCR is opt-in. Enable per run with --ocr, or always: whiz config set ocr=true")
+    return 0
+
+
+def cmd_ocr_install(args: argparse.Namespace) -> int:
+    """Install an OCR engine (with confirmation) and optionally pin it."""
+    config = cfg.load()
+    name = _ensure_ocr_engine_interactive(config, getattr(args, "engine", ""))
+    if not name:
+        return 1
+    ui.status(f"OCR engine '{name}' is ready.", kind="ok")
+    if config.ocr_engine in ("", "auto"):
+        ui.muted(f"Pin it with:   whiz config set ocr_engine={name}")
+    if not config.ocr:
+        ui.muted("Enable OCR:    whiz config set ocr=true   (or pass --ocr per run)")
+    return 0
+
+
+def cmd_ocr_test(args: argparse.Namespace) -> int:
+    """OCR a single image so you can sanity-check an engine's output."""
+    config = cfg.load()
+    image = Path(args.image).expanduser()
+    if not image.exists():
+        raise SystemExit(f"Image not found: {image}")
+    name = _ensure_ocr_engine_interactive(config, getattr(args, "ocr_engine", ""))
+    if not name:
+        return 1
+    ui.header("whiz", "ocr test")
+    ui.kv("Engine", name)
+    ui.kv("Image", image)
+    started = time.monotonic()
+    try:
+        text = OCR.ocr_image(
+            image, name, config.ocr_languages,
+            min_chars=config.ocr_min_chars, max_chars=config.ocr_max_chars,
+        )
+    except RuntimeError as e:
+        ui.status(f"OCR failed: {e}", kind="warn")
+        return 1
+    elapsed = time.monotonic() - started
+    ui.status(f"{len(text)} chars in {elapsed:.2f}s", kind="ok" if text else "warn")
+    print(text)
+    return 0
+
+
+def cmd_ocr_run(args: argparse.Namespace) -> int:
+    """Add (or refresh) on-screen text on an existing frames manifest.
+
+    Reuses the frames a prior ``whiz transcribe`` already extracted, so this
+    never re-transcribes and never re-extracts — the same cheap-re-run idea as
+    ``whiz merge``.
+    """
+    config = cfg.load()
+    in_path = Path(args.file).expanduser()
+    if not in_path.exists():
+        raise SystemExit(f"Input file not found: {in_path}")
+    of_base = in_path.with_suffix("")
+    manifest_path = SC.frames_manifest_path(of_base)
+    entries = SC.load_manifest(manifest_path)
+    if not entries:
+        raise SystemExit(
+            f"No frames manifest found at {manifest_path}.\n"
+            "Run `whiz transcribe <file>` (video inputs capture frames automatically) first."
+        )
+    name = _ensure_ocr_engine_interactive(config, getattr(args, "ocr_engine", ""))
+    if not name:
+        return 1
+
+    ui.header("whiz", "ocr")
+    ui.kv("Manifest", manifest_path)
+    frames_dir = SC.frames_dir_for(of_base)
+    _ocr_entries(entries, frames_dir, name, config)
+    SC.write_manifest(entries, frames_dir, manifest_path, ocr_engine=name)
+    ui.status(f"Updated frames manifest: {manifest_path}", kind="ok")
+    html_path = Path(str(of_base) + ".speakers.html")
+    if html_path.exists():
+        ui.muted(f"{html_path.name} is now stale — refresh it with: "
+                 f"whiz merge --outputs html {in_path}")
+    ui.muted(f"Analyze with the screen text: whiz analyze {in_path}")
+    return 0
+
+
+# ---------- llm (AI model management) ----------
 
 def cmd_speakers_list(args: argparse.Namespace) -> int:
     """List stored speaker voice profiles."""
@@ -1460,7 +1768,12 @@ def cmd_config_set(args: argparse.Namespace) -> int:
     key = key.strip()
     if key not in cfg.Config.__dataclass_fields__:
         raise SystemExit(f"Unknown config key '{key}'. Valid: {', '.join(cfg.Config.__dataclass_fields__)}")
-    field_type = cfg.Config.__dataclass_fields__[key].type
+    # config.py uses `from __future__ import annotations`, so
+    # __dataclass_fields__[key].type is the *string* 'bool'/'int'/... rather
+    # than the type object — every _coerce branch would fall through and store
+    # a raw string (e.g. vad="false", which is truthy). Take the type from a
+    # fresh defaults instance instead, which is always a real type.
+    field_type = type(getattr(cfg.Config(), key))
     coerced = _coerce(value.strip(), field_type)
     setattr(config, key, coerced)
     path = cfg.save(config)
@@ -1507,6 +1820,9 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--screenshots", action="store_true", help="For video inputs, extract one on-screen frame per transcribed segment into <stem>.frames/ and write <stem>.frames.json (for AI analysis / HTML output). Auto-enabled for video inputs (see --no-screenshots)")
     t.add_argument("--no-screenshots", dest="no_screenshots", action="store_true", help="Disable the auto-enabled on-screen frame extraction for video inputs (opt out)")
     t.add_argument("--screenshot-width", type=int, default=None, help="Frame width in pixels (default 1280; 0 = native resolution)")
+    t.add_argument("--ocr", action="store_true", help="Read on-screen text (OCR) from each captured frame into the manifest, the AI transcript, and the HTML transcript. Opt-in: this is the slowest stage (one pass per frame)")
+    t.add_argument("--no-ocr", dest="no_ocr", action="store_true", help="Disable OCR even when ocr=true in config")
+    t.add_argument("--ocr-engine", dest="ocr_engine", default="", help="OCR engine: auto|" + "|".join(OCR.ENGINES) + " (default: config ocr_engine; 'auto' picks the best available for this platform)")
     t.add_argument("--no-voice-profiles", dest="no_voice_profiles", action="store_true", help="Don't compute voice-profile embeddings or auto-match/save speaker profiles this run")
     t.add_argument("--resume", action="store_true", help="Skip whisper-cli transcription if its JSON output already exists and go straight to diarization + merge (ergonomic alias for `whiz merge`)"),
     t.add_argument("--verbose", action="store_true", help="Verbose whisper-cli output")
@@ -1531,6 +1847,9 @@ def build_parser() -> argparse.ArgumentParser:
     mg.add_argument("--screenshots", action="store_true", help="Re-extract on-screen frames per segment into <stem>.frames/ and write <stem>.frames.json. Auto-enabled for video inputs (see --no-screenshots)")
     mg.add_argument("--no-screenshots", dest="no_screenshots", action="store_true", help="Disable the auto-enabled on-screen frame extraction for video inputs (opt out)")
     mg.add_argument("--screenshot-width", type=int, default=None, help="Frame width in pixels (default 1280; 0 = native resolution)")
+    mg.add_argument("--ocr", action="store_true", help="Read on-screen text (OCR) from each captured frame into the manifest, the AI transcript, and the HTML transcript. Opt-in: this is the slowest stage (one pass per frame)")
+    mg.add_argument("--no-ocr", dest="no_ocr", action="store_true", help="Disable OCR even when ocr=true in config")
+    mg.add_argument("--ocr-engine", dest="ocr_engine", default="", help="OCR engine: auto|" + "|".join(OCR.ENGINES) + " (default: config ocr_engine; 'auto' picks the best available for this platform)")
     mg.add_argument("--no-voice-profiles", dest="no_voice_profiles", action="store_true", help="Don't compute voice-profile embeddings or auto-match/save speaker profiles this run")
     mg.set_defaults(func=cmd_merge)
 
@@ -1558,6 +1877,8 @@ def build_parser() -> argparse.ArgumentParser:
     an.add_argument("--base-url", dest="base_url", default="", help="Chat API base URL (default: config ai_base_url, http://localhost:11434/v1)")
     an.add_argument("--api-key", dest="api_key", default=None, help="API key (default: config ai_api_key; Ollama ignores it)")
     an.add_argument("--max-frames", dest="max_frames", type=int, default=None, help="Max frames sent to a vision model, spread evenly (default: config ai_max_frames, 50)")
+    an.add_argument("--chunk-chars", dest="chunk_chars", type=int, default=None, help="Transcript characters per map-reduce chunk; each chunk is one model call, so raise this for a large-context model to cut call count (default: config ai_chunk_chars, 6000; 0 = never chunk)")
+    an.add_argument("--context-turns", dest="context_turns", type=int, default=None, help="Prior chunk analyses carried as rolling context on each map call (default: config ai_context_turns, 3; 0 = independent chunks)")
     an.add_argument("--summary", action="store_true", help="Use the built-in summary prompt")
     an.add_argument("--actions", action="store_true", help="Use the built-in action-items prompt")
     an.add_argument("--plan", action="store_true", help="Use the built-in implementation-plan prompt (Overview → Goal → Proposed approach → Steps with owner/effort → Risks → Open questions → Acceptance criteria)")
@@ -1566,6 +1887,29 @@ def build_parser() -> argparse.ArgumentParser:
     an.add_argument("--no-vision", dest="no_vision", action="store_true", help="Opt out of the auto-enabled vision analysis (stay text-only even when frames exist)")
     an.set_defaults(func=cmd_analyze)
 
+    # ocr (on-screen text engines)
+    oc = sub.add_parser("ocr", help="Manage OCR engines and read on-screen text from captured frames")
+    ocsub = oc.add_subparsers(dest="ocr_command", required=True)
+    ocsub.add_parser("engines", aliases=["ls", "list"],
+                     help="Show which OCR engines are installed and how to install the rest"
+                     ).set_defaults(func=cmd_ocr_engines)
+    oci = ocsub.add_parser("install", help="Install an OCR engine (asks first)")
+    oci.add_argument("engine", nargs="?", default="",
+                     help=f"Engine to install: {'|'.join(OCR.ENGINES)} (default: best for this platform)")
+    oci.set_defaults(func=cmd_ocr_install)
+    ocr_run = ocsub.add_parser(
+        "run", help="Read on-screen text for an existing frames manifest and update it in place "
+                    "(no re-transcription, no re-extraction)")
+    ocr_run.add_argument("file", help="Input audio/video file (used to find <stem>.frames.json)")
+    ocr_run.add_argument("--ocr-engine", dest="ocr_engine", default="",
+                         help="Engine override (default: config ocr_engine / auto)")
+    ocr_run.set_defaults(func=cmd_ocr_run)
+    oct_ = ocsub.add_parser("test", help="OCR a single image to sanity-check an engine")
+    oct_.add_argument("image", help="Path to an image file")
+    oct_.add_argument("--ocr-engine", dest="ocr_engine", default="", help="Engine override")
+    oct_.set_defaults(func=cmd_ocr_test)
+
+    # llm (AI model management)
     # speakers (voice profiles)
     sp = sub.add_parser("speakers", aliases=["sp"], help="Manage speaker voice profiles (cross-recording recognition)")
     spsub = sp.add_subparsers(dest="speakers_command", required=True)

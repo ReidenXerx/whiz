@@ -34,6 +34,7 @@ class FrameEntry:
     speaker: str
     text: str
     frame: str  # filename within the frames dir (empty if extraction failed)
+    ocr: str = ""  # on-screen text read from the frame (empty unless --ocr)
 
 
 def find_ffmpeg(configured: str = "") -> str:
@@ -125,7 +126,8 @@ def _extract_one(
         cmd += ["-vf", scale_filter]
     cmd.append(str(out))
 
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    # errors="replace" so a non-UTF-8 byte in ffmpeg's stderr can't raise.
+    proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
     return proc.returncode == 0 and out.exists()
 
 
@@ -139,12 +141,22 @@ def frames_manifest_path(of_base: Path) -> Path:
     return Path(str(of_base) + ".frames.json")
 
 
-def write_manifest(entries: list[FrameEntry], out_dir: Path, manifest_path: Path) -> Path:
-    """Write the frames manifest JSON (paths relative to out_dir, never bytes)."""
+def write_manifest(
+    entries: list[FrameEntry],
+    out_dir: Path,
+    manifest_path: Path,
+    ocr_engine: str = "",
+) -> Path:
+    """Write the frames manifest JSON (paths relative to out_dir, never bytes).
+
+    Version 2 adds the per-segment ``ocr`` field and records which engine
+    produced it. Version 1 manifests still load (see ``load_manifest``).
+    """
     payload = {
-        "version": 1,
+        "version": 2,
         "frames_dir": out_dir.name,
         "count": len(entries),
+        "ocr_engine": ocr_engine,
         "segments": [
             {
                 "index": e.index,
@@ -153,6 +165,7 @@ def write_manifest(entries: list[FrameEntry], out_dir: Path, manifest_path: Path
                 "speaker": e.speaker,
                 "text": e.text,
                 "frame": e.frame,
+                "ocr": e.ocr,
             }
             for e in entries
         ],
@@ -181,6 +194,8 @@ def load_manifest(manifest_path: Path) -> list[FrameEntry] | None:
                 speaker=str(s.get("speaker", "")),
                 text=str(s.get("text", "")),
                 frame=str(s.get("frame", "")),
+                # v1 manifests have no 'ocr' key — default to empty.
+                ocr=str(s.get("ocr", "")),
             ))
         except (KeyError, TypeError, ValueError):
             continue

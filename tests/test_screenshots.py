@@ -5,6 +5,7 @@ Run with: pytest tests/test_screenshots.py
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -93,3 +94,45 @@ def test_load_manifest_skips_malformed_rows(tmp_path):
     loaded = SC.load_manifest(manifest)
     assert loaded is not None
     assert len(loaded) == 1  # malformed row skipped, valid one kept
+
+# ---------- manifest v2 (OCR) ----------
+
+def test_manifest_v2_round_trips_ocr(tmp_path):
+    entries = [
+        SC.FrameEntry(1, 0.0, 2.0, "Vadim", "spoken words", "seg0001.jpg",
+                      ocr="Export API\nMethod: POST"),
+        SC.FrameEntry(2, 2.0, 4.0, "Anna", "more words", "seg0002.jpg"),
+    ]
+    manifest = tmp_path / "rec.frames.json"
+    SC.write_manifest(entries, tmp_path / "rec.frames", manifest, ocr_engine="apple")
+
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    assert data["version"] == 2
+    assert data["ocr_engine"] == "apple"
+
+    loaded = SC.load_manifest(manifest)
+    assert [e.ocr for e in loaded] == ["Export API\nMethod: POST", ""]
+
+
+def test_manifest_v1_without_ocr_still_loads(tmp_path):
+    """A manifest from an older whiz must keep working, defaulting ocr to ''."""
+    manifest = tmp_path / "old.frames.json"
+    manifest.write_text(json.dumps({
+        "version": 1,
+        "frames_dir": "old.frames",
+        "count": 1,
+        "segments": [
+            {"index": 1, "start": 0.0, "end": 1.0, "speaker": "Speaker A",
+             "text": "hello", "frame": "seg0001.jpg"},
+        ],
+    }), encoding="utf-8")
+    loaded = SC.load_manifest(manifest)
+    assert len(loaded) == 1
+    assert loaded[0].ocr == ""
+    assert loaded[0].text == "hello"
+
+
+def test_write_manifest_defaults_ocr_engine_to_empty(tmp_path):
+    manifest = tmp_path / "rec.frames.json"
+    SC.write_manifest([], tmp_path / "rec.frames", manifest)
+    assert json.loads(manifest.read_text(encoding="utf-8"))["ocr_engine"] == ""

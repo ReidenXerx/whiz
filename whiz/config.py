@@ -53,15 +53,50 @@ class Config:
     # Explicit paths to diarization models (empty => auto-discover).
     diarization_segmentation_model: str = ""
     diarization_embedding_model: str = ""
+    # --- OCR (on-screen text extracted from captured frames) ---
+    # Enable OCR of captured frames. Opt-in: OCR is the slowest pipeline stage
+    # (one pass per segment frame), so it never turns on automatically.
+    ocr: bool = False
+    # OCR engine: "auto" (platform default) | "apple" | "rapidocr" | "tesseract".
+    ocr_engine: str = "auto"
+    # Language hints for engines that accept them (Apple Vision, Tesseract).
+    ocr_languages: list[str] = field(default_factory=lambda: ["en-US"])
+    # Drop OCR results shorter than this (noise from mostly-empty frames).
+    ocr_min_chars: int = 8
+    # Truncate a single frame's OCR to this many characters. A full screen holds
+    # a lot of text, and the AI transcript only carries what *changed* between
+    # frames (see ocr.new_screen_lines), so this can be generous — it guards
+    # against one pathological frame rather than bounding the whole prompt.
+    ocr_max_chars: int = 4000
+    # Reuse the previous frame's OCR when the JPEG bytes are identical.
+    ocr_dedupe: bool = True
+    # Minimum frame width when OCR is enabled — small UI text doesn't survive
+    # the default 1280px downscale. Raised automatically with a notice.
+    ocr_min_width: int = 1920
     # --- AI analysis (Ollama / OpenAI-compatible) ---
     # Base URL of the chat completions endpoint (without /chat/completions).
     ai_base_url: str = "http://localhost:11434/v1"
-    # Model name (e.g. 'llava', 'qwen2.5-vl', 'gpt-4o-mini'). Empty => error with hint.
+    # Model name for text analysis (e.g. 'qwen3.5:9b'). Empty => interactive picker.
     ai_model: str = ""
+    # Vision-capable model used only when frames are sent as images
+    # (e.g. 'qwen3-vl:8b'). Empty => fall back to ai_model.
+    ai_vision_model: str = ""
     # API key (Ollama ignores this; set for cloud OpenAI-compatible providers).
     ai_api_key: str = ""
     # Max frames sent to a vision model (spread evenly across the video).
     ai_max_frames: int = 50
+    # Target size of one map-reduce chunk, in characters of rendered transcript.
+    # Each chunk costs one model call, so this is the main lever on run time and
+    # (for cloud models) price: a 29k-char transcript is 6 calls at 6000 and a
+    # single call at 40000. The default suits a small local model with a modest
+    # context; raise it to match a larger context. 0 => never chunk (one call).
+    # whiz does not yet read the server's context length, so a value larger than
+    # the model can hold is silently truncated by the server — see ai_context_turns.
+    ai_chunk_chars: int = 6000
+    # How many prior chunk analyses ride along as rolling context on each map
+    # call (a sliding window). Higher = more coherent across chunk boundaries but
+    # a larger prompt per call; 0 => analyze each chunk independently.
+    ai_context_turns: int = 3
     # --- Speaker voice profiles ---
     # Cosine-similarity threshold for auto-matching a cluster to a stored profile.
     # Higher = stricter (fewer auto-assignments); 0.8 suits 3D-Speaker embeddings.

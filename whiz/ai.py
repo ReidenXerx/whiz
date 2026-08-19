@@ -409,20 +409,57 @@ def resolve_prompt_auto(transcript: str, *, base_url: str, model: str, api_key: 
 _last_classifier_error: list[str] = [""]
 
 
+# Prefix for the on-screen (OCR) line that follows a segment's spoken line.
+# Indented so the model reads it as an attribute of the segment above it, and
+# kept on ONE line per segment so _chunk_text's line-boundary splitting keeps a
+# segment and its screen text together in the same chunk.
+_SCREEN_PREFIX = "           screen: "
+
+
 def transcript_text(entries) -> str:
-    """Render manifest entries (FrameEntry) or (WhisperSeg, label) pairs as text."""
+    """Render manifest entries (FrameEntry) or (WhisperSeg, label) pairs as text.
+
+    When an entry carries OCR text (``FrameEntry.ocr``, populated by ``--ocr``),
+    a ``screen:`` line is emitted beneath the spoken line so a text-only model
+    can read what was on screen — this is what lets ``_ANALYST_POSTURE``'s
+    "reconcile SCREEN vs TRANSCRIPT" instruction work without a vision model.
+
+    Screen text is reduced to **what changed**: each frame's OCR is diffed
+    line-by-line against the previous frame (``ocr.new_screen_lines``), so
+    persistent window chrome — the menu bar, the sidebar, the app title — is
+    stated once instead of on every segment. Without this the screen text
+    swamps the prompt: on a real 4.8-minute recording it was 96% of the input
+    and turned a single-chunk transcript into sixteen chunks. The full
+    per-frame text is still kept in the manifest, so the HTML transcript and
+    its search stay complete.
+    """
+    from whiz.ocr import new_screen_lines
+
     lines: list[str] = []
+    prev_ocr = ""
     for e in entries:
         # FrameEntry has .start/.end/.speaker/.text; (WhisperSeg, label) tuples
         # are unwrapped below.
         if hasattr(e, "speaker"):
             ts = _fmt_clock(e.start)
             lines.append(f"[{ts}] {e.speaker}: {e.text}")
+            ocr_text = getattr(e, "ocr", "") or ""
+            screen = _screen_line(new_screen_lines(ocr_text, prev_ocr))
+            if screen:
+                lines.append(_SCREEN_PREFIX + screen)
+            if ocr_text:
+                prev_ocr = ocr_text
         elif isinstance(e, tuple) and len(e) == 2:
             seg, label = e
             ts = _fmt_clock(seg.start)
             lines.append(f"[{ts}] {label}: {seg.text.strip()}")
     return "\n".join(lines)
+
+
+def _screen_line(ocr: str) -> str:
+    """Flatten multi-line OCR into a single ' · '-separated line."""
+    parts = [part.strip() for part in (ocr or "").splitlines()]
+    return " · ".join(part for part in parts if part)
 
 
 def _fmt_clock(t: float) -> str:

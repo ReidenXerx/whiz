@@ -157,15 +157,44 @@ def pick_best(config: cfg.Config) -> Path | None:
     return all_models[0].path if all_models else None
 
 
+def resolve_download_name(model: str) -> str:
+    """Map a friendly model name to a real whisper.cpp release filename.
+
+    Short aliases have to be expanded, not just prefixed: there is no
+    ``ggml-turbo.bin`` on HuggingFace, so ``whiz models download turbo`` (the
+    command the README opens with) would 404. Resolution order:
+
+    1. An explicit ``ggml-...`` filename is passed through untouched.
+    2. An exact known model (``large-v3``, ``medium``, ``base`` ...) wins next,
+       so a bare name never gets redirected to a quantized variant.
+    3. Otherwise the alias is matched against ``PREFERENCE`` and the
+       highest-ranked model containing it is used ('turbo' ->
+       ggml-large-v3-turbo-q5_0.bin).
+
+    Unrecognized names fall through to ``ggml-<name>.bin`` so a genuinely new
+    upstream model can still be fetched by name.
+    """
+    name = (model or "").strip()
+    if name.startswith("ggml-"):
+        return name if name.endswith(".bin") else name + ".bin"
+    if name.endswith(".bin"):
+        name = name[:-4]
+    exact = f"ggml-{name}.bin"
+    if exact in KNOWN_MODELS:
+        return exact
+    matches = [m for m in PREFERENCE if name in _alias_from_name(m)]
+    if matches:
+        return matches[0]
+    return exact
+
+
 def download(model: str, config: cfg.Config, dest_dir: Path | None = None) -> Path:
     """Download a model from the HuggingFace whisper.cpp repo.
 
-    `model` may be a bare name like 'large-v3' (resolved to ggml-large-v3.bin)
-    or a full filename like 'ggml-large-v3-turbo-q5_0.bin'.
+    `model` may be a short alias like 'turbo' or 'large-v3', or a full filename
+    like 'ggml-large-v3-turbo-q5_0.bin' (see ``resolve_download_name``).
     """
-    filename = model if model.startswith("ggml-") else f"ggml-{model}.bin"
-    if not filename.endswith(".bin"):
-        filename += ".bin"
+    filename = resolve_download_name(model)
 
     target_dir = dest_dir or (Path.home() / ".cache" / "whisper")
     target_dir.mkdir(parents=True, exist_ok=True)

@@ -13,9 +13,13 @@ import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from whiz import ai as AI
+from whiz import merge as MR
+from whiz import screenshots as SC
 
 
 # ---------- prompt resolution ----------
@@ -981,3 +985,77 @@ def test_analyze_long_vision_map_reduce_manifest_per_chunk(monkeypatch, tmp_path
     # The manifest is prepended before the MAP_PROMPT body.
     assert p1.startswith("Frame timeline")
     assert p2.startswith("Frame timeline")
+
+
+# ---------- OCR in the transcript ----------
+
+def _entry(index, start, speaker, text, ocr=""):
+    return SC.FrameEntry(index=index, start=start, end=start + 1.0,
+                         speaker=speaker, text=text, frame=f"seg{index:04d}.jpg", ocr=ocr)
+
+
+def test_transcript_text_emits_screen_line_for_ocr():
+    out = AI.transcript_text([_entry(1, 0.0, "Vadim", "use GET", ocr="Export API\nMethod: POST")])
+    assert "[00:00:00] Vadim: use GET" in out
+    # Multi-line OCR is flattened onto one line so chunking keeps it with its segment.
+    assert "screen: Export API · Method: POST" in out
+    assert len(out.splitlines()) == 2
+
+
+def test_transcript_text_omits_screen_line_without_ocr():
+    out = AI.transcript_text([_entry(1, 0.0, "Vadim", "hello")])
+    assert "screen:" not in out
+
+
+def test_transcript_text_collapses_repeated_screen_text():
+    """A static screen must not be repeated per segment — that's pure token burn."""
+    entries = [
+        _entry(1, 0.0, "Vadim", "one", ocr="same screen"),
+        _entry(2, 1.0, "Anna", "two", ocr="same screen"),
+        _entry(3, 2.0, "Vadim", "three", ocr="new screen"),
+    ]
+    out = AI.transcript_text(entries)
+    assert out.count("screen: same screen") == 1
+    assert out.count("screen: new screen") == 1
+
+
+def test_transcript_text_blank_ocr_does_not_reset_collapse():
+    """An OCR-less segment between two identical screens isn't a change."""
+    entries = [
+        _entry(1, 0.0, "Vadim", "one", ocr="same screen"),
+        _entry(2, 1.0, "Anna", "two", ocr=""),
+        _entry(3, 2.0, "Vadim", "three", ocr="same screen"),
+    ]
+    assert AI.transcript_text(entries).count("screen: same screen") == 1
+
+
+def test_transcript_text_tuples_unaffected_by_ocr_support():
+    merged = [(MR.WhisperSeg(0.0, 1.0, "hi"), "Speaker A")]
+    assert AI.transcript_text(merged) == "[00:00:00] Speaker A: hi"
+
+
+def test_screen_line_flattens_and_drops_blanks():
+    assert AI._screen_line("a\n\n b \nc") == "a · b · c"
+    assert AI._screen_line("") == ""
+
+
+def test_transcript_text_diffs_screen_against_previous_frame():
+    """Only what changed on screen reaches the model."""
+    entries = [
+        _entry(1, 0.0, "Vadim", "one", ocr="Slack\nFile\nInbox (3)"),
+        _entry(2, 1.0, "Anna", "two", ocr="Slack\nFile\nInbox (4)"),
+    ]
+    out = AI.transcript_text(entries)
+    assert "screen: Slack · File · Inbox (3)" in out
+    # Second frame contributes only the line that actually changed.
+    assert "screen: Inbox (4)" in out
+    assert out.count("Slack") == 1
+
+
+def test_transcript_text_omits_screen_line_when_nothing_changed():
+    entries = [
+        _entry(1, 0.0, "Vadim", "one", ocr="same screen\nsecond line"),
+        _entry(2, 1.0, "Anna", "two", ocr="same screen\nsecond line"),
+    ]
+    out = AI.transcript_text(entries)
+    assert out.count("screen:") == 1

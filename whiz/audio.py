@@ -65,7 +65,8 @@ def extract_audio(
         print("  " + " ".join(cmd))
         return out
 
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    # errors="replace" so a non-UTF-8 byte in ffmpeg's stderr can't raise.
+    proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
     if proc.returncode != 0:
         raise RuntimeError(
             f"ffmpeg failed (exit {proc.returncode}):\n{proc.stderr.strip()}"

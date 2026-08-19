@@ -49,6 +49,7 @@ Most transcription tools stop at text. whiz is the one-command path from a scree
 - [Configuration](#configuration)
 - [Speaker diarization](#speaker-diarization-multi-speaker-labels)
 - [Speaker voice profiles](#speaker-voice-profiles-cross-recording-recognition)
+- [On-screen text (OCR)](#on-screen-text-ocr)
 - [AI analysis](#ai-analysis-auto-detect-summary-action-items-implementation-plans-vision)
 - [Essentials (always on)](#essentials-always-on-concentrated-context-for-a-later-analysis)
 - [Testing](#testing)
@@ -113,6 +114,7 @@ whiz models download turbo      # ggml-large-v3-turbo-q5_0.bin — fast & accura
 - **Voice profiles** — save a speaker's embedding once you name them; later recordings with the same people are labeled automatically, no flags needed.
 - **Screenshots** — capture one on-screen frame per segment into a manifest + HTML transcript. Auto-on for video inputs.
 - **HTML transcript** — a self-contained, color-coded, frame-illustrated `.speakers.html` you can open in any browser (no server, no external images).
+- **On-screen text (OCR)** — read the text visible in each frame (Apple Vision, RapidOCR, or Tesseract) into the transcript, so even a small text-only model can "see" the screen. Opt-in with `--ocr`.
 - **AI analysis** — send a transcript (and optionally frames) to an OpenAI-compatible chat model ([Ollama](https://ollama.com) by default) for summaries, action items, implementation plans, or freeform questions. Every analysis also appends a dense `## Essentials` section.
 - **Re-tune cheaply** — `whiz merge` re-runs only diarization + merge against an existing transcription, reusing a cached diarization result, so adjusting speaker count / threshold / names is instant.
 
@@ -198,6 +200,7 @@ Transcribe an audio or video file. For video inputs, speaker diarization, on-scr
 whiz transcribe recording.mov                       # the happy path
 whiz transcribe --no-speakers --no-screenshots recording.mov   # opt out of the video defaults
 whiz transcribe -m turbo -l en --outputs srt,vtt recording.mp4 # be explicit
+whiz transcribe --ocr recording.mov                 # also read on-screen text from each frame
 whiz transcribe --dry-run recording.mov             # see what it would run, without running it
 ```
 
@@ -262,6 +265,15 @@ whiz analyze recording.mov --summary
 whiz analyze recording.mov --prompt "What risks? {transcript}"
 ```
 
+### `whiz ocr engines | install | run | test`
+
+Manage OCR engines and read on-screen text from frames captured by a previous run. `engines` shows what's installed, `install` prints (or runs) the install command for one, `run` OCRs an existing `.frames.json` in place, and `test` OCRs a single image so you can compare engines. See [On-screen text (OCR)](#on-screen-text-ocr) for the full story.
+
+```bash
+whiz ocr engines                 # what's available on this machine
+whiz ocr run recording.mov       # OCR the frames of an existing run
+```
+
 ## Configuration
 
 Config lives at `~/.config/whiz/config.toml` (created on first `config edit`/`set`):
@@ -285,6 +297,14 @@ num_speakers = 0
 cluster_threshold = 0.9
 diarization_segmentation_model = ""
 diarization_embedding_model = ""
+# --- OCR (on-screen text from frames) ---
+ocr = false                  # opt-in; --ocr enables per run
+ocr_engine = "auto"          # auto | apple | rapidocr | tesseract
+ocr_languages = ["en-US"]
+ocr_min_chars = 8            # drop near-empty results as noise
+ocr_max_chars = 1200         # truncate one frame's text (token guard)
+ocr_dedupe = true            # reuse OCR across byte-identical frames
+ocr_min_width = 1920         # frames are widened when OCR is on
 # --- AI analysis (Ollama / OpenAI-compatible) ---
 ai_base_url = "http://localhost:11434/v1"
 ai_model = ""
@@ -447,6 +467,94 @@ Naming precedence when profiles exist: voice-profile auto-match seeds the names,
 
 The embedding pass reuses the diarization cache, so on a cached run profile matching adds only seconds. Tune the threshold with `whiz config set speaker_match_threshold=0.85` (higher = stricter, fewer auto-assignments) or disable saving with `whiz config set save_voice_profiles=false`.
 
+## On-screen text (OCR)
+
+whiz already captures one frame per segment. Without OCR those frames only reach the model
+through the *vision* path, which needs a vision-capable model — so on a text-only model the
+visible screen is simply lost. `--ocr` reads the text out of each frame and folds it into the
+transcript, which means **any** model, including a 4B one, can reason about what was on screen.
+
+That matters beyond convenience: text tokens are far cheaper than image tokens, and locally
+you skip the vision encoder entirely.
+
+```bash
+# One-time: install an engine (whiz picks the best one for your platform and asks first)
+whiz ocr install
+
+# Transcribe a screen recording and read the screen
+whiz transcribe --ocr recording.mov
+
+# Add on-screen text to a recording you already transcribed — no re-transcription,
+# no re-extraction, just the OCR pass over the existing frames
+whiz ocr run recording.mov
+
+# Now a plain text model can see the screen
+whiz analyze recording.mov --no-vision --plan
+```
+
+OCR is **opt-in**: it's the slowest stage in the pipeline (one pass per frame, and an
+hour-long recording is several hundred frames). Turn it on permanently with
+`whiz config set ocr=true`.
+
+### Engines
+
+| Engine | Platform | Install | Notes |
+|--------|----------|---------|-------|
+| `apple` | macOS 10.15+ | `pipx inject whiz ocrmac` | Apple's Vision framework. Fastest (~130–210 ms/frame) and the most accurate on UI text. No model download |
+| `rapidocr` | any | `pipx inject whiz rapidocr onnxruntime` | PP-OCR models on onnxruntime. Nearly free if you already installed sherpa-onnx for diarization |
+| `tesseract` | any | `brew install tesseract` | Driven over a subprocess, so no Python bindings needed. Weakest of the three on dark-mode UI and small fonts |
+
+`auto` (the default) picks Apple Vision on macOS and RapidOCR elsewhere, falling back down
+the list. Pin one with `whiz config set ocr_engine=apple`.
+
+### What OCR changes
+
+- **`<stem>.frames.json`** — manifest version 2 gains an `ocr` field per segment plus the
+  engine that produced it. Version 1 manifests still load.
+- **AI transcript** — each segment gains an indented `screen:` line:
+  ```
+  [00:12:03] Vadim: we should use GET for the export endpoint
+             screen: Export API · Method: POST · /v1/export · status 400
+  ```
+  Each frame's text is diffed against the previous frame, so the line says **what changed**
+  rather than restating the whole desktop. This matters more than it sounds: on a real
+  4.8-minute Slack recording, 74% of OCR lines repeated frame to frame (menu bar, sidebar,
+  window chrome). Without diffing the screen text was 96% of the prompt and split a
+  one-chunk transcript into sixteen; with it, the same recording is 29K chars over 5 chunks.
+  The full per-frame text stays in the manifest, so the HTML transcript and its search
+  remain complete. This feeds the "reconcile SCREEN vs TRANSCRIPT" instruction that whiz
+  already sends with every analysis.
+- **HTML transcript** — each cue gets a collapsed **screen** block, and because the search
+  box filters on the full cue text, all on-screen text becomes searchable.
+- **Frame width** — small UI text doesn't survive the default 1280px downscale, so whiz
+  raises the width to `ocr_min_width` (1920) when OCR is on and tells you it did.
+
+Byte-identical frames are OCR'd once (`ocr_dedupe`). Note this fires rarely on live screen
+recordings — a moving cursor or a ticking clock makes consecutive frames differ even when the
+screen looks static — so the line-level diffing above is what actually keeps the prompt small.
+A frame that fails to OCR yields empty text and is counted; it never aborts the run.
+
+### `whiz ocr engines`
+
+Show which engines are installed, what whiz would use, and the exact command to install the
+rest.
+
+### `whiz ocr install [engine]`
+
+Install an engine after a y/N confirmation. Package installs (`ocrmac`, `rapidocr`) are run
+for you via `pipx inject` or `pip` depending on how whiz itself was installed; installs that
+need `sudo` are printed rather than executed.
+
+### `whiz ocr run <file>`
+
+Read on-screen text for an existing frames manifest and update it in place. This is the cheap
+loop — like `whiz merge`, it reuses what's already on disk.
+
+### `whiz ocr test <image>`
+
+OCR a single image and print the result with timing. Useful for comparing engines before
+committing to one.
+
 ## AI analysis (auto-detect, summary, action items, implementation plans, vision)
 
 `whiz analyze` sends a prior transcript (and optionally on-screen frames) to a chat model via an OpenAI-compatible API ([Ollama](https://ollama.com) by default). It produces a markdown analysis (`.analysis.md`) alongside the input and prints the response to stdout. Requires a prior `whiz transcribe` of a video (which auto-produces speakers + screenshots) or an audio run with `--speakers` (and `--screenshots` for `--vision`).
@@ -547,6 +655,27 @@ Long transcripts (or many frames) aren't sent to the model as one giant blob —
 Built-in modes (summary / action items / plan) route through a dedicated map + synthesize prompt pair so the final answer has the same structure the non-chunked path would produce. A custom `--prompt` is applied per chunk (with the rolling context prepended for chunks after the first) and the per-chunk answers are merged with a generic reduce. Short transcripts (one chunk) skip the map-reduce and use a single call, identical to the old behavior. Each chunk call is logged in the terminal (`analyzing chunk k/n ...`, then `synthesizing ...`) so you can follow progress.
 
 Output is written to `<stem>.analysis.md` (the prompt + the response) and the response is also printed to stdout.
+
+### Tuning chunk size (`ai_chunk_chars`)
+
+Long transcripts are split into chunks and analyzed map-reduce style; **each chunk is one
+model call**, so `ai_chunk_chars` is the main lever on both run time and (for paid models)
+cost. The default 6000 suits a small local model with a modest context.
+
+It is a genuine trade-off, not a free win — more chunks means more calls, but also more
+extracted detail, because each chunk is enumerated separately. Measured on a 4.8-minute
+screen recording (29k chars of transcript after OCR diffing, `qwen3.5:397b` in the cloud):
+
+| `ai_chunk_chars` | calls | time | `## Essentials` bullets |
+| --- | --- | --- | --- |
+| 40000 | 1 | 1m32s | 17 |
+| 12000 | 3 | 4m59s | 124 |
+| 6000 | 7 | 8m57s | 199 |
+
+Raise it when you want a faster, higher-altitude answer; lower it when you want the dense
+`## Essentials` extraction. Set it to `0` to never chunk. Note that whiz does not yet read
+the server's context length, so a chunk larger than the model can hold is silently
+truncated server-side.
 
 ## Essentials (always on): concentrated context for a later analysis
 

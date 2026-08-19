@@ -146,3 +146,35 @@ def test_find_vad_model_prefers_known_versions(tmp_path, monkeypatch):
     # v5.1.2 is listed first in VAD_MODELS (preferred).
     assert p is not None
     assert p.name == "ggml-silero-v5.1.2.bin"
+
+
+# ---------- download name resolution (regression: `download turbo` 404'd) ----------
+
+def test_resolve_download_name_expands_turbo_alias():
+    """`whiz models download turbo` must not become the nonexistent ggml-turbo.bin."""
+    assert M.resolve_download_name("turbo") == "ggml-large-v3-turbo-q5_0.bin"
+
+
+def test_resolve_download_name_prefers_exact_known_model():
+    assert M.resolve_download_name("large-v3") == "ggml-large-v3.bin"
+    assert M.resolve_download_name("medium") == "ggml-medium.bin"
+    assert M.resolve_download_name("base") == "ggml-base.bin"
+
+
+def test_resolve_download_name_passes_through_full_filenames():
+    assert M.resolve_download_name("ggml-large-v3.bin") == "ggml-large-v3.bin"
+    assert M.resolve_download_name("ggml-large-v3") == "ggml-large-v3.bin"
+
+
+def test_resolve_download_name_handles_quantized_alias():
+    assert M.resolve_download_name("large-v3-turbo-q5_0") == "ggml-large-v3-turbo-q5_0.bin"
+
+
+def test_resolve_download_name_unknown_falls_through():
+    """An unrecognized name still gets a plausible URL rather than an exception."""
+    assert M.resolve_download_name("brand-new-model") == "ggml-brand-new-model.bin"
+
+
+def test_resolve_download_name_every_alias_maps_to_a_known_model():
+    for alias in ("turbo", "large-v3", "medium", "small", "base", "tiny"):
+        assert M.resolve_download_name(alias) in M.KNOWN_MODELS

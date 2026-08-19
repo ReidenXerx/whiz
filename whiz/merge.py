@@ -223,6 +223,7 @@ def format_speakers_html(
     merged: list[tuple[WhisperSeg, str]],
     frames_dir: Path | None = None,
     title: str = "whiz transcript",
+    entries: list | None = None,
 ) -> str:
     """Emit a self-contained HTML transcript.
 
@@ -231,12 +232,28 @@ def format_speakers_html(
     frames are inlined as ``data:image/jpeg;base64`` URIs so the single HTML
     file is portable with every screenshot embedded — no external files needed.
 
+    ``entries`` is the frames manifest (``list[FrameEntry]``); when its rows
+    carry OCR text (from ``--ocr``) each cue gets a collapsed "screen" block.
+    Because the search box filters on the cue's full text content, on-screen
+    text becomes searchable too.
+
     The page has a sticky header with the title, a speaker legend, and a
     live search box that filters cues by text or speaker. Clicking any frame
     thumbnail opens a fullscreen lightbox overlay (close with the button, the
     backdrop, or the Escape key).
     """
     import base64
+
+    # Manifest rows are 1-based and index-aligned with `merged`, so a plain
+    # {index: ocr} lookup joins the two without re-deriving anything.
+    ocr_by_index: dict[int, str] = {}
+    for entry in entries or ():
+        text = getattr(entry, "ocr", "")
+        if text:
+            try:
+                ocr_by_index[int(getattr(entry, "index"))] = text
+            except (TypeError, ValueError):
+                continue
 
     # Gather speakers in order of appearance for the legend.
     speakers_in_order: list[str] = []
@@ -312,6 +329,23 @@ main { max-width: 920px; margin: 0 auto; padding: 1em; }
 .cue .speaker { font-weight: 650; font-size: .92em; }
 .cue .text { font-size: .95em; white-space: pre-wrap; word-wrap: break-word; }
 .cue.hidden { display: none; }
+/* On-screen text (OCR), collapsed so it doesn't crowd the spoken transcript. */
+.cue details.screen { margin-top: .35em; }
+.cue details.screen summary {
+  cursor: pointer; color: var(--muted); font-size: .76em; font-weight: 600;
+  letter-spacing: .02em; text-transform: uppercase; list-style: none; user-select: none;
+}
+.cue details.screen summary::-webkit-details-marker { display: none; }
+.cue details.screen summary::before { content: "▸ "; display: inline-block; transition: transform .12s; }
+.cue details.screen[open] summary::before { content: "▾ "; }
+.cue details.screen summary:hover { color: var(--text); }
+.cue details.screen .screen-text {
+  margin-top: .3em; padding: .45em .6em;
+  background: #f6f8fa; border: 1px solid var(--border); border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+  font-size: .78em; line-height: 1.45; color: var(--muted);
+  white-space: pre-wrap; word-wrap: break-word; max-height: 16em; overflow: auto;
+}
 footer.foot { text-align: center; color: var(--muted); font-size: .8em; padding: 1.5em; }
 /* Lightbox */
 .lightbox { position: fixed; inset: 0; background: rgba(0,0,0,.86); z-index: 100;
@@ -327,9 +361,32 @@ footer.foot { text-align: center; color: var(--muted); font-size: .8em; padding:
 }
 """
 
-    js = r"""
+    # Search is always shipped (the box is always rendered); the lightbox script
+    # only ships when at least one frame was inlined, since it binds to elements
+    # that otherwise don't exist.
+    search_js = r"""
+(function () {
+  var search = document.getElementById('search');
+  if (!search) return;
+  search.addEventListener('input', function () {
+    var q = search.value.trim().toLowerCase();
+    document.querySelectorAll('.cue').forEach(function (cue) {
+      var hay = (cue.textContent || '').toLowerCase();
+      var hit = !q || hay.indexOf(q) !== -1;
+      cue.classList.toggle('hidden', !hit);
+      // Reveal a match that lives inside the collapsed on-screen text block,
+      // otherwise the cue looks like a false positive.
+      var det = cue.querySelector('details.screen');
+      if (det) det.open = !!(q && hit && (det.textContent || '').toLowerCase().indexOf(q) !== -1);
+    });
+  });
+})();
+"""
+
+    lightbox_js = r"""
 (function () {
   var box = document.getElementById('lightbox');
+  if (!box) return;
   var boxImg = box.querySelector('img');
   function open(src) { boxImg.src = src; box.classList.add('open'); }
   function close() { box.classList.remove('open'); boxImg.src = ''; }
@@ -340,16 +397,6 @@ footer.foot { text-align: center; color: var(--muted); font-size: .8em; padding:
   });
   box.addEventListener('click', function (e) { if (e.target === box || e.target.classList.contains('close')) close(); });
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape') close(); });
-  var search = document.getElementById('search');
-  if (search) {
-    search.addEventListener('input', function () {
-      var q = search.value.trim().toLowerCase();
-      document.querySelectorAll('.cue').forEach(function (cue) {
-        var hay = (cue.textContent || '').toLowerCase();
-        cue.classList.toggle('hidden', q && hay.indexOf(q) === -1);
-      });
-    });
-  }
 })();
 """
 
@@ -401,6 +448,12 @@ footer.foot { text-align: center; color: var(--muted); font-size: .8em; padding:
         parts.append(f'<span class="speaker" style="color:{color}">{_html_escape(label)}</span>')
         parts.append('</div>')  # .meta
         parts.append(f'<div class="text">{_html_escape(text)}</div>')
+        screen = ocr_by_index.get(i, "")
+        if screen:
+            parts.append('<details class="screen">')
+            parts.append('<summary>screen</summary>')
+            parts.append(f'<div class="screen-text">{_html_escape(screen)}</div>')
+            parts.append('</details>')
         parts.append('</div></div>')  # .body and .cue
     parts.append('</main>')
 
@@ -414,7 +467,8 @@ footer.foot { text-align: center; color: var(--muted); font-size: .8em; padding:
         parts.append('<button class="close" aria-label="Close">&times;</button>')
         parts.append('<img alt="fullscreen frame">')
         parts.append('</div>')
-        parts.append(f'<script>{js}</script>')
+        parts.append(f'<script>{lightbox_js}</script>')
+    parts.append(f'<script>{search_js}</script>')
 
     parts.append('</body>\n</html>')
     return "\n".join(parts)

@@ -204,10 +204,15 @@ def test_format_speakers_html_frame_clickable_opens_lightbox(tmp_path):
 
 
 def test_format_speakers_html_no_lightbox_without_frames(tmp_path):
-    """No frames => no <img>, no lightbox overlay, no <script>."""
+    """No frames => no <img> and no lightbox overlay, but search still works.
+
+    The search box is always rendered in the header, so its script must ship
+    even for a frames-less transcript; only the lightbox is conditional.
+    """
     merged = [(_seg(0.0, 1.0, "hi"), "Speaker A")]
     empty_dir = tmp_path / "frames"
     empty_dir.mkdir()
     html = MR.format_speakers_html(merged, frames_dir=empty_dir)
     assert 'class="lightbox"' not in html
-    assert "<script>" not in html
+    assert "<img" not in html
+    assert "getElementById('search')" in html
