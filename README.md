@@ -1,6 +1,6 @@
 # whiz
 
-[![Version](https://img.shields.io/badge/version-0.11.11-blue)](https://github.com/ReidenXerx/whiz/releases)
+[![Version](https://img.shields.io/badge/version-0.11.12-blue)](https://github.com/ReidenXerx/whiz/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Python ≥3.11](https://img.shields.io/badge/python-%E2%89%A53.11-blue)](https://www.python.org/)
 [![macOS](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](#requirements)
@@ -33,7 +33,7 @@ Most transcription tools stop at text. whiz is the one-command path from a scree
 
 - **One command, everything** — transcribe + diarize + name speakers + capture frames + write HTML, automatically.
 - **Knows your speakers** — voice profiles save each speaker once you name them; later recordings with the same people are labeled automatically, no flags needed. Profiles even merge across recordings and get more accurate over time.
-- **Sees the screen** — auto-enables vision analysis when frames exist and your model is vision-capable. The analyst posture actively reconciles what's visible on screen with what was said, surfacing discrepancies.
+- **Sees the screen** — auto-enables vision analysis when frames exist and your model is vision-capable. The analyst posture actively reconciles what's visible on screen with what was said, surfacing discrepancies, and treats consecutive frames as a visual timeline (not independent screenshots) so it reasons across the sequence.
 - **Made for long videos** — a rolling-context map-reduce keeps each model call focused on a small, coherent window so analysis quality stays high even on hour-long recordings. Zero extra calls.
 - **Essentials you feed back** — every analysis appends a dense `## Essentials` bullet list (every fact, decision, number, UI detail) designed as concentrated context for a later `whiz analyze`. No flag, no second file.
 - **Local-first & private** — runs entirely on your machine via [Ollama](https://ollama.com) by default. No uploads, no API keys unless you point it at a cloud provider.
@@ -528,7 +528,7 @@ The implementation-plan output (from `--plan` or auto-detected `PLAN`) follows t
 
 Long transcripts (or many frames) aren't sent to the model as one giant blob — that overloads the context window and degrades quality. Instead whiz splits the input into contiguous chunks and runs a rolling-context map-reduce, the way a chat accumulates context turn by turn:
 
-1. **Map (rolling context)** — each chunk is analyzed carrying forward the prior chunks' partial analyses as a running context block, so chunk N can refer back to speakers/decisions/entities/open threads established in chunks 1..N-1 instead of analyzing in a vacuum. With `--vision`, each chunk carries only the frames for its own segments, so the vision model sees a small, coherent window of "these frames + this text" + the running context instead of every frame at once. The context is a sliding window (default last 3 partials) so prompt growth stays bounded on very long inputs.
+1. **Map (rolling context)** — each chunk is analyzed carrying forward the prior chunks' partial analyses as a running context block, so chunk N can refer back to speakers/decisions/entities/open threads established in chunks 1..N-1 instead of analyzing in a vacuum. With `--vision`, each chunk carries only the frames for its own segments, so the vision model sees a small, coherent window of "these frames + this text" + the running context instead of every frame at once. A frame manifest labels the frames 1..N with timestamps and speakers so the model treats them as an ordered visual timeline rather than a bag of images. The context is a sliding window (default last 3 partials) so prompt growth stays bounded on very long inputs.
 2. **Reduce** — the per-chunk partial analyses (already coherent with each other thanks to the rolling context) are merged into one final answer: duplicates removed, conflicts reconciled, chronological order kept, speaker/time references preserved.
 
 Built-in modes (summary / action items / plan) route through a dedicated map + synthesize prompt pair so the final answer has the same structure the non-chunked path would produce. A custom `--prompt` is applied per chunk (with the rolling context prepended for chunks after the first) and the per-chunk answers are merged with a generic reduce. Short transcripts (one chunk) skip the map-reduce and use a single call, identical to the old behavior. Each chunk call is logged in the terminal (`analyzing chunk k/n ...`, then `synthesizing ...`) so you can follow progress.

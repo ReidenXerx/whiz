@@ -146,6 +146,14 @@ _ANALYST_POSTURE = (
     "interpretation involved), or [LOW] (one or both sides are unclear/partial). "
     "If you cannot confidently read both sides, omit the item entirely rather "
     "than guess. "
+    "When multiple frames are provided for a chunk, treat them as a VISUAL "
+    "TIMELINE, not independent screenshots. A single topic, decision, or unit "
+    "of sense often spans several consecutive frames — reason across the "
+    "sequence, not frame-by-frame in isolation. Transitions between adjacent "
+    "frames (UI state changes, new elements appearing, values changing, panels "
+    "opening/closing) are as meaningful as any single frame's content. Anchor "
+    "your reconciliation to the window of frames + transcript lines together, "
+    "not to individual frame-transcript pairs. "
 )
 # Essentials: always-on augmentation. Every `whiz analyze` run produces the
 # normal analysis (summary / plan / custom) AND appends a dense `## Essentials`
@@ -608,8 +616,10 @@ def analyze(
         # One chunk (or none): single call, preserves prior behavior.
         if len(chunks) <= 1:
             frame_paths = _frames_for_entries(entries, frames_dir)
+            manifest = _frame_manifest(entries)
+            vision_prompt = manifest + prompt_template if manifest else prompt_template
             return chat_vision(
-                prompt_template, transcript, frame_paths,
+                vision_prompt, transcript, frame_paths,
                 base_url=base_url, model=model, api_key=api_key, max_frames=max_frames,
             )
         return _map_reduce_vision(
@@ -645,6 +655,32 @@ def _frames_for_entries(entries, frames_dir) -> list[Path]:
     return out
 
 
+def _frame_manifest(entries) -> str:
+    """Build a text frame-timeline label so the model knows image order.
+
+    Vision models receive images as an unordered content array. This manifest
+    tells the model which image is which (by 1-based position) and the timestamp
+    each corresponds to, so it can treat them as a sequential visual timeline
+    rather than a bag of independent screenshots.
+
+    Returns an empty string when there are no frame-bearing entries.
+    """
+    lines: list[str] = []
+    idx = 0
+    for e in entries:
+        frame = getattr(e, "frame", "")
+        if not frame:
+            continue
+        idx += 1
+        ts = _fmt_clock(getattr(e, "start", 0.0))
+        speaker = getattr(e, "speaker", "")
+        lines.append(f"  Frame {idx}: [{ts}] {speaker}".rstrip())
+    if not lines:
+        return ""
+    header = f"Frame timeline ({idx} frame{'s' if idx != 1 else ''}, in time order):"
+    return header + "\n" + "\n".join(lines) + "\n\n"
+
+
 def _running_context(partials: list[str], context_turns: int) -> str:
     """Build the running-context block from prior partials (sliding window).
 
@@ -668,6 +704,7 @@ def _map_reduce_vision(
     for k, chunk in enumerate(chunks, start=1):
         chunk_transcript = transcript_text(chunk)
         frames = _frames_for_entries(chunk, frames_dir)
+        manifest = _frame_manifest(chunk)
         if on_progress:
             on_progress(f"analyzing chunk {k}/{n} ({len(chunk)} segments, {len(frames)} frames)")
         context_block = _running_context(partials, context_turns)
@@ -678,9 +715,13 @@ def _map_reduce_vision(
                   .replace("{n}", str(n))
                   .replace("{context_block}", context_block)
                   .replace("{transcript}", chunk_transcript))
+            if manifest:
+                mp = manifest + mp
         else:
             # Custom prompt: prepend the running context (no MAP_PROMPT wrapper).
             mp = context_block + prompt_template.replace("{transcript}", chunk_transcript)
+            if manifest:
+                mp = manifest + mp
         partial = chat_vision(
             mp, chunk_transcript, frames,
             base_url=base_url, model=model, api_key=api_key, max_frames=max_frames,

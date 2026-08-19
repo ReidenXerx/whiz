@@ -74,6 +74,9 @@ def test_essentials_instruction_has_required_markers():
     assert "[MEDIUM]" in AI._ANALYST_POSTURE
     assert "[LOW]" in AI._ANALYST_POSTURE
     assert "legibly readable" in AI._ANALYST_POSTURE
+    # Visual timeline directive: reason across frame sequences, not in isolation.
+    assert "VISUAL TIMELINE" in AI._ANALYST_POSTURE
+    assert "reason across the sequence" in AI._ANALYST_POSTURE
 
 
 def test_plan_prompt_has_required_sections():
@@ -665,6 +668,10 @@ def test_analyze_long_vision_map_reduce(monkeypatch, tmp_path):
     assert vision_calls[0][1] == 8
     assert vision_calls[1][1] == 8
     assert vision_calls[2][1] == 4
+    # Each map prompt carries the frame manifest for its chunk's frames.
+    assert "Frame timeline" in vision_calls[0][0]
+    assert "Frame timeline" in vision_calls[1][0]
+    assert "Frame timeline" in vision_calls[2][0]
     # 1 synth text call.
     assert len(text_calls) == 1
     assert "combining" in text_calls[0]
@@ -833,3 +840,138 @@ def test_analyze_progress_callback_invoked(monkeypatch):
     )
     assert any("analyzing chunk" in m for m in msgs)
     assert any("synthesizing" in m for m in msgs)
+
+
+# ---------- frame manifest (visual timeline) ----------
+
+def test_frame_manifest_labels_frames_in_order():
+    """The manifest labels frames 1..N with timestamp + speaker, in time order."""
+    from whiz.screenshots import FrameEntry
+    entries = [
+        FrameEntry(index=1, start=603.0, end=605.0, speaker="Alice", text="x", frame="seg0001.jpg"),
+        FrameEntry(index=2, start=615.0, end=617.0, speaker="Bob", text="y", frame="seg0002.jpg"),
+        FrameEntry(index=3, start=630.0, end=632.0, speaker="Alice", text="z", frame="seg0003.jpg"),
+    ]
+    manifest = AI._frame_manifest(entries)
+    assert "Frame timeline (3 frames, in time order):" in manifest
+    # Frames are numbered 1..3 and carry timestamp + speaker.
+    assert "Frame 1: [00:10:03] Alice" in manifest
+    assert "Frame 2: [00:10:15] Bob" in manifest
+    assert "Frame 3: [00:10:30] Alice" in manifest
+    # The lines appear in the manifest in time order.
+    assert manifest.index("Frame 1:") < manifest.index("Frame 2:") < manifest.index("Frame 3:")
+
+
+def test_frame_manifest_skips_entries_without_frames():
+    """Entries with no frame path are skipped; numbering is contiguous."""
+    from whiz.screenshots import FrameEntry
+    entries = [
+        FrameEntry(index=1, start=0.0, end=1.0, speaker="A", text="x", frame="seg0001.jpg"),
+        FrameEntry(index=2, start=1.0, end=2.0, speaker="B", text="y", frame=""),  # no frame
+        FrameEntry(index=3, start=2.0, end=3.0, speaker="C", text="z", frame="seg0003.jpg"),
+    ]
+    manifest = AI._frame_manifest(entries)
+    # Only 2 frames in the manifest (entry 2 skipped), numbering 1..2.
+    assert "Frame timeline (2 frames, in time order):" in manifest
+    assert "Frame 1: [00:00:00] A" in manifest
+    assert "Frame 2: [00:00:02] C" in manifest
+    assert "Frame 3:" not in manifest
+
+
+def test_frame_manifest_empty_when_no_frames():
+    """No frame-bearing entries → empty manifest string."""
+    from whiz.screenshots import FrameEntry
+    entries = [
+        FrameEntry(index=1, start=0.0, end=1.0, speaker="A", text="x", frame=""),
+        FrameEntry(index=2, start=1.0, end=2.0, speaker="B", text="y", frame=""),
+    ]
+    assert AI._frame_manifest(entries) == ""
+    assert AI._frame_manifest([]) == ""
+
+
+def test_frame_manifest_single_frame_grammar():
+    """A single frame uses 'frame' (singular), not 'frames'."""
+    from whiz.screenshots import FrameEntry
+    entries = [
+        FrameEntry(index=1, start=5.0, end=6.0, speaker="A", text="x", frame="seg0001.jpg"),
+    ]
+    manifest = AI._frame_manifest(entries)
+    assert "Frame timeline (1 frame, in time order):" in manifest
+    assert "Frame 1: [00:00:05] A" in manifest
+
+
+def test_analyze_short_vision_single_call_has_manifest(monkeypatch, tmp_path):
+    """Single-call vision path prepends the frame manifest to the prompt."""
+    from whiz.screenshots import FrameEntry
+    entries = [
+        FrameEntry(index=1, start=10.0, end=11.0, speaker="A", text="hi", frame="seg0001.jpg"),
+        FrameEntry(index=2, start=20.0, end=21.0, speaker="B", text="yo", frame="seg0002.jpg"),
+    ]
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    for e in entries:
+        (frames_dir / e.frame).write_bytes(b"\xff\xd8img\xff\xd9")
+
+    calls = []
+    def fake_chat_vision(prompt, transcript, frames, *, base_url, model, api_key, max_frames):
+        calls.append(prompt)
+        return "vision answer"
+    monkeypatch.setattr(AI, "chat_vision", fake_chat_vision)
+    monkeypatch.setattr(AI, "chat_text", lambda *a, **k: "SHOULD NOT BE CALLED")
+
+    AI.analyze(
+        AI.SUMMARY_PROMPT, AI.transcript_text(entries),
+        base_url="http://x/v1", model="m", api_key="",
+        entries=entries, frames_dir=frames_dir, use_vision=True, max_frames=50,
+    )
+    assert len(calls) == 1
+    prompt = calls[0]
+    # The manifest is prepended before the prompt body.
+    assert prompt.startswith("Frame timeline (2 frames, in time order):")
+    assert "Frame 1: [00:00:10] A" in prompt
+    assert "Frame 2: [00:00:20] B" in prompt
+    # The augmented prompt body (Essentials) still follows.
+    assert "## Essentials" in prompt
+
+
+def test_analyze_long_vision_map_reduce_manifest_per_chunk(monkeypatch, tmp_path):
+    """Map-reduce vision: each chunk's map prompt carries the manifest for
+    its own frames; the manifest uses per-chunk frame numbering (1..N per chunk)."""
+    from whiz.screenshots import FrameEntry
+    entries = [
+        FrameEntry(index=i, start=float(i), end=float(i + 1),
+                   speaker="A", text=f"seg {i}", frame=f"seg{i:04d}.jpg")
+        for i in range(1, 17)  # 16 entries -> 2 chunks of 8
+    ]
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()
+    for e in entries:
+        (frames_dir / e.frame).write_bytes(b"\xff\xd8img\xff\xd9")
+
+    vision_prompts = []
+    def fake_chat_vision(prompt, transcript, frames, *, base_url, model, api_key, max_frames):
+        vision_prompts.append(prompt)
+        return f"p{len(vision_prompts)}"
+    monkeypatch.setattr(AI, "chat_vision", fake_chat_vision)
+    monkeypatch.setattr(AI, "chat_text", lambda *a, **k: "SYNTH")
+
+    AI.analyze(
+        AI.PLAN_PROMPT, AI.transcript_text(entries),
+        base_url="http://x/v1", model="m", api_key="",
+        entries=entries, frames_dir=frames_dir, use_vision=True,
+        max_frames=50, chunk_size=8,
+    )
+    assert len(vision_prompts) == 2
+    # Chunk 1: frames 1-8 (global entries 1-8).
+    p1 = vision_prompts[0]
+    assert "Frame timeline (8 frames, in time order):" in p1
+    assert "Frame 1: [00:00:01] A" in p1
+    assert "Frame 8: [00:00:08] A" in p1
+    # Chunk 2: frames re-numbered 1-8 within the chunk (global entries 9-16).
+    p2 = vision_prompts[1]
+    assert "Frame timeline (8 frames, in time order):" in p2
+    assert "Frame 1: [00:00:09] A" in p2
+    assert "Frame 8: [00:00:16] A" in p2
+    # The manifest is prepended before the MAP_PROMPT body.
+    assert p1.startswith("Frame timeline")
+    assert p2.startswith("Frame timeline")
