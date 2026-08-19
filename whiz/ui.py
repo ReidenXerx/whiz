@@ -12,8 +12,11 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
-from rich.console import Console
+from rich.console import Console, Group
+from rich.panel import Panel
+from rich.rule import Rule
 from rich.table import Table
+from rich.text import Text
 from rich.theme import Theme
 
 from whiz.merge import speaker_palette
@@ -32,6 +35,7 @@ _THEME = Theme({
     "whiz.info": "blue",
     "whiz.timestamp": "dim cyan",
     "whiz.muted": "dim",
+    "whiz.rule": "dim cyan",
 })
 _console = Console(stderr=True, theme=_THEME, highlight=False)
 
@@ -41,22 +45,46 @@ def _is_tty() -> bool:
 
 
 def header(title: str, subtitle: str = "") -> None:
-    """Print a compact branded banner. Suppressed entirely when piped."""
+    """Print a compact branded banner inside a subtle bordered panel.
+
+    Suppresses the panel entirely when piped (plain ``title — subtitle``).
+    """
     if not _is_tty():
         if subtitle:
             print(f"{title} — {subtitle}", file=sys.stderr)
         else:
             print(title, file=sys.stderr)
         return
-    _console.print(f"[whiz.brand]⚡ {title}[/]", end="")
+    # Left: ⚡ brand + title. Right: subtitle, right-aligned on the same line.
+    left = Text.assemble(("⚡ ", "whiz.brand"), (title, "bold"))
     if subtitle:
-        _console.print(f" [whiz.dim]{subtitle}[/]")
+        # Use a two-column table so the subtitle sits flush right.
+        t = Table.grid(expand=True)
+        t.add_column(ratio=1)
+        t.add_column(justify="right")
+        t.add_row(left, Text(subtitle, "whiz.dim"))
+        body = t
     else:
-        _console.print()
+        body = left
+    _console.print(Panel(
+        body,
+        border_style="whiz.rule",
+        padding=(0, 1),
+        expand=True,
+    ))
+
+
+def rule() -> None:
+    """Print a thin horizontal rule to separate major phases. No-op when piped."""
+    if not _is_tty():
+        return
+    _console.print(Rule(style="whiz.rule"))
 
 
 def phase(label: str) -> None:
-    """Print a colored phase-step line, e.g. '▸ diarizing'."""
+    """Print a phase-step line, e.g. '▸ diarizing', preceded by a soft rule."""
+    if _is_tty():
+        _console.print(Rule(style="whiz.rule"))
     _console.print(f"[whiz.phase]▸[/] [bold]{label}[/]")
 
 
@@ -97,6 +125,25 @@ def note(msg: str) -> None:
     _console.print(msg)
 
 
+def wrote(label: str, path: Any) -> None:
+    """An aligned artifact-written line: a green check + label, then the path.
+
+    Renders as a two-line block so paths line up regardless of label length:
+        ✓ Wrote labeled SRT
+          recording.speakers.srt
+    """
+    mark = Text("✓ ", style="whiz.ok")
+    lbl = Text(label, style="whiz.ok")
+    if _is_tty():
+        t = Table.grid(expand=False)
+        t.add_column()
+        t.add_row(Text.assemble(mark, lbl))
+        t.add_row(Text("  " + str(path), style="whiz.dim"))
+        _console.print(t)
+    else:
+        print(f"✓ {label}: {path}", file=sys.stderr)
+
+
 def speaker_label_line(label: str) -> None:
     """Print a speaker label with its palette color and a 'said:' suffix."""
     hex_color = speaker_palette(label)
@@ -108,20 +155,33 @@ def tally(counts: list[tuple[str, int]]) -> None:
     if not counts:
         return
     _console.print(f"[whiz.kv.label]{'Speakers':<7}[/] [bold]{len(counts)}[/] detected")
+    # Align speaker names so the segment counts line up.
+    width = max((len(label) for label, _ in counts), default=0)
     for label, n in counts:
         hex_color = speaker_palette(label)
         _console.print(
-            f"    [{hex_color}]●[/] [bold]{label}[/] [whiz.muted]{n} segments[/]"
+            f"    [{hex_color}]●[/] [bold]{label:<{width}}[/]  [whiz.muted]{n} segments[/]"
         )
 
 
 def summary(items: list[str], title: str = "Done") -> None:
-    """Final footer: a check mark per written artifact. Suppressed when empty."""
+    """Final footer: a check-marked panel of written artifacts. Suppressed when empty."""
     if not items:
         return
-    _console.print(f"[whiz.ok]✓ {title}[/]")
-    for it in items:
-        _console.print(f"  [whiz.ok]·[/] {it}")
+    if not _is_tty():
+        print(f"✓ {title}", file=sys.stderr)
+        for it in items:
+            print(f"  · {it}", file=sys.stderr)
+        return
+    body_lines = [Text(f"  · {it}", style="whiz.dim") for it in items]
+    head = Text.assemble(("✓ ", "whiz.ok"), (f"{title} · {len(items)} file(s)", "whiz.ok"))
+    content = Group(head, *body_lines)
+    _console.print(Panel(
+        content,
+        border_style="whiz.rule",
+        padding=(0, 1),
+        expand=True,
+    ))
 
 
 def table(
@@ -136,6 +196,30 @@ def table(
     for row in rows:
         t.add_row(*[str(c) for c in row])
     _console.print(t)
+
+
+@contextmanager
+def spinner(label: str) -> Iterator:
+    """A live spinner for a long-running phase.
+
+    On a TTY: a rich ``Status`` spinner with the given label, updated via the
+    yielded ``update(msg)`` callable (e.g. progress from the map-reduce loop).
+    When piped/non-TTY: prints the label once and ``update`` becomes a no-op
+    (the underlying work still streams its own lines where applicable).
+    """
+    if not _is_tty():
+        _console.print(f"[whiz.phase]▸[/] [bold]{label}[/]")
+
+        def update(msg: str) -> None:
+            pass
+
+        yield update
+        return
+    with _console.status(f"[whiz.phase]▸[/] {label}", spinner="dots") as status:
+        def update(msg: str) -> None:
+            status.update(f"[whiz.phase]▸[/] {label} · {msg}")
+
+        yield update
 
 
 @contextmanager

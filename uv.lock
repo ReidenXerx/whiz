@@ -99,7 +99,7 @@ wheels = [
 
 [[package]]
 name = "whiz"
-version = "0.11.12"
+version = "0.12.0"
 source = { editable = "." }
 dependencies = [
     { name = "rich" },

@@ -223,11 +223,11 @@ def run_diarization(
     if use_cache and not dry_run:
         cached = load_diarization_cache(wav, num_speakers=num_speakers, threshold=threshold)
         if cached is not None:
-            print(
+            from whiz import ui
+            ui.muted(
                 f"Reusing diarization cache ({len(cached)} segments, "
                 f"num_speakers={num_speakers or 'auto'}, threshold={threshold}): "
-                f"{diar_cache_path(wav)}",
-                file=sys.stderr,
+                f"{diar_cache_path(wav)}"
             )
             return cached
 
@@ -249,7 +249,8 @@ def run_diarization(
 
     sherpa_onnx = _import_sherpa()
 
-    print("Loading sherpa-onnx diarization ...", file=sys.stderr)
+    from whiz import ui
+    ui.muted("Loading sherpa-onnx diarization ...")
     seg_cfg = sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(str(seg_model))
     segmentation = sherpa_onnx.OfflineSpeakerSegmentationModelConfig(pyannote=seg_cfg)
     embedding = sherpa_onnx.SpeakerEmbeddingExtractorConfig(str(emb_model))
@@ -276,14 +277,15 @@ def run_diarization(
             "whiz should have extracted 16kHz audio."
         )
 
-    print("Running speaker diarization ...", file=sys.stderr)
+    from whiz import ui
+    ui.muted("Running speaker diarization ...")
     result = sd.process(samples, callback=_progress_callback).sort_by_start_time()
     segments = [
         DiarSegment(start=r.start, end=r.end, speaker=r.speaker) for r in result
     ]
-    print(f"Diarization found {len(segments)} segments.", file=sys.stderr)
+    ui.muted(f"Diarization found {len(segments)} segments.")
     cache_path = _write_diarization_cache(wav, segments, num_speakers, threshold)
-    print(f"Saved diarization cache: {cache_path}", file=sys.stderr)
+    ui.muted(f"Saved diarization cache: {cache_path}")
     return segments
 
 

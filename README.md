@@ -1,6 +1,6 @@
 # whiz
 
-[![Version](https://img.shields.io/badge/version-0.11.12-blue)](https://github.com/ReidenXerx/whiz/releases)
+[![Version](https://img.shields.io/badge/version-0.12.0-blue)](https://github.com/ReidenXerx/whiz/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Python ≥3.11](https://img.shields.io/badge/python-%E2%89%A53.11-blue)](https://www.python.org/)
 [![macOS](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](#requirements)
@@ -118,34 +118,47 @@ whiz models download turbo      # ggml-large-v3-turbo-q5_0.bin — fast & accura
 
 ## Terminal output
 
-whiz has a branded, colorized terminal UI (degrades to clean plain text when piped):
+whiz has a branded, colorized terminal UI (degrades to clean plain text when piped) — a bordered banner, rule-separated phases, aligned artifact lines, and a final summary panel:
 
 ```
-⚡ whiz transcription
+┌──────────────────────────────────────────────────────────────────────────┐
+│ ⚡ whiz · transcription · v0.12.0                                         │
+└──────────────────────────────────────────────────────────────────────────┘
 Model   ggml-large-v3-turbo-q5_0.bin
 Input   recording.mov
 Audio   recording.wav
 Video input — auto-enabled: screenshots=on, speakers=on, name-speakers=on
+──────────────────────────────────────────────────────────────────────────
 ▸ transcribing
 [0:12] whispertimings ...
+──────────────────────────────────────────────────────────────────────────
 ▸ diarizing
-Speakers 4 detected
-    ● Alice 181 segments
-    ● Bob   152 segments
-    ● Carol  12 segments
-    ● Dave    6 segments
+Speakers  4 detected
+    ● Alice   181 segments
+    ● Bob      152 segments
+    ● Carol     12 segments
+    ● Dave       6 segments
+──────────────────────────────────────────────────────────────────────────
 ▸ merging speakers
-Wrote labeled SRT:  recording.speakers.srt
-Wrote dialogue TXT: recording.speakers.txt
+  ✓ Wrote labeled SRT
+    recording.speakers.srt
+  ✓ Wrote dialogue TXT
+    recording.speakers.txt
+──────────────────────────────────────────────────────────────────────────
 ▸ capturing frames
-Wrote frames manifest: recording.frames.json
+  ✓ Wrote frames manifest
+    recording.frames.json
+──────────────────────────────────────────────────────────────────────────
 ▸ writing HTML transcript
-Wrote HTML transcript: recording.speakers.html
-✓ Done
-  · recording.speakers.srt
-  · recording.speakers.txt
-  · recording.frames.json
-  · recording.speakers.html
+  ✓ Wrote HTML transcript
+    recording.speakers.html
+┌──────────────────────────────────────────────────────────────────────────┐
+│ ✓ Done · 4 file(s)
+│   · recording.speakers.srt
+│   · recording.speakers.txt
+│   · recording.frames.json
+│   · recording.speakers.html
+└──────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Recipes

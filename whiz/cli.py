@@ -571,7 +571,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     config = cfg.load()
     cmd, model_path, wav, in_path, keep_wav, of_base, diarize_enabled, screenshots = _build_transcribe_args(args, config)
 
-    ui.header("whiz", "transcription")
+    ui.header("whiz", f"transcription · v{__version__}")
     ui.kv("Model", model_path)
     ui.kv("Input", in_path)
     if wav != in_path:
@@ -586,7 +586,8 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             flags.append("name-speakers=on" + (" (explicit)" if args.name_speakers else ""))
         if flags:
             ui.info(f"Video input — auto-enabled: {', '.join(flags)}")
-    ui.muted(f"Run:    {' '.join(cmd)}")
+    if config.verbose or args.verbose:
+        ui.muted(f"Run:    {' '.join(cmd)}")
 
     if args.dry_run:
         if diarize_enabled:
@@ -665,8 +666,8 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                     cluster_embeddings=cluster_embeddings or None,
                     save_profiles=config.save_voice_profiles and not args.no_voice_profiles,
                 )
-                ui.status(f"Wrote labeled SRT:  {srt_out}", kind="ok")
-                ui.status(f"Wrote dialogue TXT: {txt_out}", kind="ok")
+                ui.wrote("Wrote labeled SRT", srt_out)
+                ui.wrote("Wrote dialogue TXT", txt_out)
                 written.append(str(srt_out))
                 written.append(str(txt_out))
                 # Apply the resolved names to the caller's merged list so the
@@ -688,7 +689,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                     )
                     if result is not None:
                         frames_dir = result[0]
-                        ui.status(f"Wrote frames manifest: {result[1]}", kind="ok")
+                        ui.wrote("Wrote frames manifest", result[1])
                         written.append(str(result[1]))
                 # Write HTML after frames exist so they can be inlined.
                 if want_html and want_frames and frames_dir is not None:
@@ -702,7 +703,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                         title=in_path.name,
                     )
                     html_path = Path(str(of_base) + ".speakers.html")
-                    ui.status(f"Wrote HTML transcript: {html_path}", kind="ok")
+                    ui.wrote("Wrote HTML transcript", html_path)
                     written.append(str(html_path))
 
     # --- Screenshots without diarization ---
@@ -731,9 +732,9 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                     width=width,
                     dry_run=args.dry_run,
                 )
-                if result is not None:
-                    ui.status(f"Wrote frames manifest: {result[1]}", kind="ok")
-                    written.append(str(result[1]))
+        if result is not None:
+            ui.wrote("Wrote frames manifest", result[1])
+            written.append(str(result[1]))
 
     # Clean up the intermediate WAV unless asked to keep it.
     if wav != in_path and not keep_wav and wav.exists():
@@ -1127,17 +1128,17 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     if vmsg:
         ui.status(vmsg, kind=vkind or "info")
 
-    ui.phase("analyzing")
     ui.kv("Model", model)
     ui.muted(f"base_url: {base_url}  vision: {use_vision}  mode: {detected_mode}")
     frames_dir = SC.frames_dir_for(of_base) if use_vision else None
-    response = AI.analyze(
-        prompt_template, transcript,
-        base_url=base_url, model=model, api_key=api_key,
-        entries=entries, frames_dir=frames_dir,
-        use_vision=use_vision, max_frames=max_frames,
-        on_progress=lambda m: ui.muted(m),
-    )
+    with ui.spinner("analyzing") as spin:
+        response = AI.analyze(
+            prompt_template, transcript,
+            base_url=base_url, model=model, api_key=api_key,
+            entries=entries, frames_dir=frames_dir,
+            use_vision=use_vision, max_frames=max_frames,
+            on_progress=spin,
+        )
 
     # Write the .analysis.md (prompt + response) and print response to stdout.
     md = f"# whiz analysis — {in_path.name}\n\n"
@@ -1146,7 +1147,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     md += "## Response\n\n" + response + "\n"
     out_path = _analysis_output_path(of_base)
     out_path.write_text(md, encoding="utf-8")
-    ui.status(f"Wrote analysis: {out_path}", kind="ok")
+    ui.wrote("Wrote analysis", out_path)
     print(response)
     return 0
 
@@ -1189,7 +1190,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
             f"No whisper JSON found (looked for {json_path}).\n"
             "Run `whiz transcribe <file>` first to produce one, or pass --json <path>."
         )
-    ui.header("whiz", "merge")
+    ui.header("whiz", f"merge · v{__version__}")
     ui.kv("JSON", json_path)
 
     try:
@@ -1273,8 +1274,8 @@ def cmd_merge(args: argparse.Namespace) -> int:
             cluster_embeddings=cluster_embeddings or None,
             save_profiles=config.save_voice_profiles and not args.no_voice_profiles,
         )
-        ui.status(f"Wrote labeled SRT:  {srt_out}", kind="ok")
-        ui.status(f"Wrote dialogue TXT: {txt_out}", kind="ok")
+        ui.wrote("Wrote labeled SRT", srt_out)
+        ui.wrote("Wrote dialogue TXT", txt_out)
         written.append(str(srt_out))
         written.append(str(txt_out))
         # Apply the resolved names to the caller's merged list so the
@@ -1297,7 +1298,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         )
         if result is not None:
             frames_dir = result[0]
-            ui.status(f"Wrote frames manifest: {result[1]}", kind="ok")
+            ui.wrote("Wrote frames manifest", result[1])
             written.append(str(result[1]))
     # Write HTML after frames exist so they can be inlined.
     if _outputs_include(args, config, "html") and frames_dir is not None and merged:
@@ -1311,7 +1312,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
             title=in_path.name,
         )
         html_path = Path(str(of_base) + ".speakers.html")
-        ui.status(f"Wrote HTML transcript: {html_path}", kind="ok")
+        ui.wrote("Wrote HTML transcript", html_path)
         written.append(str(html_path))
     ui.summary(written)
     return 0
