@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "whiz"
-version = "0.12.0"
+version = "0.12.1"
 description = "A transcription CLI for meetings, screen recordings, and interviews — powered by whisper.cpp, with diarization, speaker naming, screenshots, HTML transcripts, and auto-detecting AI analysis (summary, action items, implementation plans)."
 readme = "README.md"
 license = { text = "MIT" }

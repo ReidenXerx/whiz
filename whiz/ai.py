@@ -154,6 +154,12 @@ _ANALYST_POSTURE = (
     "opening/closing) are as meaningful as any single frame's content. Anchor "
     "your reconciliation to the window of frames + transcript lines together, "
     "not to individual frame-transcript pairs. "
+    "Pay attention to the HUMAN texture of the call, not just the dry facts. "
+    "Speakers coin slang, invented words, in-jokes, meme-y language, and "
+    "absurd little moments — these are real signal about how the team thinks "
+    "and feels, not noise to filter out. Actively notice and quote them "
+    "(in the original language, then a one-line gloss in English if needed), "
+    "and mark each one 'FUN:' so they surface instead of being skipped. "
 )
 # Essentials: always-on augmentation. Every `whiz analyze` run produces the
 # normal analysis (summary / plan / custom) AND appends a dense `## Essentials`
@@ -175,7 +181,9 @@ _ESSENTIALS_TASK_SUFFIX = (
     "workflows, open questions, and rejected alternatives. One bullet per point, "
     "concise; prefix with timestamp and speaker when useful "
     "(e.g. '- [00:12:03] Vadim: ...'). Mark open questions 'OPEN:', rejected "
-    "alternatives 'REJECTED:', inferred points '(inferred)'. With frames, also "
+    "alternatives 'REJECTED:', inferred points '(inferred)', and any coined "
+    "slang / in-jokes / absurd or funny moments 'FUN:' (quote the original "
+    "wording, then gloss in English if it's not English). With frames, also "
     "capture visible on-screen text/schema. This section is for feeding to a "
     "later AI analysis as concentrated context."
 )
@@ -192,7 +200,9 @@ _ESSENTIALS_INSTRUCTION = (
     "rejected alternatives. One bullet per point, concise; prefix with timestamp "
     "and speaker when useful (e.g. '- [00:12:03] Vadim: ...'). Mark open "
     "questions 'OPEN:', rejected alternatives 'REJECTED:', inferred points "
-    "'(inferred)'. With frames, also capture visible on-screen text/schema. This "
+    "'(inferred)', and any coined slang / in-jokes / absurd or funny moments "
+    "'FUN:' (quote the original wording, then gloss in English if it's not "
+    "English). With frames, also capture visible on-screen text/schema. This "
     "section is for feeding to a later AI analysis as concentrated context."
 )
 # Appended to _CUSTOM_REDUCE_PROMPT (custom --prompt reduce step) so the synth

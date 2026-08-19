@@ -62,6 +62,9 @@ def test_essentials_instruction_has_required_markers():
     assert "OPEN:" in AI._ESSENTIALS_INSTRUCTION
     assert "REJECTED:" in AI._ESSENTIALS_INSTRUCTION
     assert "(inferred)" in AI._ESSENTIALS_INSTRUCTION
+    # FUN: marker — coined slang / in-jokes / absurd moments must surface.
+    assert "FUN:" in AI._ESSENTIALS_INSTRUCTION
+    assert "FUN:" in AI._ESSENTIALS_TASK_SUFFIX
     assert "## Essentials" in AI._ESSENTIALS_TASK_SUFFIX
     # The shared analyst posture (thoroughness + frame reconciliation) is folded
     # into every augmentation so it applies to the whole analysis.
@@ -77,6 +80,9 @@ def test_essentials_instruction_has_required_markers():
     # Visual timeline directive: reason across frame sequences, not in isolation.
     assert "VISUAL TIMELINE" in AI._ANALYST_POSTURE
     assert "reason across the sequence" in AI._ANALYST_POSTURE
+    # Human texture: notice slang/in-jokes/absurd moments, mark them FUN:.
+    assert "FUN:" in AI._ANALYST_POSTURE
+    assert "not noise to filter out" in AI._ANALYST_POSTURE
 
 
 def test_plan_prompt_has_required_sections():
