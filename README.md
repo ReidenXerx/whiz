@@ -1,6 +1,6 @@
 # whiz
 
-[![Version](https://img.shields.io/badge/version-0.12.1-blue)](https://github.com/ReidenXerx/whiz/releases)
+[![Version](https://img.shields.io/badge/version-0.12.2-blue)](https://github.com/ReidenXerx/whiz/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Python ≥3.11](https://img.shields.io/badge/python-%E2%89%A53.11-blue)](https://www.python.org/)
 [![macOS](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](#requirements)
@@ -475,6 +475,7 @@ When you run `whiz analyze` with **no mode flag**, whiz first asks the model to 
 
 - **MEETING** — a standup, review, decision meeting, interview, or general conversation → summary + action items.
 - **PLAN** — a discussion about building, implementing, fixing, or changing a specific feature/bug/task → a structured implementation plan.
+- **WALKTHROUGH — primarily one person explaining, showing, or describing an existing system, codebase, domain, or workflow to others (knowledge transfer / a tour), even if a future task is mentioned → session notes (what was explained, key facts, open questions), not a build plan.
 
 The detected mode is shown in the terminal and written to the `.analysis.md` header. If the classifier call fails (Ollama down, model error), whiz falls back to summary + actions with a warning rather than aborting. Explicit flags (`--summary` / `--actions` / `--plan` / `--prompt`) skip the classifier and go straight to their prompt.
 
@@ -534,6 +535,16 @@ The implementation-plan output (from `--plan` or auto-detected `PLAN`) follows t
 - **Risks** — bullet list with a short mitigation each
 - **Open questions** — unresolved questions that need a decision or more info
 - **Acceptance criteria** — a checklist (`- [ ] ...`) of 'done' conditions
+
+The walkthrough/session-notes output (auto-detected `WALKTHROUGH`) follows this structure:
+
+- **Overview** — what system/topic was walked through and who was explaining to whom
+- **Key facts learned** — dense bullet list of the substantive facts conveyed (entities, fields, schemas, API responses, workflows, relationships, terminology)
+- **Decisions** — any decisions made during the session (or `None.`)
+- **Open questions** — unresolved questions raised or implied
+- **Suggested next steps** — the implementation work the session implies or motivates (the work to be done *after* the call, not events of the call itself), or `None.`
+
+This mode exists because a walkthrough/explanation call is fundamentally different from a planning call: one person is transferring knowledge about an existing system, not deciding what to build. Forcing an implementation plan onto such a call produces Steps and Risks that narrate the meeting itself ('Share screen and navigate to the page', 'Domain Knowledge Gap: Vika is not sure what a clearinghouse is'). The WALKTHROUGH mode captures the durable takeaway (what was explained) and only suggests follow-up work as a separate, clearly-labeled section.
 
 `--vision` requires a vision-capable model (`llava`, `qwen2.5-vl`, `minicpm-v`, `gpt-4o`, ...). Vision analysis **auto-enables** when (a) a frames manifest exists (i.e. you transcribed a video, which auto-captures screenshots) and (b) the configured `ai_model` looks vision-capable by name — so a plain `whiz analyze recording.mov` after a video transcription feeds the frames to the model without any flag. Pass `--no-vision` to opt out. If frames exist but the model looks text-only (e.g. `gpt-oss`, `llama`, `qwen`), whiz stays text-only and prints a hint to switch models rather than sending images that the model would reject. whiz also detects a text-only model rejecting images at call time and prints a clear hint. Frames are base64-encoded only at send time, so the on-disk `.frames.json` manifest stays small (paths only).
 

@@ -1,10 +1,11 @@
 """AI analysis via an OpenAI-compatible chat API (Ollama by default).
 
 Sends a transcript (and optionally on-screen frames) to a chat model for
-summary, action items, implementation plans, or freeform analysis. The
-default analyze path auto-detects whether the transcript is a meeting (→
-summary + action items) or a feature/task discussion (→ a structured
-implementation plan); explicit ``--summary`` / ``--actions`` / ``--plan`` /
+summary, action items, implementation plans, session notes (walkthroughs),
+or freeform analysis. The default analyze path auto-detects whether the
+transcript is a meeting (→ summary + action items), a feature/task discussion
+(→ a structured implementation plan), or a walkthrough/explanation session
+(→ session notes); explicit ``--summary`` / ``--actions`` / ``--plan`` /
 ``--prompt`` flags override the detector.
 
 Uses only ``urllib.request`` — no new dependency. The request format is the
@@ -70,17 +71,39 @@ PLAN_PROMPT = (
     "(with speaker labels and timestamps) that is about building a feature, "
     "fixing a bug, or carrying out a technical task. Turn it into a concrete, "
     "actionable implementation plan.\n\n"
+    "CRITICAL — distinguish the WORK from the MEETING. The transcript records "
+    "what people SAID and DID during a call ('Vika shares screen', 'Vika opens "
+    "DevTools', 'Vika explains the difference', 'wrap up the session'). Those are "
+    "events of the discussion itself, NOT implementation steps. Your Steps, "
+    "Risks, and Open questions must describe the engineering work to be DONE "
+    "AFTER the call, not narrate what happened IN the call.\n"
+    "- A step like 'Share screen and navigate to the page' is a meeting event — "
+    "do not list it. A step like 'Add a Clearinghouse entity to the data model' "
+    "is implementation work — list that.\n"
+    "- A risk like 'Vika is not sure what a clearinghouse is' is a fact about "
+    "the meeting, not a build risk. A risk like 'The payer API may return "
+    "unsettled claims that need filtering' is a build risk.\n"
+    "- If the call is PRIMARILY an explanation, walkthrough, or knowledge-"
+    "transfer session (one person showing/describing an existing system to "
+    "another) rather than an active decision-making discussion about what to "
+    "build, do NOT force a build plan. Instead say so under Overview and produce "
+    "session notes: key facts learned, entities/fields/workflows explained, "
+    "decisions made (if any), and open questions — not Steps/Risks/Acceptance "
+    "criteria that describe the conversation.\n\n"
     "Produce exactly these sections, in this order, using Markdown headings:\n\n"
     "## Overview\n"
-    "2-4 sentences: what is being built/changed and why.\n\n"
+    "2-4 sentences: what is being built/changed and why — OR, if this is a "
+    "walkthrough/explanation session, state that explicitly and say what was "
+    "explained.\n\n"
     "## Goal\n"
     "The single concrete outcome that 'done' looks like.\n\n"
     "## Proposed approach\n"
     "A short narrative of how the work will be done — the key design choice and "
     "its rationale.\n\n"
     "## Steps\n"
-    "A numbered list. Each step MUST have:\n"
-    "- **Step N.** <title> — one line of what to do.\n"
+    "A numbered list of implementation tasks to be done AFTER the call, not a "
+    "narration of what happened during the call. Each step MUST have:\n"
+    "- **Step N.** <title> — one line of what to do (the engineering work).\n"
     "- **Owner:** the named speaker who raised or owns this task, pulled from "
     "the speaker label on the transcript line where it was discussed. Use the "
     "actual speaker name/label — NOT a generic role like 'Dev'. If multiple "
@@ -92,8 +115,8 @@ PLAN_PROMPT = (
     "List every concrete task inferred from the transcript; if a task is only "
     "implied, mark it '(inferred)'. Keep the list in a sensible execution order.\n\n"
     "## Risks\n"
-    "Bullet list of risks and unknowns raised or implied, each with a short "
-    "mitigation.\n\n"
+    "Bullet list of risks and unknowns of the BUILD, each with a short "
+    "mitigation — not observations about the participants or the meeting.\n\n"
     "## Open questions\n"
     "Bullet list of unresolved questions that need a decision or more info. "
     "DEDUPLICATE: merge near-identical questions into one before output — never "
@@ -108,15 +131,51 @@ PLAN_PROMPT = (
 
 CLASSIFY_PROMPT = (
     "You are a fast content classifier. Read the transcript below and decide "
-    "which of these two categories it belongs to:\n"
+    "which of these three categories it belongs to:\n"
     "- MEETING — people discussing a past/ongoing topic, a standup, a review, a "
     "decision meeting, an interview, or general conversation.\n"
-    "- PLAN — people discussing building, implementing, fixing, or changing a "
+    "- PLAN — people actively deciding how to build, implement, fix, or change a "
     "specific feature, bug, product, or technical task, where the output should "
-    "be an actionable implementation plan rather than meeting notes.\n\n"
-"Reply with EXACTLY ONE token: MEETING or PLAN. No other text, no "
-    "punctuation.\n\n"
+    "be an actionable implementation plan rather than meeting notes.\n"
+    "- WALKTHROUGH — primarily one person explaining, showing, or describing an "
+    "existing system, codebase, domain, or workflow to others (knowledge "
+    "transfer / a tour), even if a future task is mentioned. The output should "
+    "be session notes (what was explained, key facts, open questions), not a "
+    "build plan.\n\n"
+    "Reply with EXACTLY ONE token: MEETING, PLAN, or WALKTHROUGH. No other text, "
+    "no punctuation.\n\n"
     "Transcript:\n{transcript}\n\nClassification:"
+)
+
+WALKTHROUGH_PROMPT = (
+    "You are an expert technical scribe. Below is a transcript of a call "
+    "(with speaker labels and timestamps) that is primarily a walkthrough, "
+    "explanation, or knowledge-transfer session — one person showing or "
+    "describing an existing system, codebase, domain, or workflow to another. "
+    "Produce session notes that capture what was explained, NOT an "
+    "implementation plan and NOT a narration of what happened during the call.\n\n"
+    "Produce exactly these sections, in this order, using Markdown headings:\n\n"
+    "## Overview\n"
+    "2-4 sentences: what system/topic was walked through and who was explaining "
+    "to whom.\n\n"
+    "## Key facts learned\n"
+    "A dense bullet list of the substantive facts conveyed — entities, fields, "
+    "schemas, API responses, workflows, relationships, terminology, and how "
+    "things work. Prefix with timestamp and speaker when useful. This is the "
+    "reference a future reader (or a later AI) should treat as the durable "
+    "takeaway of the session.\n\n"
+    "## Decisions\n"
+    "Bullet list of any decisions made during the session. If none, write "
+    "'None.'\n\n"
+    "## Open questions\n"
+    "Bullet list of unresolved questions raised or implied. DEDUPLICATE: merge "
+    "near-identical questions into one. If none, write 'None.'\n\n"
+    "## Suggested next steps\n"
+    "Bullet list of the implementation work that this session implies or "
+    "motivates (if any) — the work to be done AFTER the call, not events of the "
+    "call itself. If the session was purely explanatory with no follow-up work, "
+    "write 'None.'\n\n"
+    "Transcript:\n{transcript}"
 )
 
 # Shared analyst posture prepended to every Essentials augmentation (both the
@@ -308,6 +367,10 @@ _BUILT_IN_TASKS: list[tuple[str, str]] = [
      "Proposed approach, Steps (each with Owner = the named speaker who raised it "
      "+ Effort S/M/L with a one-line justification), Risks, Open questions "
      "(deduplicated), Acceptance criteria"),
+    (WALKTHROUGH_PROMPT,
+     "produce session notes for a walkthrough/explanation call with sections: "
+     "Overview, Key facts learned, Decisions, Open questions (deduplicated), "
+     "Suggested next steps"),
 ]
 
 
@@ -376,9 +439,9 @@ def resolve_prompt_auto(transcript: str, *, base_url: str, model: str, api_key: 
     """Auto-detect and return (prompt_template, detected_mode).
 
     Runs ``CLASSIFY_PROMPT`` against the model and routes to ``PLAN_PROMPT`` if the
-    reply is ``PLAN`` (case-insensitive, single token), else to
+    reply is ``PLAN``, ``WALKTHROUGH_PROMPT`` if it is ``WALKTHROUGH``, else to
     ``SUMMARY_AND_ACTIONS_PROMPT``. ``detected_mode`` is the lowercased token we
-    actually routed on (``'plan'`` or ``'meeting'``).
+    actually routed on (``'plan'``, ``'walkthrough'``, or ``'meeting'``).
 
     On any failure (network/model error, empty/garbled reply), falls back to
     ``SUMMARY_AND_ACTIONS_PROMPT`` with ``detected_mode`` set to ``'meeting'`` plus
@@ -392,7 +455,11 @@ def resolve_prompt_auto(transcript: str, *, base_url: str, model: str, api_key: 
         return SUMMARY_AND_ACTIONS_PROMPT, "meeting (fallback)"
     token = reply.strip().splitlines()[0].strip().upper() if reply else ""
     # The model may prepend a stray label or wrap the token in prose; accept the
-    # first occurrence of either keyword to be forgiving.
+    # first occurrence of any keyword to be forgiving, but prefer the most
+    # specific match (WALKTHROUGH before PLAN before MEETING) so a reply like
+    # "WALKTHROUGH" is not misread as containing "PLAN".
+    if "WALKTHROUGH" in token:
+        return WALKTHROUGH_PROMPT, "walkthrough"
     if "PLAN" in token and "MEETING" not in token:
         return PLAN_PROMPT, "plan"
     if "MEETING" in token:

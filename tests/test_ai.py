@@ -356,6 +356,38 @@ def test_resolve_prompt_auto_garbled_reply_defaults_to_meeting(monkeypatch):
     assert mode == "meeting"
 
 
+def test_resolve_prompt_auto_routes_to_walkthrough(monkeypatch):
+    monkeypatch.setattr(AI, "chat_text", lambda pt, t, **kw: "WALKTHROUGH"
+                       if pt is AI.CLASSIFY_PROMPT else "walkthrough body")
+    prompt, mode = AI.resolve_prompt_auto(
+        "some transcript", base_url="http://x/v1", model="m", api_key="",
+    )
+    assert prompt is AI.WALKTHROUGH_PROMPT
+    assert mode == "walkthrough"
+
+
+def test_resolve_prompt_auto_walkthrough_not_misread_as_plan(monkeypatch):
+    """A reply containing WALKTHROUGH must not be misparsed as PLAN (the token
+    'WALKTHROUGH' does not contain 'PLAN', but guard against stray prose like
+    'this is a walkthrough, not a plan')."""
+    monkeypatch.setattr(AI, "chat_text", lambda pt, t, **kw: "this is a WALKTHROUGH"
+                       if pt is AI.CLASSIFY_PROMPT else "x")
+    prompt, mode = AI.resolve_prompt_auto(
+        "t", base_url="http://x/v1", model="m", api_key="",
+    )
+    assert prompt is AI.WALKTHROUGH_PROMPT
+    assert mode == "walkthrough"
+
+
+def test_resolve_prompt_auto_lowercase_walkthrough(monkeypatch):
+    monkeypatch.setattr(AI, "chat_text", lambda pt, t, **kw: "walkthrough" if pt is AI.CLASSIFY_PROMPT else "x")
+    prompt, mode = AI.resolve_prompt_auto(
+        "t", base_url="http://x/v1", model="m", api_key="",
+    )
+    assert prompt is AI.WALKTHROUGH_PROMPT
+    assert mode == "walkthrough"
+
+
 def test_explicit_mode_set_detects_flags():
     args = SimpleNamespace(prompt="", plan=True, summary=False, actions=False)
     assert AI._explicit_mode_set(args) == {"plan"}
@@ -531,6 +563,7 @@ def test_task_label_built_in_prompts():
     assert "action" in AI._task_label(AI.ACTIONS_PROMPT)
     assert "summary" in AI._task_label(AI.SUMMARY_AND_ACTIONS_PROMPT)
     assert "implementation plan" in AI._task_label(AI.PLAN_PROMPT)
+    assert "session notes" in AI._task_label(AI.WALKTHROUGH_PROMPT)
 
 
 def test_task_label_custom_prompt_fallback():
@@ -541,6 +574,7 @@ def test_task_label_custom_prompt_fallback():
 def test_is_built_in_prompt_recognizes_presets():
     assert AI._is_built_in_prompt(AI.SUMMARY_PROMPT) is True
     assert AI._is_built_in_prompt(AI.PLAN_PROMPT) is True
+    assert AI._is_built_in_prompt(AI.WALKTHROUGH_PROMPT) is True
     assert AI._is_built_in_prompt("custom {transcript}") is False
 
 
