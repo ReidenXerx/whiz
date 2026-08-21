@@ -1,6 +1,6 @@
 # whiz
 
-[![Version](https://img.shields.io/badge/version-0.12.2-blue)](https://github.com/ReidenXerx/whiz/releases)
+[![Version](https://img.shields.io/badge/version-0.12.3-blue)](https://github.com/ReidenXerx/whiz/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Python ≥3.11](https://img.shields.io/badge/python-%E2%89%A53.11-blue)](https://www.python.org/)
 [![macOS](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](#requirements)
@@ -555,7 +555,9 @@ Long transcripts (or many frames) aren't sent to the model as one giant blob —
 1. **Map (rolling context)** — each chunk is analyzed carrying forward the prior chunks' partial analyses as a running context block, so chunk N can refer back to speakers/decisions/entities/open threads established in chunks 1..N-1 instead of analyzing in a vacuum. With `--vision`, each chunk carries only the frames for its own segments, so the vision model sees a small, coherent window of "these frames + this text" + the running context instead of every frame at once. A frame manifest labels the frames 1..N with timestamps and speakers so the model treats them as an ordered visual timeline rather than a bag of images. The context is a sliding window (default last 3 partials) so prompt growth stays bounded on very long inputs.
 2. **Reduce** — the per-chunk partial analyses (already coherent with each other thanks to the rolling context) are merged into one final answer: duplicates removed, conflicts reconciled, chronological order kept, speaker/time references preserved.
 
-Built-in modes (summary / action items / plan) route through a dedicated map + synthesize prompt pair so the final answer has the same structure the non-chunked path would produce. A custom `--prompt` is applied per chunk (with the rolling context prepended for chunks after the first) and the per-chunk answers are merged with a generic reduce. Short transcripts (one chunk) skip the map-reduce and use a single call, identical to the old behavior. Each chunk call is logged in the terminal (`analyzing chunk k/n ...`, then `synthesizing ...`) so you can follow progress.
+Built-in modes (summary / action items / plan / walkthrough) route through a dedicated map + synthesize prompt pair so the final answer has the same structure the non-chunked path would produce. A custom `--prompt` is applied per chunk (with the rolling context prepended for chunks after the first) and the per-chunk answers are merged with a generic reduce. Short transcripts (one chunk) skip the map-reduce and use a single call, identical to the old behavior. Each chunk call is logged in the terminal (`analyzing chunk k/n ...`, then `synthesizing ...`) so you can follow progress.
+
+Every model call (the classifier probe, each map chunk, the synth) automatically **retries transient failures** — HTTP 429/500/502/503/504 and connection errors — with exponential backoff (2s, 4s; up to 3 attempts). Cloud models occasionally return a random 500 mid-analysis; a retry turns that transient blip into a successful run instead of an aborted analysis. Permanent errors (400, 404, 410, 401) are not retried and surface immediately with the server's response body.
 
 Output is written to `<stem>.analysis.md` (the prompt + the response) and the response is also printed to stdout.
 

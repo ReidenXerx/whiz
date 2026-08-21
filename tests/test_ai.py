@@ -255,6 +255,7 @@ def test_chat_vision_builds_image_content(monkeypatch, tmp_path):
 
 
 def test_chat_text_http_error_raises_with_body(monkeypatch):
+    monkeypatch.setattr(AI, "_RETRY_SLEEP", lambda _d: None)  # don't sleep in tests
     def fake_urlopen(req, timeout=600):
         raise urllib.error.HTTPError(
             req.full_url, 500, "Server Error", hdrs=None, fp=io.BytesIO(b"boom"),
@@ -270,6 +271,7 @@ def test_chat_text_http_error_raises_with_body(monkeypatch):
 
 
 def test_chat_text_url_error_suggests_ollama(monkeypatch):
+    monkeypatch.setattr(AI, "_RETRY_SLEEP", lambda _d: None)  # don't sleep in tests
     def fake_urlopen(req, timeout=600):
         raise urllib.error.URLError("Connection refused")
 
@@ -292,6 +294,84 @@ def test_chat_text_no_choices_raises(monkeypatch):
         assert False, "expected RuntimeError"
     except RuntimeError as e:
         assert "no choices" in str(e)
+
+
+# ---------- retry on transient errors ----------
+
+def test_chat_text_retries_500_then_succeeds(monkeypatch):
+    """A transient HTTP 500 is retried; the second attempt succeeds."""
+    monkeypatch.setattr(AI, "_RETRY_SLEEP", lambda _d: None)  # don't sleep in tests
+    calls = []
+
+    def fake_urlopen(req, timeout=600):
+        calls.append(1)
+        if len(calls) == 1:
+            raise urllib.error.HTTPError(
+                req.full_url, 500, "Server Error", hdrs=None, fp=io.BytesIO(b"oops"),
+            )
+        return _mock_response({"choices": [{"message": {"content": "ok after retry"}}]})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    out = AI.chat_text("p: {transcript}", "t", base_url="http://x/v1", model="m", api_key="")
+    assert out == "ok after retry"
+    assert len(calls) == 2  # one failure + one success
+
+
+def test_chat_text_retries_url_error_then_succeeds(monkeypatch):
+    """A transient connection error is retried; the second attempt succeeds."""
+    monkeypatch.setattr(AI, "_RETRY_SLEEP", lambda _d: None)
+    calls = []
+
+    def fake_urlopen(req, timeout=600):
+        calls.append(1)
+        if len(calls) == 1:
+            raise urllib.error.URLError("Connection refused")
+        return _mock_response({"choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    out = AI.chat_text("p: {transcript}", "t", base_url="http://x/v1", model="m", api_key="")
+    assert out == "ok"
+    assert len(calls) == 2
+
+
+def test_chat_text_400_not_retried(monkeypatch):
+    """A 400 (bad request) is NOT retried — it's a permanent error."""
+    monkeypatch.setattr(AI, "_RETRY_SLEEP", lambda _d: None)
+    calls = []
+
+    def fake_urlopen(req, timeout=600):
+        calls.append(1)
+        raise urllib.error.HTTPError(
+            req.full_url, 400, "Bad Request", hdrs=None, fp=io.BytesIO(b"bad"),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    try:
+        AI.chat_text("p: {transcript}", "t", base_url="http://x/v1", model="m", api_key="")
+        assert False, "expected RuntimeError"
+    except RuntimeError as e:
+        assert "HTTP 400" in str(e)
+    assert len(calls) == 1  # not retried
+
+
+def test_chat_text_500_exhausts_retries(monkeypatch):
+    """A persistent 500 fails after all retry attempts are exhausted."""
+    monkeypatch.setattr(AI, "_RETRY_SLEEP", lambda _d: None)
+    calls = []
+
+    def fake_urlopen(req, timeout=600):
+        calls.append(1)
+        raise urllib.error.HTTPError(
+            req.full_url, 500, "Server Error", hdrs=None, fp=io.BytesIO(b"still down"),
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    try:
+        AI.chat_text("p: {transcript}", "t", base_url="http://x/v1", model="m", api_key="")
+        assert False, "expected RuntimeError"
+    except RuntimeError as e:
+        assert "HTTP 500" in str(e)
+    assert len(calls) == AI._RETRY_MAX  # tried every attempt, none succeeded
 
 
 # ---------- resolve_prompt_auto (classifier routing) ----------
@@ -481,6 +561,7 @@ def test_probe_model_ok(monkeypatch):
 
 
 def test_probe_model_retired_returns_failure(monkeypatch):
+    monkeypatch.setattr(AI, "_RETRY_SLEEP", lambda _d: None)  # don't sleep in tests
     def fake_urlopen(req, timeout=30):
         raise urllib.error.HTTPError(
             req.full_url, 410, "Gone", hdrs=None,
@@ -494,6 +575,7 @@ def test_probe_model_retired_returns_failure(monkeypatch):
 
 
 def test_probe_model_server_down_returns_failure(monkeypatch):
+    monkeypatch.setattr(AI, "_RETRY_SLEEP", lambda _d: None)  # don't sleep in tests
     def fake_urlopen(req, timeout=30):
         raise urllib.error.URLError("connection refused")
 

@@ -1,3 +1,3 @@
 """whiz — a transcription CLI for meetings, screen recordings, and interviews."""
 
-__version__ = "0.12.2"
+__version__ = "0.12.3"

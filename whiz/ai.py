@@ -26,6 +26,7 @@ from __future__ import annotations
 import base64
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -500,7 +501,14 @@ def _fmt_clock(t: float) -> str:
 
 
 def _post_chat(base_url: str, model: str, messages: list[dict], api_key: str, timeout: int = 600) -> str:
-    """POST to /v1/chat/completions and return the assistant text."""
+    """POST to /v1/chat/completions and return the assistant text.
+
+    Retries transient failures (HTTP 429/500/502/503/504 and connection errors)
+    with exponential backoff — cloud models occasionally return a transient
+    500 ("Internal Server Error") mid-analysis, and retrying turns that random
+    failure into a successful run. Non-transient errors (400, 404, 401, ...) fail
+    immediately. ``_RETRY_SLEEP`` is patchable so tests don't actually sleep.
+    """
     url = base_url.rstrip("/") + "/chat/completions"
     body = {
         "model": model,
@@ -512,44 +520,71 @@ def _post_chat(base_url: str, model: str, messages: list[dict], api_key: str, ti
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
     # HTTPError is a subclass of URLError, so it must be caught first —
     # otherwise a 400 (e.g. text model rejecting vision images) is misreported
     # as "could not reach the server".
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - local/known server
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        body_text = ""
+    last_err: Exception | None = None
+    for attempt in range(_RETRY_MAX):
+        req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
         try:
-            body_text = e.read().decode("utf-8", errors="replace")
-        except Exception:  # noqa: BLE001
-            pass
-        hint = ""
-        if e.code in (400, 404) and any(
-            "image" in str(m.get("content", "")) or isinstance(m.get("content"), list)
-            for m in messages
-        ):
-            hint = (
-                "\nHint: this looks like a vision request. Is the configured model "
-                "vision-capable? (e.g. llava, qwen2.5-vl, minicpm-v). "
-                "A text-only model will reject image inputs."
-            )
-        raise RuntimeError(
-            f"AI server returned HTTP {e.code} for {url}.\n"
-            f"Response: {body_text[:500]}{hint}"
-        ) from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(
-            f"Could not reach AI server at {url}: {e.reason}\n"
-            "Is Ollama running? Start it with:  ollama serve"
-        ) from e
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - local/known server
+                data = json.loads(resp.read().decode("utf-8"))
+            break  # success
+        except urllib.error.HTTPError as e:
+            body_text = ""
+            try:
+                body_text = e.read().decode("utf-8", errors="replace")
+            except Exception:  # noqa: BLE001
+                pass
+            if e.code in _RETRY_STATUS and attempt < _RETRY_MAX - 1:
+                last_err = e
+                delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                print(f"  ⚠ server returned HTTP {e.code}; retrying in {delay:.0f}s "
+                      f"(attempt {attempt + 2}/{_RETRY_MAX})…", file=sys.stderr)
+                _RETRY_SLEEP(delay)
+                continue
+            hint = ""
+            if e.code in (400, 404) and any(
+                "image" in str(m.get("content", "")) or isinstance(m.get("content"), list)
+                for m in messages
+            ):
+                hint = (
+                    "\nHint: this looks like a vision request. Is the configured model "
+                    "vision-capable? (e.g. llava, qwen2.5-vl, minicpm-v). "
+                    "A text-only model will reject image inputs."
+                )
+            raise RuntimeError(
+                f"AI server returned HTTP {e.code} for {url}.\n"
+                f"Response: {body_text[:500]}{hint}"
+            ) from e
+        except urllib.error.URLError as e:
+            if attempt < _RETRY_MAX - 1:
+                last_err = e
+                delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                print(f"  ⚠ could not reach AI server ({e.reason}); retrying in "
+                      f"{delay:.0f}s (attempt {attempt + 2}/{_RETRY_MAX})…", file=sys.stderr)
+                _RETRY_SLEEP(delay)
+                continue
+            raise RuntimeError(
+                f"Could not reach AI server at {url}: {e.reason}\n"
+                "Is Ollama running? Start it with:  ollama serve"
+            ) from e
+    else:
+        raise RuntimeError(f"AI server retries exhausted for {url}.") from last_err
     # OpenAI shape: {"choices": [{"message": {"content": "..."}}]}
     choices = data.get("choices", [])
     if not choices:
         raise RuntimeError(f"AI server returned no choices: {json.dumps(data)[:300]}")
     content = choices[0].get("message", {}).get("content", "")
     return content.strip()
+
+
+# Retry tuning for transient server errors. _RETRY_SLEEP is patchable so tests
+# can retry instantly without sleeping.
+_RETRY_SLEEP = time.sleep
+_RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
+_RETRY_MAX = 3          # total attempts (1 initial + 2 retries)
+_RETRY_BASE_DELAY = 2.0  # seconds; doubled each retry (2s, 4s)
 
 
 def chat_text(prompt_template: str, transcript: str, *, base_url: str, model: str, api_key: str = "") -> str:
