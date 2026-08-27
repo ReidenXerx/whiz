@@ -70,7 +70,7 @@ class Config:
     save_voice_profiles: bool = True
     # --- Dictation (whiz dictate) ---
     # mlx-whisper model repo or path (empty => provider default, e.g.
-    # mlx-community/whisper-large-v3-turbo-q4).
+    # mlx-community/whisper-large-v3-turbo).
     dictate_model: str = ""
     # Spoken language code for dictation (default "ru").
     dictate_language: str = "ru"
