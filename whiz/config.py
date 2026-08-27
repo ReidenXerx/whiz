@@ -86,8 +86,10 @@ class Config:
     dictate_injector: str = ""
     # Force a specific dictation indicator by name (empty => auto-detect).
     dictate_indicator: str = ""
-    # Global toggle hotkey in pynput syntax (e.g. "<cmd>+<shift>+<period>").
-    dictate_hotkey: str = "<cmd>+<shift>+<period>"
+    # Global toggle hotkey in pynput syntax. The '.' key is a literal
+    # character, NOT a named key — pynput's HotKey.parse rejects '<period>'
+    # with ValueError, so it must be written as a bare '.'.
+    dictate_hotkey: str = "<cmd>+<shift>+."
     # Trigger mode: "toggle" (press to start, press again to stop) or "ptt"
     # (push-to-talk: hold to dictate, release to stop).
     dictate_trigger: str = "toggle"

@@ -1324,7 +1324,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
 def cmd_dictate(args: argparse.Namespace) -> int:
     """System-wide voice dictation via mlx-whisper with a toggle hotkey.
 
-    Listens for a global hotkey (default Ctrl+Space). Press to start/stop a
+    Listens for a global hotkey (default Cmd+Shift+.). Press to start/stop a
     dictation session: mic audio is transcribed and typed into whatever app
     has keyboard focus. A floating indicator shows live mic level. Requires
     macOS Accessibility + Microphone permissions and the ``dictate`` extra
@@ -1827,7 +1827,7 @@ def build_parser() -> argparse.ArgumentParser:
     dt.add_argument("-l", "--language", default="", help="Spoken language code (default: ru)")
     dt.add_argument("--prompt", default=None, help="Whisper initial_prompt to bias recognition (default: built-in Russian jargon/obscenity prompt)")
     dt.add_argument("--idle-timeout", dest="idle_timeout", type=float, default=None, help="Seconds to keep the model loaded after a session before unloading (default: 45; 0 = never unload)")
-    dt.add_argument("--hotkey", default="", help="Global hotkey in pynput syntax (default: <ctrl>+<space>)")
+    dt.add_argument("--hotkey", default="", help="Global hotkey in pynput syntax (default: <cmd>+<shift>+.)")
     dt.add_argument("--trigger", default="", choices=["", "toggle", "ptt"], help="Trigger mode: toggle (press to start/stop) or ptt (hold to talk; release to stop). Default: config dictate_trigger")
     dt.add_argument("--auto-stop-silence", dest="auto_stop_silence", type=float, default=None, help="Seconds of silence before a session auto-stops (default: 10; 0 = off)")
     dt.add_argument("--no-indicator", dest="no_indicator", action="store_true", help="Hide the floating dictation indicator overlay")
