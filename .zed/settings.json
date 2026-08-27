@@ -1,0 +1,46 @@
+{
+  "context_servers": {
+    "gitnexus": {
+      "command": "gitnexus",
+      "args": [
+        "mcp"
+      ],
+      "env": {}
+    }
+  },
+  "agent": {
+    "profiles": {
+      "zed-gitnexus": {
+        "name": "Zed + GitNexus",
+        "tools": {
+          "grep": false,
+          "fetch": false
+        },
+        "enable_all_context_servers": false,
+        "context_servers": {
+          "gitnexus": {
+            "tools": {
+              "*": true
+            }
+          }
+        }
+      }
+    }
+  },
+  "language_models": {
+    "ollama": {
+      "available_models": [
+        {
+          "name": "qwen2.5-coder:14b",
+          "display_name": "Qwen 2.5 Coder 14B (tools)",
+          "supports_tools": true
+        },
+        {
+          "name": "deepseek-r1:14b",
+          "display_name": "DeepSeek R1 14B (tools)",
+          "supports_tools": true
+        }
+      ]
+    }
+  }
+}

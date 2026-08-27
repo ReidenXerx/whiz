@@ -1,6 +1,6 @@
 # whiz
 
-[![Version](https://img.shields.io/badge/version-0.12.3-blue)](https://github.com/ReidenXerx/whiz/releases)
+[![Version](https://img.shields.io/badge/version-0.13.1-blue)](https://github.com/ReidenXerx/whiz/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Python ≥3.11](https://img.shields.io/badge/python-%E2%89%A53.11-blue)](https://www.python.org/)
 [![macOS](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](#requirements)
@@ -51,6 +51,7 @@ Most transcription tools stop at text. whiz is the one-command path from a scree
 - [Speaker voice profiles](#speaker-voice-profiles-cross-recording-recognition)
 - [AI analysis](#ai-analysis-auto-detect-summary-action-items-implementation-plans-vision)
 - [Essentials (always on)](#essentials-always-on-concentrated-context-for-a-later-analysis)
+- [Voice dictation](#voice-dictation-system-wide-speech-to-text-whiz-dictate)
 - [Testing](#testing)
 - [License](#license)
 
@@ -293,6 +294,19 @@ ai_max_frames = 50
 # --- Speaker voice profiles ---
 speaker_match_threshold = 0.8
 save_voice_profiles = true
+# --- Voice dictation (whiz dictate) ---
+dictate_model = ""
+dictate_language = "ru"
+dictate_prompt = ""
+dictate_idle_timeout = 45.0
+dictate_stt_provider = ""
+dictate_injector = ""
+dictate_indicator = ""
+dictate_hotkey = "<ctrl>+<space>"
+dictate_trigger = "toggle"
+dictate_vad = true
+dictate_auto_stop_silence = 10.0
+dictate_show_indicator = true
 ```
 
 If `model` is empty, whiz auto-picks the best available model by this preference:
@@ -579,9 +593,101 @@ whiz analyze recording.mov --plan
 whiz analyze recording.mov --prompt "Given these essentials, draft the migration steps. Essentials:\n$(awk '/^## Essentials/{f=1;next} f' recording.analysis.md)\n\nTranscript: {transcript}"
 ```
 
+## Voice dictation (system-wide speech-to-text: `whiz dictate`)
+
+whiz can act as a **system-wide voice dictation tool**: press a hotkey, speak, and your words are typed into whatever app currently has keyboard focus — any text field, any app, system-wide. A small floating indicator shows a live mic level so you know it's listening. It's powered by [mlx-whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper) running on the Apple Silicon GPU (Metal), so it's fast and accurate without spawning external binaries.
+
+### How it works
+
+- **Trigger mode** — two ways to start a session, set with `--trigger` or `dictate_trigger` in config:
+  - **Toggle** (default) — press the hotkey (default Ctrl+Space) to start; press again to stop. Hands-free once you start.
+  - **Push-to-talk** (`ptt`) — hold the hotkey down to talk; release to stop. Works with a single key (e.g. `<f8>`) or a modifier+key combo (e.g. `<ctrl>+<space>`); all modifiers must be held for the press to count, so a combo won't hijack the final key alone. Tighter control, no accidental on-air when you pause.
+- **Utterance segmentation** — WebRTC VAD splits your speech into utterances. Each utterance is transcribed and typed as soon as you pause, so text appears incrementally without waiting for the whole session. Turning VAD off (`whiz dictate set vad=false`) disables this: the entire session is transcribed as one block when the session ends, so you only see text after you stop. Keep VAD on for live incremental dictation.
+- **Spawn-on-demand + idle timeout** — the model loads on first use and stays warm for 45 seconds after you stop, so back-to-back dictation is instant. After the idle window it unloads, dropping to zero RAM at idle.
+- **Floating indicator** — a small always-on-top, click-through circle with a mic badge and a live volume curve (cyan = listening, amber = transcribing). Pass `--no-indicator` to hide it.
+- **Russian lexica** — the default model (`mlx-community/whisper-large-v3-turbo-mlx-4bit`) and a built-in `initial_prompt` in informal Russian register bias recognition toward accurate Russian jargon, slang, and obscenity (no self-censoring). Override with `--prompt` or `dictate_prompt` in config.
+- **Provider-abstracted** — the engine depends on pluggable provider interfaces (STT, text injector, indicator). macOS providers are built in; Linux/Windows providers can be added later without touching the engine.
+
+### One-time setup (macOS)
+
+```bash
+# 1. Install the dictation extra (mlx-whisper, sounddevice, webrtcvad, pynput, pyobjc):
+pipx inject whiz 'whiz[dictate]'
+
+# 2. Grant permissions in System Settings → Privacy & Security:
+#    - Accessibility (so whiz can type into other apps)
+#    - Microphone (so whiz can capture audio)
+```
+
+The model (~2 GB) auto-downloads from HuggingFace on first use and caches under `~/.cache/huggingface`.
+
+### Usage
+
+```bash
+# Start dictation — press Ctrl+Space to toggle on/off:
+whiz dictate
+
+# Use a different hotkey:
+whiz dictate --hotkey "<cmd>+d"
+
+# Push-to-talk: hold the hotkey to talk, release to stop:
+whiz dictate --trigger ptt --hotkey "<f8>"
+
+# Dictate in English:
+whiz dictate --language en
+
+# Keep the model loaded for 2 minutes after stopping (warm for back-to-back):
+whiz dictate --idle-timeout 120
+
+# Hide the floating indicator:
+whiz dictate --no-indicator
+
+# Use a different mlx-whisper model:
+whiz dictate --model mlx-community/whisper-large-v3-mlx-4bit
+
+# List available providers for this platform:
+whiz dictate --list-providers
+```
+
+Run `whiz dictate --help` for the full flag reference.
+
+### Settings: `whiz dictate config` / `whiz dictate set`
+
+Dictation has its own friendly settings commands so you don't have to remember the `dictate_` config prefixes. `whiz dictate config` shows all settings in a table; `whiz dictate set` changes one using a short key name and writes it to config.
+
+```bash
+# Show all dictation settings (label, current value, description):
+whiz dictate config
+
+# Change settings with friendly keys (persisted to config.toml):
+whiz dictate set hotkey="<f8>"           # → dictate_hotkey
+whiz dictate set trigger=ptt           # → dictate_trigger (toggle | ptt)
+whiz dictate set lang=en               # → dictate_language  (alias: language)
+whiz dictate set idle=60               # → dictate_idle_timeout (alias: timeout)
+whiz dictate set silence=15            # → dictate_auto_stop_silence (alias: auto_stop_silence)
+whiz dictate set indicator=false       # → dictate_show_indicator (alias: show_indicator)
+whiz dictate set prompt="my custom"     # → dictate_prompt
+whiz dictate set model=mlx-community/whisper-large-v3-mlx-4bit  # → dictate_model
+```
+
+Friendly keys and their aliases:
+
+- `hotkey` / `key` — global hotkey (pynput syntax)
+- `trigger` / `mode` — `toggle` or `ptt`
+- `language` / `lang` — spoken language code
+- `model` — mlx-whisper model repo/path
+- `prompt` — Whisper `initial_prompt`
+- `idle_timeout` / `idle` / `timeout` — seconds before model unloads
+- `auto_stop_silence` / `silence` — seconds of silence to auto-stop
+- `vad` — WebRTC VAD on/off
+- `show_indicator` / `indicator` — floating overlay on/off
+- `stt_provider`, `injector`, `indicator_provider` — force a provider (auto if empty)
+
+You can also set these with the generic `whiz config set dictate_*` commands (see [Configuration](#configuration)).
+
 ## Testing
 
-whiz ships a pytest suite covering the pure-Python modules (merge, models, screenshots, ai, diarize cache, profiles) — no sherpa-onnx, ffmpeg, or network required. Install the test extras and run:
+whiz ships a pytest suite covering the pure-Python modules (merge, models, screenshots, ai, diarize cache, profiles, and the dictation engine/providers) — no sherpa-onnx, ffmpeg, mlx-whisper, or network required. The dictate tests inject fake `numpy`/`sounddevice` modules so they run without the optional extra installed. Install the test extras and run:
 
 ```bash
 pipx install --force --editable '.[test]'

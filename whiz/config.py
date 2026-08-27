@@ -68,6 +68,35 @@ class Config:
     speaker_match_threshold: float = 0.8
     # When True, save a voice profile for each named speaker after transcription/merge.
     save_voice_profiles: bool = True
+    # --- Dictation (whiz dictate) ---
+    # mlx-whisper model repo or path (empty => provider default, e.g.
+    # mlx-community/whisper-large-v3-turbo-mlx-4bit).
+    dictate_model: str = ""
+    # Spoken language code for dictation (default "ru").
+    dictate_language: str = "ru"
+    # Whisper initial_prompt to bias recognition (empty => built-in Russian
+    # jargon/obscenity prompt from the engine).
+    dictate_prompt: str = ""
+    # Seconds to keep the STT model loaded after a session ends before
+    # unloading (0 => never unload; default 45 for warm back-to-back).
+    dictate_idle_timeout: float = 45.0
+    # Force a specific STT provider by name (empty => auto-detect by platform).
+    dictate_stt_provider: str = ""
+    # Force a specific text injector by name (empty => auto-detect).
+    dictate_injector: str = ""
+    # Force a specific dictation indicator by name (empty => auto-detect).
+    dictate_indicator: str = ""
+    # Global toggle hotkey in pynput syntax (e.g. "<ctrl>+<space>").
+    dictate_hotkey: str = "<ctrl>+<space>"
+    # Trigger mode: "toggle" (press to start, press again to stop) or "ptt"
+    # (push-to-talk: hold to dictate, release to stop).
+    dictate_trigger: str = "toggle"
+    # Enable WebRTC VAD for utterance segmentation.
+    dictate_vad: bool = True
+    # Seconds of continuous silence before a session auto-stops (0 => off).
+    dictate_auto_stop_silence: float = 10.0
+    # Show the floating dictation indicator overlay.
+    dictate_show_indicator: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

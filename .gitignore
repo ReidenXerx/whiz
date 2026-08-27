@@ -26,3 +26,18 @@ htmlcov/
 
 # whiz local config (uncomment to ignore)
 # ~/.config/whiz/uv.lock
+
+# bearing — generated local state (safe to remove via bearing-uninstall)
+.bearing/.gitnexus-*
+.bearing/.bearing-*
+.bearing/.task-core.md
+.bearing/task-cores/
+*.bearing-backup
+.bearing/manifest.json
+.bearing/hooks.local.json
+.gitnexus/
+.tmp-agent/
+.bearing/gitnexus-api-profile.json
+docs/ARCHITECTURE.gitnexus.md
+.agents/skills/
+# --- end bearing ---

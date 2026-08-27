@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "whiz"
-version = "0.12.3"
+version = "0.13.1"
 description = "A transcription CLI for meetings, screen recordings, and interviews — powered by whisper.cpp, with diarization, speaker naming, screenshots, HTML transcripts, and auto-detecting AI analysis (summary, action items, implementation plans, session notes)."
 readme = "README.md"
 license = { text = "MIT" }
@@ -28,6 +28,15 @@ dependencies = ["rich>=13"]
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
+dictate = [
+    "mlx-whisper>=0.1",
+    "sounddevice>=0.4",
+    "webrtcvad>=2.0",
+    "pynput>=1.7",
+    "pyobjc-framework-Cocoa>=10",
+    "pyobjc-framework-Quartz>=10",
+    "pyobjc-framework-ApplicationServices>=10",
+]
 
 [project.urls]
 Homepage = "https://github.com/ReidenXerx/whiz"
@@ -38,4 +47,4 @@ Issues = "https://github.com/ReidenXerx/whiz/issues"
 whiz = "whiz.cli:main"
 
 [tool.setuptools]
-packages = ["whiz"]
+packages = ["whiz", "whiz.dictate", "whiz.dictate.providers"]

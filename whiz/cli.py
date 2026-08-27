@@ -8,6 +8,7 @@ Subcommands:
   whiz models download N   Download a model from HuggingFace.
   whiz speakers list       List stored voice profiles.
   whiz analyze <file>      AI-analyze a prior transcript (+ frames).
+  whiz dictate             System-wide voice dictation (toggle hotkey + floating indicator).
   whiz config show         Show current config.
   whiz config edit         Open config in $EDITOR.
   whiz config set K=V      Set a config value.
@@ -1318,6 +1319,172 @@ def cmd_merge(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------- dictate ----------
+
+def cmd_dictate(args: argparse.Namespace) -> int:
+    """System-wide voice dictation via mlx-whisper with a toggle hotkey.
+
+    Listens for a global hotkey (default Ctrl+Space). Press to start/stop a
+    dictation session: mic audio is transcribed and typed into whatever app
+    has keyboard focus. A floating indicator shows live mic level. Requires
+    macOS Accessibility + Microphone permissions and the ``dictate`` extra
+    (``pipx inject whiz 'whiz[dictate]'``).
+    """
+    config = cfg.load()
+
+    # --list-providers: print available providers and exit (no deps needed).
+    if getattr(args, "list_providers", False):
+        from whiz.dictate.providers import list_providers
+
+        provs = list_providers()
+        ui.header("whiz", "dictate providers")
+        for kind in ("stt", "injector", "indicator"):
+            rows = [
+                [name, supports, "yes" if current else "no"]
+                for name, supports, current in provs[kind]
+            ]
+            ui.table(
+                f"{kind} providers",
+                [("Name", "left"), ("Platform", "left"), ("Current", "right")],
+                rows,
+            )
+        return 0
+
+    # Check for the optional extra before importing the engine (which pulls in
+    # sounddevice/pynput). A missing dep gives a clear install hint instead of
+    # an ImportError traceback.
+    try:
+        import sounddevice  # noqa: F401
+        import pynput  # noqa: F401
+    except ImportError:
+        raise SystemExit(
+            "The 'dictate' extra is not installed. Install it with:\n"
+            "  pipx inject whiz 'whiz[dictate]'\n\n"
+            "Then grant Accessibility + Microphone permissions in System "
+            "Settings → Privacy & Security."
+        )
+
+    from whiz.dictate import run_dictate
+
+    overrides: dict[str, object] = {
+        "model": args.model or "",
+        "language": args.language or "",
+        "prompt": args.prompt if args.prompt is not None else "",
+        "hotkey": args.hotkey or "",
+    }
+    if args.trigger:
+        overrides["trigger"] = args.trigger
+    if args.idle_timeout is not None:
+        overrides["idle_timeout"] = args.idle_timeout
+    if args.auto_stop_silence is not None:
+        overrides["auto_stop_silence"] = args.auto_stop_silence
+    if args.no_indicator:
+        overrides["show_indicator"] = False
+
+    return run_dictate(config, **overrides)
+
+
+# Friendly key names → config field names for `whiz dictate set`.
+# Lets users say `whiz dictate set hotkey=<f8>` instead of the verbose
+# `whiz config set dictate_hotkey=<f8>`.
+_DICTATE_FRIENDLY_KEYS: dict[str, str] = {
+    "model": "dictate_model",
+    "language": "dictate_language",
+    "lang": "dictate_language",
+    "prompt": "dictate_prompt",
+    "idle_timeout": "dictate_idle_timeout",
+    "idle": "dictate_idle_timeout",
+    "timeout": "dictate_idle_timeout",
+    "hotkey": "dictate_hotkey",
+    "key": "dictate_hotkey",
+    "trigger": "dictate_trigger",
+    "mode": "dictate_trigger",
+    "vad": "dictate_vad",
+    "auto_stop_silence": "dictate_auto_stop_silence",
+    "silence": "dictate_auto_stop_silence",
+    "show_indicator": "dictate_show_indicator",
+    "indicator": "dictate_show_indicator",
+    "stt_provider": "dictate_stt_provider",
+    "injector": "dictate_injector",
+    "indicator_provider": "dictate_indicator",
+}
+
+# All dictate_* config fields, in display order, with a short label for the
+# `whiz dictate config` (show) table.
+_DICTATE_CONFIG_FIELDS: list[tuple[str, str, str]] = [
+    # (config_key, label, description)
+    ("dictate_hotkey", "Hotkey", "Global hotkey (pynput syntax, e.g. <ctrl>+<space>)"),
+    ("dictate_trigger", "Trigger", "toggle (press to start/stop) or ptt (hold to talk)"),
+    ("dictate_language", "Language", "Spoken language code (default: ru)"),
+    ("dictate_model", "Model", "mlx-whisper model repo/path (empty = default turbo-4bit)"),
+    ("dictate_prompt", "Prompt", "Whisper initial_prompt (empty = built-in Russian jargon)"),
+    ("dictate_idle_timeout", "Idle timeout", "Seconds before model unloads after session (0 = never)"),
+    ("dictate_auto_stop_silence", "Auto-stop silence", "Seconds of silence to auto-stop (0 = off)"),
+    ("dictate_vad", "VAD", "WebRTC VAD for utterance segmentation"),
+    ("dictate_show_indicator", "Indicator", "Floating dictation overlay"),
+    ("dictate_stt_provider", "STT provider", "Force STT provider (empty = auto)"),
+    ("dictate_injector", "Injector", "Force text injector (empty = auto)"),
+    ("dictate_indicator", "Indicator provider", "Force indicator provider (empty = auto)"),
+]
+
+
+def cmd_dictate_config(args: argparse.Namespace) -> int:
+    """Show current dictation settings in a readable table."""
+    config = cfg.load()
+    ui.header("whiz", "dictate settings")
+    rows: list[list[str]] = []
+    for key, label, desc in _DICTATE_CONFIG_FIELDS:
+        value = getattr(config, key)
+        rows.append([label, _format_dictate_value(value), desc])
+    ui.table(
+        f"Config: {cfg.CONFIG_PATH}",
+        [("Setting", "left"), ("Value", "left"), ("Description", "left")],
+        rows,
+    )
+    ui.muted("Change with:  whiz dictate set <key>=<value>  (e.g. whiz dictate set hotkey=<f8>)")
+    return 0
+
+
+def _format_dictate_value(value: object) -> str:
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    if isinstance(value, str) and value == "":
+        return "(default)"
+    return str(value)
+
+
+def cmd_dictate_set(args: argparse.Namespace) -> int:
+    """Set a dictation setting using friendly key names.
+
+    ``whiz dictate set hotkey=<f8>`` is equivalent to
+    ``whiz config set dictate_hotkey=<f8>`` but easier to type and discover.
+    Accepts friendly aliases (lang, idle, silence, indicator, ...) mapped via
+    _DICTATE_FRIENDLY_KEYS. Unknown keys are rejected with the valid list.
+    """
+    config = cfg.load()
+    assignment = args.assignment
+    if "=" not in assignment:
+        raise SystemExit("Expected KEY=VALUE (e.g. whiz dictate set hotkey=<f8>)")
+    friendly_key, _, value = assignment.partition("=")
+    friendly_key = friendly_key.strip().lower()
+    # Resolve friendly name → config field.
+    if friendly_key not in _DICTATE_FRIENDLY_KEYS:
+        valid = ", ".join(sorted(_DICTATE_FRIENDLY_KEYS.keys()))
+        raise SystemExit(
+            f"Unknown dictate setting '{friendly_key}'. Valid: {valid}"
+        )
+    config_key = _DICTATE_FRIENDLY_KEYS[friendly_key]
+    field_type = cfg.Config.__dataclass_fields__[config_key].type
+    coerced = _coerce(value.strip(), field_type)
+    # Validate enum-like fields (e.g. dictate_trigger must be toggle/ptt).
+    _validate_config_value(config_key, coerced)
+    setattr(config, config_key, coerced)
+    path = cfg.save(config)
+    ui.status(f"Set {friendly_key} = {coerced!r}  →  {config_key}", kind="ok")
+    ui.muted(f"Saved to {path}")
+    return 0
+
+
 # ---------- speakers (voice profiles) ----------
 
 def cmd_speakers_list(args: argparse.Namespace) -> int:
@@ -1440,15 +1607,35 @@ def cmd_config_edit(args: argparse.Namespace) -> int:
 
 
 def _coerce(value: str, field_type: type):
-    if field_type is bool:
+    # With `from __future__ import annotations`, dataclass field types are
+    # strings (e.g. "bool") not the type objects. Normalize to a string name.
+    ft = field_type if isinstance(field_type, str) else getattr(field_type, "__name__", str(field_type))
+    if ft == "bool":
         return value.lower() in {"1", "true", "yes", "on"}
-    if field_type is int:
+    if ft == "int":
         return int(value)
-    if field_type is float:
+    if ft == "float":
         return float(value)
-    if field_type is list:
+    if ft == "list":
         return [v.strip() for v in value.split(",") if v.strip()]
     return value
+
+
+# Enum-like config fields with a fixed set of allowed values. Shared by both
+# `whiz config set` and `whiz dictate set` so the two entry points enforce the
+# same constraints — a typo via either path can't silently degrade.
+_CONFIG_ENUM_VALUES: dict[str, set[str]] = {
+    "dictate_trigger": {"toggle", "ptt"},
+}
+
+
+def _validate_config_value(key: str, value: object) -> None:
+    """Reject out-of-range values for enum-like config fields."""
+    allowed = _CONFIG_ENUM_VALUES.get(key)
+    if allowed is not None and value not in allowed:
+        raise SystemExit(
+            f"Invalid {key}={value!r}. Must be one of: {', '.join(sorted(allowed))}"
+        )
 
 
 def cmd_config_set(args: argparse.Namespace) -> int:
@@ -1462,6 +1649,7 @@ def cmd_config_set(args: argparse.Namespace) -> int:
         raise SystemExit(f"Unknown config key '{key}'. Valid: {', '.join(cfg.Config.__dataclass_fields__)}")
     field_type = cfg.Config.__dataclass_fields__[key].type
     coerced = _coerce(value.strip(), field_type)
+    _validate_config_value(key, coerced)
     setattr(config, key, coerced)
     path = cfg.save(config)
     print(f"Set {key} = {coerced!r}")
@@ -1578,6 +1766,27 @@ def build_parser() -> argparse.ArgumentParser:
     sm.add_argument("--speakers", type=int, default=None, nargs="?", const=0, help="Known speaker count; omit = auto-detect")
     sm.add_argument("--cluster-threshold", type=float, default=None, help="Clustering threshold when auto-detecting (default 0.9)")
     sm.set_defaults(func=cmd_speakers_match)
+
+    # dictate
+    dt = sub.add_parser("dictate", aliases=["d"], help="System-wide voice dictation via mlx-whisper. Toggle or push-to-talk with a global hotkey; transcribed text is typed into the focused app. Requires the 'dictate' extra: pipx inject whiz 'whiz[dictate]'")
+    dt.add_argument("--model", default="", help="mlx-whisper model repo/path (default: mlx-community/whisper-large-v3-turbo-mlx-4bit)")
+    dt.add_argument("-l", "--language", default="", help="Spoken language code (default: ru)")
+    dt.add_argument("--prompt", default=None, help="Whisper initial_prompt to bias recognition (default: built-in Russian jargon/obscenity prompt)")
+    dt.add_argument("--idle-timeout", dest="idle_timeout", type=float, default=None, help="Seconds to keep the model loaded after a session before unloading (default: 45; 0 = never unload)")
+    dt.add_argument("--hotkey", default="", help="Global hotkey in pynput syntax (default: <ctrl>+<space>)")
+    dt.add_argument("--trigger", default="", choices=["", "toggle", "ptt"], help="Trigger mode: toggle (press to start/stop) or ptt (hold to talk; release to stop). Default: config dictate_trigger")
+    dt.add_argument("--auto-stop-silence", dest="auto_stop_silence", type=float, default=None, help="Seconds of silence before a session auto-stops (default: 10; 0 = off)")
+    dt.add_argument("--no-indicator", dest="no_indicator", action="store_true", help="Hide the floating dictation indicator overlay")
+    dt.add_argument("--list-providers", dest="list_providers", action="store_true", help="List available STT/injector/indicator providers for this platform and exit")
+    # Optional subcommands: `whiz dictate config` and `whiz dictate set`.
+    # When no subcommand is given, bare `whiz dictate` runs dictation (via the
+    # default func=cmd_dictate set below). Subcommands override the default.
+    dtsub = dt.add_subparsers(dest="dictate_command", required=False)
+    dtsub.add_parser("config", aliases=["cfg"], help="Show current dictation settings").set_defaults(func=cmd_dictate_config)
+    dts = dtsub.add_parser("set", aliases=["s"], help="Set a dictation setting with a friendly key name (e.g. whiz dictate set hotkey=<f8>)")
+    dts.add_argument("assignment", help="KEY=VALUE, e.g. hotkey=<f8> or trigger=ptt or language=en")
+    dts.set_defaults(func=cmd_dictate_set)
+    dt.set_defaults(func=cmd_dictate)
 
     # config
     cp = sub.add_parser("config", aliases=["c"], help="View or edit configuration")
