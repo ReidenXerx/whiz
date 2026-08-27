@@ -307,6 +307,7 @@ dictate_trigger = "toggle"
 dictate_vad = true
 dictate_auto_stop_silence = 10.0
 dictate_show_indicator = true
+dictate_idle_visible = true
 ```
 
 If `model` is empty, whiz auto-picks the best available model by this preference:
@@ -604,7 +605,7 @@ whiz can act as a **system-wide voice dictation tool**: press a hotkey, speak, a
   - **Push-to-talk** (`ptt`) — hold the hotkey down to talk; release to stop. Works with a single key (e.g. `<f8>`) or a modifier+key combo (e.g. `<ctrl>+<space>`); all modifiers must be held for the press to count, so a combo won't hijack the final key alone. Tighter control, no accidental on-air when you pause.
 - **Utterance segmentation** — WebRTC VAD splits your speech into utterances. Each utterance is transcribed and typed as soon as you pause, so text appears incrementally without waiting for the whole session. Turning VAD off (`whiz dictate set vad=false`) disables this: the entire session is transcribed as one block when the session ends, so you only see text after you stop. Keep VAD on for live incremental dictation.
 - **Spawn-on-demand + idle timeout** — the model loads on first use and stays warm for 45 seconds after you stop, so back-to-back dictation is instant. After the idle window it unloads, dropping to zero RAM at idle.
-- **Floating indicator** — a small always-on-top, click-through circle with a mic badge and a live volume curve (cyan = listening, amber = transcribing). Pass `--no-indicator` to hide it.
+- **Floating indicator** — a small always-on-top, click-through circle with a mic badge and a live volume curve (cyan = listening, amber = transcribing). By default the dimmed badge stays visible even when idle (so you know dictation is armed); set `dictate_idle_visible=false` to hide it until a session starts. Pass `--no-indicator` to disable the overlay entirely.
 - **Russian lexica** — the default model (`mlx-community/whisper-large-v3-turbo`) and a built-in `initial_prompt` in informal Russian register bias recognition toward accurate Russian jargon, slang, and obscenity (no self-censoring). Override with `--prompt` or `dictate_prompt` in config.
 - **Provider-abstracted** — the engine depends on pluggable provider interfaces (STT, text injector, indicator). macOS providers are built in; Linux/Windows providers can be added later without touching the engine.
 
@@ -681,9 +682,28 @@ Friendly keys and their aliases:
 - `auto_stop_silence` / `silence` — seconds of silence to auto-stop
 - `vad` — WebRTC VAD on/off
 - `show_indicator` / `indicator` — floating overlay on/off
+- `idle_visible` / `idle_badge` — keep the dimmed badge visible while idle (on by default)
 - `stt_provider`, `injector`, `indicator_provider` — force a provider (auto if empty)
 
 You can also set these with the generic `whiz config set dictate_*` commands (see [Configuration](#configuration)).
+
+### Always-on login service (`whiz dictate service`)
+
+Instead of keeping a terminal open, install whiz dictate as a macOS **LaunchAgent** that starts at login and stays running in the background — the hotkey is always armed and the dimmed idle indicator is always visible. Manage it with `whiz dictate service`:
+
+```bash
+whiz dictate service install      # write the LaunchAgent plist and load it (starts at login, KeepAlive)
+whiz dictate service status       # is it loaded? shows PID + last exit status
+whiz dictate service uninstall    # unload and remove the LaunchAgent
+```
+
+The plist lives at `~/Library/LaunchAgents/com.reidenxerx.whiz.dictate.plist`; combined stdout/stderr logs go to `~/Library/Logs/whiz-dictate.log`. `KeepAlive=true` means the agent restarts if it exits (including a deliberate kill) — run `service uninstall` to stop it.
+
+The background agent is a **separate process** from any terminal `whiz`, so it needs its own **Accessibility** grant in System Settings → Privacy & Security (pynput's global hotkey and CGEvent text injection both require it). After granting, restart the agent:
+
+```bash
+whiz dictate service uninstall && whiz dictate service install
+```
 
 ## Testing
 

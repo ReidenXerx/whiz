@@ -97,6 +97,10 @@ class Config:
     dictate_auto_stop_silence: float = 10.0
     # Show the floating dictation indicator overlay.
     dictate_show_indicator: bool = True
+    # Keep the indicator visible in its dimmed idle state while the service
+    # runs (not just during an active session). False hides the overlay until
+    # a session starts. Requires dictate_show_indicator.
+    dictate_idle_visible: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

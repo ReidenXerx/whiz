@@ -1799,7 +1799,7 @@ sdist = { url = "https://files.pythonhosted.org/packages/89/34/e2de2d97f3288512b
 
 [[package]]
 name = "whiz"
-version = "0.13.1"
+version = "0.14.0"
 source = { editable = "." }
 dependencies = [
     { name = "rich" },

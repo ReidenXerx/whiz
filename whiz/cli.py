@@ -1384,6 +1384,43 @@ def cmd_dictate(args: argparse.Namespace) -> int:
     return run_dictate(config, **overrides)
 
 
+def cmd_dictate_service(args: argparse.Namespace) -> int:
+    """Manage the whiz dictate login LaunchAgent.
+
+    Subcommands: install | uninstall | status.
+    install writes the plist to ~/Library/LaunchAgents and loads it so
+    dictation starts at login and stays running (KeepAlive). uninstall
+    unloads and removes it. status reports whether it's loaded.
+    """
+    from whiz.dictate import service
+
+    action = getattr(args, "service_action", "") or ""
+    if action == "install":
+        # Refuse to install the LaunchAgent if the 'dictate' extra isn't
+        # installed: the agent would exit non-zero on startup and, with
+        # KeepAlive=true, launchd would restart it in a crash loop that
+        # spams the log file forever. Make the user install the extra first,
+        # then run `service install`.
+        try:
+            import sounddevice  # noqa: F401
+            import pynput  # noqa: F401
+        except ImportError:
+            print(
+                "The 'dictate' extra is not installed. The LaunchAgent would "
+                "crash-loop on startup. Install the extra first, then retry:\n"
+                "  pipx inject whiz 'whiz[dictate]'\n"
+                "  whiz dictate service install",
+                file=sys.stderr,
+            )
+            return 1
+        return service.install()
+    if action == "uninstall":
+        return service.uninstall()
+    if action == "status":
+        return service.status()
+    raise SystemExit(f"Unknown service action '{action}'. Use install|uninstall|status.")
+
+
 # Friendly key names → config field names for `whiz dictate set`.
 # Lets users say `whiz dictate set hotkey=<f8>` instead of the verbose
 # `whiz config set dictate_hotkey=<f8>`.
@@ -1404,6 +1441,8 @@ _DICTATE_FRIENDLY_KEYS: dict[str, str] = {
     "silence": "dictate_auto_stop_silence",
     "show_indicator": "dictate_show_indicator",
     "indicator": "dictate_show_indicator",
+    "idle_visible": "dictate_idle_visible",
+    "idle_badge": "dictate_idle_visible",
     "stt_provider": "dictate_stt_provider",
     "injector": "dictate_injector",
     "indicator_provider": "dictate_indicator",
@@ -1422,6 +1461,7 @@ _DICTATE_CONFIG_FIELDS: list[tuple[str, str, str]] = [
     ("dictate_auto_stop_silence", "Auto-stop silence", "Seconds of silence to auto-stop (0 = off)"),
     ("dictate_vad", "VAD", "WebRTC VAD for utterance segmentation"),
     ("dictate_show_indicator", "Indicator", "Floating dictation overlay"),
+    ("dictate_idle_visible", "Idle badge", "Keep the indicator dimmed-visible while idle (not just during a session)"),
     ("dictate_stt_provider", "STT provider", "Force STT provider (empty = auto)"),
     ("dictate_injector", "Injector", "Force text injector (empty = auto)"),
     ("dictate_indicator", "Indicator provider", "Force indicator provider (empty = auto)"),
@@ -1786,6 +1826,11 @@ def build_parser() -> argparse.ArgumentParser:
     dts = dtsub.add_parser("set", aliases=["s"], help="Set a dictation setting with a friendly key name (e.g. whiz dictate set hotkey=<f8>)")
     dts.add_argument("assignment", help="KEY=VALUE, e.g. hotkey=<f8> or trigger=ptt or language=en")
     dts.set_defaults(func=cmd_dictate_set)
+    dsvc = dtsub.add_parser("service", aliases=["svc"], help="Manage the whiz dictate login LaunchAgent (install | uninstall | status)")
+    dsvc_sub = dsvc.add_subparsers(dest="dictate_service_action", required=True)
+    dsvc_sub.add_parser("install", help="Install and load the LaunchAgent so dictation starts at login").set_defaults(func=cmd_dictate_service, service_action="install")
+    dsvc_sub.add_parser("uninstall", aliases=["remove"], help="Unload and remove the LaunchAgent").set_defaults(func=cmd_dictate_service, service_action="uninstall")
+    dsvc_sub.add_parser("status", aliases=["st"], help="Show whether the service is loaded").set_defaults(func=cmd_dictate_service, service_action="status")
     dt.set_defaults(func=cmd_dictate)
 
     # config
