@@ -263,6 +263,16 @@ whiz analyze recording.mov --summary
 whiz analyze recording.mov --prompt "What risks? {transcript}"
 ```
 
+### `whiz upgrade`
+
+One-command update — reinstalls whiz from git, refreshes the dictate extra if installed, restarts the background dictation service if installed, and re-verifies the full stack. Handles the entire update dance so you never need manual pipx/service-restart steps:
+
+```bash
+whiz upgrade
+```
+
+Why this exists: `pipx install --force` updates the whiz binary but does NOT restart the running LaunchAgent, so the old code keeps serving until the agent happens to restart — a silent staleness trap. `whiz upgrade` closes the gap end to end. It only restarts the service if it's already installed, and only re-injects the dictate extra if it was already installed (so a transcription-only user isn't surprised by a 1.6 GB mlx-whisper download).
+
 ## Configuration
 
 Config lives at `~/.config/whiz/config.toml` (created on first `config edit`/`set`):

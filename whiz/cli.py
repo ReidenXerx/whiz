@@ -1711,6 +1711,126 @@ def cmd_config_set(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------- upgrade ----------
+
+# The canonical install source. pipx installs from this git URL, so `whiz
+# upgrade` re-runs the same install to pull the latest commit.
+_INSTALL_SOURCE = "git+https://github.com/ReidenXerx/whiz.git"
+
+
+def _dictate_extra_installed() -> bool:
+    """True if the 'dictate' extra's heavy deps are importable."""
+    try:
+        import sounddevice  # noqa: F401
+        import pynput  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _service_plist_exists() -> bool:
+    """True if the whiz dictate LaunchAgent plist is on disk."""
+    from whiz.dictate import service
+
+    return service.plist_path().exists()
+
+
+def _run_live(cmd: list[str]) -> int:
+    """Run a command streaming stdout/stderr to the terminal (not captured).
+
+    Unlike service._run (capture_output), this lets the user see pipx's
+    download/install progress in real time. Returns the exit code.
+    """
+    proc = subprocess.run(cmd, check=False)
+    return proc.returncode
+
+
+def cmd_upgrade(args: argparse.Namespace) -> int:
+    """One-command upgrade: reinstall whiz, refresh the dictate extra, and
+    restart the background LaunchAgent so the new code takes effect
+    immediately — no manual pipx/service-restart dance.
+
+    The classic trap: `pipx install --force` updates the whiz binary in the
+    venv but does NOT touch the running LaunchAgent, so the old code keeps
+    running until the agent happens to restart. Users reinstall, think they're
+    on the new version, and the hotkey/indicator is still broken because the
+    agent is serving stale code. This command closes that gap end to end:
+
+    1. Reinstall whiz from git (pulls the latest commit).
+    2. Re-inject the 'dictate' extra IF it was already installed (so an
+       upgraded whiz picks up any new/changed extra deps). Skipped if the
+       extra was never installed — we don't want to surprise a user who only
+       uses whiz for transcription with a 1.6 GB mlx-whisper download.
+    3. Restart the LaunchAgent IF it's installed (unload + load) so launchd
+       re-execs the agent from the freshly installed code. Skipped if no
+       service is installed.
+    4. Run `whiz dictate setup` to re-verify the full stack (extra, perms,
+       hotkey) and surface anything the upgrade broke.
+
+    Returns 0 if everything succeeded, 1 if a step failed.
+    """
+    ui.header("whiz", "upgrade")
+    old_version = __version__
+
+    # 1. Reinstall from git.
+    ui.phase("reinstalling whiz from git")
+    rc = _run_live(["pipx", "install", "--force", _INSTALL_SOURCE])
+    if rc != 0:
+        ui.status(f"pipx install failed (exit {rc}). Aborting upgrade.", kind="warn")
+        return 1
+
+    # Reload __version__ from the freshly installed package — the value
+    # imported at module load is the OLD one; the new code is on disk now.
+    import importlib
+
+    importlib.reload(sys.modules["whiz"])
+    new_version = sys.modules["whiz"].__version__
+    if new_version != old_version:
+        ui.status(f"Updated {old_version} → {new_version}", kind="ok")
+    else:
+        ui.status(f"Reinstalled (still {new_version})", kind="ok")
+
+    # 2. Re-inject the dictate extra if it was installed.
+    if _dictate_extra_installed():
+        ui.phase("refreshing the dictate extra")
+        rc = _run_live(["pipx", "inject", "whiz", "whiz[dictate]"])
+        if rc != 0:
+            ui.status(
+                f"pipx inject whiz[dictate] failed (exit {rc}). "
+                "The extra may be stale — re-run: pipx inject whiz 'whiz[dictate]'",
+                kind="warn",
+            )
+        else:
+            ui.status("dictate extra refreshed", kind="ok")
+    else:
+        ui.muted("dictate extra not installed — skipping (install with: pipx inject whiz 'whiz[dictate]')")
+
+    # 3. Restart the LaunchAgent if it's installed.
+    if _service_plist_exists():
+        ui.phase("restarting the background service")
+        from whiz.dictate import service
+
+        service.uninstall()
+        rc = service.install()
+        if rc != 0:
+            ui.status("service restart failed — see message above", kind="warn")
+            return 1
+        ui.status("background service restarted with the new code", kind="ok")
+    else:
+        ui.muted("dictate service not installed — skipping (install with: whiz dictate service install)")
+
+    # 4. Re-verify the full stack.
+    ui.phase("verifying")
+    from whiz.dictate import setup as setup_mod
+
+    setup_rc = setup_mod.setup()
+    if setup_rc != 0:
+        ui.status("verification found issues — see the report above", kind="warn")
+        return 1
+    ui.status("Upgrade complete. Everything ready.", kind="ok")
+    return 0
+
+
 # ---------- argparse ----------
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1856,6 +1976,10 @@ def build_parser() -> argparse.ArgumentParser:
     cs = csub.add_parser("set", help="Set a value: KEY=VALUE")
     cs.add_argument("assignment", help="KEY=VALUE, e.g. threads=8 or model=turbo")
     cs.set_defaults(func=cmd_config_set)
+
+    # upgrade
+    up = sub.add_parser("upgrade", aliases=["up"], help="One-command upgrade: reinstall whiz from git, refresh the dictate extra if installed, restart the background dictation service if installed, and re-verify. Handles the full update dance so you don't need manual pipx/service-restart steps.")
+    up.set_defaults(func=cmd_upgrade)
 
     return p
 
