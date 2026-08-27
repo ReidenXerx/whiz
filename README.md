@@ -302,7 +302,7 @@ dictate_idle_timeout = 45.0
 dictate_stt_provider = ""
 dictate_injector = ""
 dictate_indicator = ""
-dictate_hotkey = "<ctrl>+<space>"
+dictate_hotkey = "<cmd>+<shift>+d"
 dictate_trigger = "toggle"
 dictate_vad = true
 dictate_auto_stop_silence = 10.0
@@ -600,7 +600,7 @@ whiz can act as a **system-wide voice dictation tool**: press a hotkey, speak, a
 ### How it works
 
 - **Trigger mode** — two ways to start a session, set with `--trigger` or `dictate_trigger` in config:
-  - **Toggle** (default) — press the hotkey (default Ctrl+Space) to start; press again to stop. Hands-free once you start.
+  - **Toggle** (default) — press the hotkey (default Cmd+Shift+D) to start; press again to stop. Hands-free once you start.
   - **Push-to-talk** (`ptt`) — hold the hotkey down to talk; release to stop. Works with a single key (e.g. `<f8>`) or a modifier+key combo (e.g. `<ctrl>+<space>`); all modifiers must be held for the press to count, so a combo won't hijack the final key alone. Tighter control, no accidental on-air when you pause.
 - **Utterance segmentation** — WebRTC VAD splits your speech into utterances. Each utterance is transcribed and typed as soon as you pause, so text appears incrementally without waiting for the whole session. Turning VAD off (`whiz dictate set vad=false`) disables this: the entire session is transcribed as one block when the session ends, so you only see text after you stop. Keep VAD on for live incremental dictation.
 - **Spawn-on-demand + idle timeout** — the model loads on first use and stays warm for 45 seconds after you stop, so back-to-back dictation is instant. After the idle window it unloads, dropping to zero RAM at idle.
@@ -624,7 +624,7 @@ The model (~2 GB) auto-downloads from HuggingFace on first use and caches under 
 ### Usage
 
 ```bash
-# Start dictation — press Ctrl+Space to toggle on/off:
+# Start dictation — press Cmd+Shift+D to toggle on/off:
 whiz dictate
 
 # Use a different hotkey:
