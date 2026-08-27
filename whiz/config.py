@@ -101,8 +101,9 @@ class Config:
     dictate_show_indicator: bool = True
     # Keep the indicator visible in its dimmed idle state while the service
     # runs (not just during an active session). False hides the overlay until
-    # a session starts. Requires dictate_show_indicator.
-    dictate_idle_visible: bool = True
+    # a session starts — most users want it only when dictating. Enable with:
+    #   whiz dictate set idle_visible=true
+    dictate_idle_visible: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
