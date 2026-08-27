@@ -104,6 +104,11 @@ class Config:
     # a session starts — most users want it only when dictating. Enable with:
     #   whiz dictate set idle_visible=true
     dictate_idle_visible: bool = False
+    # Show a menu bar item (macOS NSStatusItem) with Start/Stop, Open Config,
+    # About, and Quit — so users can control dictation without the CLI. Runs
+    # inside the LaunchAgent process. Disable for a pure hotkey/CLI experience:
+    #   whiz dictate set menu_bar=false
+    dictate_menu_bar: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
