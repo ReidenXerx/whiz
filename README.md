@@ -605,7 +605,7 @@ whiz can act as a **system-wide voice dictation tool**: press a hotkey, speak, a
 - **Utterance segmentation** — WebRTC VAD splits your speech into utterances. Each utterance is transcribed and typed as soon as you pause, so text appears incrementally without waiting for the whole session. Turning VAD off (`whiz dictate set vad=false`) disables this: the entire session is transcribed as one block when the session ends, so you only see text after you stop. Keep VAD on for live incremental dictation.
 - **Spawn-on-demand + idle timeout** — the model loads on first use and stays warm for 45 seconds after you stop, so back-to-back dictation is instant. After the idle window it unloads, dropping to zero RAM at idle.
 - **Floating indicator** — a small always-on-top, click-through circle with a mic badge and a live volume curve (cyan = listening, amber = transcribing). Pass `--no-indicator` to hide it.
-- **Russian lexica** — the default model (`mlx-community/whisper-large-v3-turbo-mlx-4bit`) and a built-in `initial_prompt` in informal Russian register bias recognition toward accurate Russian jargon, slang, and obscenity (no self-censoring). Override with `--prompt` or `dictate_prompt` in config.
+- **Russian lexica** — the default model (`mlx-community/whisper-large-v3-turbo-q4`) and a built-in `initial_prompt` in informal Russian register bias recognition toward accurate Russian jargon, slang, and obscenity (no self-censoring). Override with `--prompt` or `dictate_prompt` in config.
 - **Provider-abstracted** — the engine depends on pluggable provider interfaces (STT, text injector, indicator). macOS providers are built in; Linux/Windows providers can be added later without touching the engine.
 
 ### One-time setup (macOS)
@@ -619,7 +619,7 @@ pipx inject whiz 'whiz[dictate]'
 #    - Microphone (so whiz can capture audio)
 ```
 
-The model (~2 GB) auto-downloads from HuggingFace on first use and caches under `~/.cache/huggingface`.
+The model (~500 MB) auto-downloads from HuggingFace on first use and caches under `~/.cache/huggingface`.
 
 ### Usage
 
@@ -643,7 +643,7 @@ whiz dictate --idle-timeout 120
 whiz dictate --no-indicator
 
 # Use a different mlx-whisper model:
-whiz dictate --model mlx-community/whisper-large-v3-mlx-4bit
+whiz dictate --model mlx-community/whisper-large-v3-turbo-q4
 
 # List available providers for this platform:
 whiz dictate --list-providers
@@ -667,7 +667,7 @@ whiz dictate set idle=60               # → dictate_idle_timeout (alias: timeou
 whiz dictate set silence=15            # → dictate_auto_stop_silence (alias: auto_stop_silence)
 whiz dictate set indicator=false       # → dictate_show_indicator (alias: show_indicator)
 whiz dictate set prompt="my custom"     # → dictate_prompt
-whiz dictate set model=mlx-community/whisper-large-v3-mlx-4bit  # → dictate_model
+whiz dictate set model=mlx-community/whisper-large-v3-turbo-q4  # → dictate_model
 ```
 
 Friendly keys and their aliases:

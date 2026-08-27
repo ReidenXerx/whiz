@@ -1416,7 +1416,7 @@ _DICTATE_CONFIG_FIELDS: list[tuple[str, str, str]] = [
     ("dictate_hotkey", "Hotkey", "Global hotkey (pynput syntax, e.g. <ctrl>+<space>)"),
     ("dictate_trigger", "Trigger", "toggle (press to start/stop) or ptt (hold to talk)"),
     ("dictate_language", "Language", "Spoken language code (default: ru)"),
-    ("dictate_model", "Model", "mlx-whisper model repo/path (empty = default turbo-4bit)"),
+    ("dictate_model", "Model", "mlx-whisper model repo/path (empty = default whisper-large-v3-turbo-q4)"),
     ("dictate_prompt", "Prompt", "Whisper initial_prompt (empty = built-in Russian jargon)"),
     ("dictate_idle_timeout", "Idle timeout", "Seconds before model unloads after session (0 = never)"),
     ("dictate_auto_stop_silence", "Auto-stop silence", "Seconds of silence to auto-stop (0 = off)"),
@@ -1769,7 +1769,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # dictate
     dt = sub.add_parser("dictate", aliases=["d"], help="System-wide voice dictation via mlx-whisper. Toggle or push-to-talk with a global hotkey; transcribed text is typed into the focused app. Requires the 'dictate' extra: pipx inject whiz 'whiz[dictate]'")
-    dt.add_argument("--model", default="", help="mlx-whisper model repo/path (default: mlx-community/whisper-large-v3-turbo-mlx-4bit)")
+    dt.add_argument("--model", default="", help="mlx-whisper model repo/path (default: mlx-community/whisper-large-v3-turbo-q4)")
     dt.add_argument("-l", "--language", default="", help="Spoken language code (default: ru)")
     dt.add_argument("--prompt", default=None, help="Whisper initial_prompt to bias recognition (default: built-in Russian jargon/obscenity prompt)")
     dt.add_argument("--idle-timeout", dest="idle_timeout", type=float, default=None, help="Seconds to keep the model loaded after a session before unloading (default: 45; 0 = never unload)")
