@@ -1421,6 +1421,20 @@ def cmd_dictate_service(args: argparse.Namespace) -> int:
     raise SystemExit(f"Unknown service action '{action}'. Use install|uninstall|status.")
 
 
+def cmd_dictate_setup(args: argparse.Namespace) -> int:
+    """Guided first-time setup / doctor for whiz dictate.
+
+    Checks the dictate extra, macOS Accessibility + Microphone permissions,
+    prints a ✓/✗ report with next-step hints, and points at the login
+    service install once prerequisites pass. No engine import — the checks
+    run without starting dictation, so it's safe to run before permissions
+    are granted.
+    """
+    from whiz.dictate import setup as setup_mod
+
+    return setup_mod.setup()
+
+
 # Friendly key names → config field names for `whiz dictate set`.
 # Lets users say `whiz dictate set hotkey=<f8>` instead of the verbose
 # `whiz config set dictate_hotkey=<f8>`.
@@ -1831,6 +1845,7 @@ def build_parser() -> argparse.ArgumentParser:
     dsvc_sub.add_parser("install", help="Install and load the LaunchAgent so dictation starts at login").set_defaults(func=cmd_dictate_service, service_action="install")
     dsvc_sub.add_parser("uninstall", aliases=["remove"], help="Unload and remove the LaunchAgent").set_defaults(func=cmd_dictate_service, service_action="uninstall")
     dsvc_sub.add_parser("status", aliases=["st"], help="Show whether the service is loaded").set_defaults(func=cmd_dictate_service, service_action="status")
+    dtsub.add_parser("setup", aliases=["doctor"], help="Guided first-time setup: check the dictate extra, Accessibility + Microphone permissions, and point at the login service").set_defaults(func=cmd_dictate_setup)
     dt.set_defaults(func=cmd_dictate)
 
     # config

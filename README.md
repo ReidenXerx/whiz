@@ -611,6 +611,14 @@ whiz can act as a **system-wide voice dictation tool**: press a hotkey, speak, a
 
 ### One-time setup (macOS)
 
+Run the guided setup command — it checks the `dictate` extra, macOS Accessibility + Microphone permissions, prints a ✓/✗ report with next-step hints, and points you at the login service once everything passes:
+
+```bash
+whiz dictate setup
+```
+
+Or do the steps manually:
+
 ```bash
 # 1. Install the dictation extra (mlx-whisper, sounddevice, webrtcvad, pynput, pyobjc):
 pipx inject whiz 'whiz[dictate]'
@@ -620,7 +628,7 @@ pipx inject whiz 'whiz[dictate]'
 #    - Microphone (so whiz can capture audio)
 ```
 
-The model (~1.6 GB) auto-downloads from HuggingFace on first use and caches under `~/.cache/huggingface`.
+After granting a permission, re-run `whiz dictate setup` to re-check. The model (~1.6 GB) auto-downloads from HuggingFace on first use and caches under `~/.cache/huggingface`.
 
 ### Usage
 
