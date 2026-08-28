@@ -38,6 +38,7 @@ dictate = [
     "pyobjc-framework-ApplicationServices>=10",
     "rumps>=0.4",
     "setuptools<81",
+    "setproctitle>=1.2",
 ]
 
 [project.urls]

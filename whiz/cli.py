@@ -1367,6 +1367,19 @@ def cmd_dictate(args: argparse.Namespace) -> int:
 
     from whiz.dictate import run_dictate
 
+    # Set the process title early so the dictation agent shows as "whiz"
+    # (not "python") in Activity Monitor, Force Quit, and ps. This runs
+    # before any threads/AppKit are started so the title sticks for the
+    # whole process lifetime.
+    try:
+        import setproctitle
+
+        setproctitle.setproctitle("whiz")
+    except Exception:
+        # setproctitle is optional; never let a title-setting failure
+        # abort dictation startup.
+        pass
+
     # Configure logging so the engine/indicator/provider debug messages
     # reach the LaunchAgent log file (stdout/stderr is redirected to
     # ~/Library/Logs/whiz-dictate.log by the plist). Without this,
