@@ -104,6 +104,26 @@ class Config:
     # a session starts — most users want it only when dictating. Enable with:
     #   whiz dictate set idle_visible=true
     dictate_idle_visible: bool = False
+    # --- Microphone sensitivity ---
+    # Static energy floors for utterance segmentation (normalized RMS, 0.0-1.0).
+    # These are FLOORS: the adaptive noise calibration at session start can
+    # raise them, never lower them.
+    #
+    # The original values (0.03 / 0.025) were tuned on one machine and proved
+    # far too high on others — measured room noise of 0.0005-0.002 against
+    # speech at 0.05-0.06 meant the gate sat just below speaking level and
+    # normal talking was discarded. Lower defaults leave the adaptive floor to
+    # do the work in genuinely noisy rooms.
+    #
+    # Raise these if noise is being transcribed; lower them if you have to
+    # raise your voice:
+    #   whiz dictate set frame_energy=0.005
+    dictate_frame_energy: float = 0.010
+    # Minimum whole-utterance RMS to bother transcribing.
+    dictate_min_energy: float = 0.008
+    # Minimum utterance length in seconds. Below this it is a click or breath.
+    # Short words like "да" / "yes" can fall under 0.35s.
+    dictate_min_utterance: float = 0.25
     # Show a menu bar item (macOS NSStatusItem) with Start/Stop, Open Config,
     # About, and Quit — so users can control dictation without the CLI. Runs
     # inside the LaunchAgent process. Disable for a pure hotkey/CLI experience:
