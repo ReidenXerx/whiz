@@ -19,6 +19,7 @@ Run `whiz transcribe -h` for transcription flags.
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import shutil
 import subprocess
@@ -1365,6 +1366,17 @@ def cmd_dictate(args: argparse.Namespace) -> int:
         )
 
     from whiz.dictate import run_dictate
+
+    # Configure logging so the engine/indicator/provider debug messages
+    # reach the LaunchAgent log file (stdout/stderr is redirected to
+    # ~/Library/Logs/whiz-dictate.log by the plist). Without this,
+    # logger.debug() calls are silently dropped and swallowed exceptions
+    # (the indicator fade path, VAD decisions, etc.) are invisible.
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
 
     overrides: dict[str, object] = {
         "model": args.model or "",
