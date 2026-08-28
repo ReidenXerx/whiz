@@ -7,6 +7,12 @@ build/
 dist/
 .eggs/
 
+# Swift / macOS app
+macos/.build/
+macos/build/
+*.xcodeproj/
+*.xcworkspace/
+
 # Virtualenvs
 .venv/
 venv/

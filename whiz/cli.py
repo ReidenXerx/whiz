@@ -308,13 +308,6 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
     return cmd, model_path, wav, in_path, keep_wav, of_base, diarize_enabled, screenshots
 
 
-def _output_base_path(args, wav: Path) -> Path:
-    """Determine the whisper-cli output base path (no extension)."""
-    if args.output:
-        return Path(args.output).expanduser()
-    return wav.with_suffix("")
-
-
 def _find_whisper_json(of_base: Path, wav: Path, of_passed: bool) -> Path | None:
     """Locate the whisper-cli JSON output.
 
