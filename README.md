@@ -52,6 +52,7 @@ Most transcription tools stop at text. whiz is the one-command path from a scree
 - [AI analysis](#ai-analysis-auto-detect-summary-action-items-implementation-plans-vision)
 - [Essentials (always on)](#essentials-always-on-concentrated-context-for-a-later-analysis)
 - [Voice dictation](#voice-dictation-system-wide-speech-to-text-whiz-dictate)
+- [Native macOS app (`Whiz.app`)](#native-macos-app-whizapp--in-development)
 - [Testing](#testing)
 - [License](#license)
 
@@ -742,6 +743,70 @@ whiz dictate set menu_bar=false
 ```
 
 Interactive setup actions (`whiz dictate setup`, `service install/uninstall`) stay CLI-only — a background accessory app can't host an interactive terminal session — but the in-process actions (toggle, open config, about, quit) are all in the menu.
+
+## Native macOS app (`Whiz.app`) — in development
+
+A native Swift menu bar app is replacing the PyObjC dictation daemon described
+above. It is a **separate build** from the Python package: no pipx, no Homebrew,
+no Python at runtime.
+
+| | `whiz dictate` (Python) | `Whiz.app` (Swift) |
+|---|---|---|
+| Install | `pipx install whiz` | download a zip |
+| Speech engine | mlx-whisper (Apple Silicon only) | whisper.cpp, statically linked |
+| Models | `whiz models download` | downloaded in-app |
+| Runs at login | LaunchAgent plist | `SMAppService` |
+| Requires | Python, pipx, ~1.2 GB of deps | nothing |
+
+The transcription CLI (`whiz transcribe`, `whiz analyze`, diarization) is
+unaffected and remains a Python package.
+
+### Building it
+
+Requires Xcode Command Line Tools and `cmake` (`brew install cmake`). macOS 13+,
+Apple Silicon.
+
+```sh
+git submodule update --init --recursive   # vendored whisper.cpp, pinned to v1.9.2
+macos/scripts/create-signing-cert.sh      # once: a stable local signing identity
+macos/scripts/build-app.sh                # -> macos/build/Whiz.app
+open macos/build/Whiz.app
+```
+
+`build-app.sh` compiles the vendored whisper.cpp on first run (a few minutes),
+then reuses it. Pass `release` for an optimised build.
+
+The signing certificate is optional but worth doing: without it the app is
+ad-hoc signed, its identity changes on every rebuild, and macOS drops the
+Accessibility permission each time. With it, you grant permission once.
+
+### Sharing a build
+
+```sh
+macos/scripts/package.sh        # -> macos/build/Whiz-<version>.zip
+```
+
+Produces a ~1 MB archive containing `Whiz.app` and an `INSTALL.txt`. The
+recipient needs macOS 13+ on Apple Silicon, and must run this once because the
+app is signed with a self-signed certificate rather than a paid Apple Developer
+ID:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Whiz.app
+```
+
+Note that on macOS 15 and later the old right-click → Open shortcut no longer
+works for unnotarized apps, so that command is the only route. Notarization is
+what removes this step; it requires a paid Apple Developer account and has not
+been done.
+
+Once open, the app is self-sufficient: **Settings… → Recognition** downloads the
+speech model (~1.6 GB, shared with the Python CLI's cache at `~/.cache/whisper`),
+and the menu offers **Grant Accessibility…**, which is required before
+transcribed text can be typed into other apps.
+
+See [docs/SWIFT-APP.md](docs/SWIFT-APP.md) for the architecture, the engine
+decision record, and known issues.
 
 ## Testing
 
