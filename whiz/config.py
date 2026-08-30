@@ -185,9 +185,32 @@ def load() -> Config:
 
 
 def save(cfg: Config) -> Path:
-    """Write config to disk, creating dirs as needed. Returns the path."""
+    """Write config to disk, preserving keys this version does not know about.
+
+    Read-modify-write rather than a plain overwrite. ``load()`` already filters
+    to known dataclass fields, so a naive ``write_text(_emit_toml(cfg.to_dict()))``
+    silently deletes every key the running build has never heard of.
+
+    That is not hypothetical. The config file is shared by several writers that
+    do not agree on the schema: the Swift app owns ``dictate_*``, feature
+    branches add their own keys (``ocr_*``), and a user may be running a pipx
+    install that is older or newer than the checkout. Any ``whiz config set``
+    from the wrong one wiped the others' settings without a word.
+    """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(_emit_toml(cfg.to_dict()), encoding="utf-8")
+
+    merged: dict[str, Any] = {}
+    if CONFIG_PATH.exists():
+        try:
+            with CONFIG_PATH.open("rb") as fh:
+                merged.update(tomllib.load(fh))
+        except (OSError, tomllib.TOMLDecodeError):
+            # An unreadable file should not block saving; fall back to a
+            # clean write rather than refusing to persist the change.
+            merged = {}
+    merged.update(cfg.to_dict())
+
+    CONFIG_PATH.write_text(_emit_toml(merged), encoding="utf-8")
     return CONFIG_PATH
 
 
