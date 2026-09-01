@@ -447,30 +447,6 @@ def parse_whisper_json(path, json_full: bool = False) -> list[WhisperSeg]:
     return segs
 
 
-def parse_whisper_srt(path) -> list[WhisperSeg]:
-    """Parse a whisper-cli SRT output file into WhisperSeg list."""
-    content = path.read_text(encoding="utf-8")
-    blocks = re.split(r"\n\s*\n", content.strip())
-    segs: list[WhisperSeg] = []
-    for block in blocks:
-        lines = [l for l in block.splitlines() if l.strip()]
-        if len(lines) < 3:
-            continue
-        # Line 0 = index, line 1 = timestamps, line 2+ = text.
-        ts_line = lines[1]
-        m = re.match(
-            r"(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})", ts_line
-        )
-        if not m:
-            continue
-        start = _ts_to_seconds(m.group(1))
-        end = _ts_to_seconds(m.group(2))
-        text = " ".join(lines[2:]).strip()
-        if text:
-            segs.append(WhisperSeg(start=start, end=end, text=text))
-    return segs
-
-
 def _ts_to_seconds(ts: str) -> float:
     """'00:01:23,456' or '00:01:23.456' -> 83.456."""
     ts = ts.strip().replace(".", ",")

@@ -1,0 +1,7 @@
+[submodule "macos/vendor/whisper.cpp"]
+	path = macos/vendor/whisper.cpp
+	url = https://github.com/ggml-org/whisper.cpp
+	# Pinned to v1.9.2 — the version the STT integration was written and
+	# tested against. Bump deliberately, then re-run the Russian test set:
+	# whisper.cpp's decoding loop differs from the reference implementation,
+	# so hallucination behaviour can change between releases.

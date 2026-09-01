@@ -308,13 +308,6 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
     return cmd, model_path, wav, in_path, keep_wav, of_base, diarize_enabled, screenshots
 
 
-def _output_base_path(args, wav: Path) -> Path:
-    """Determine the whisper-cli output base path (no extension)."""
-    if args.output:
-        return Path(args.output).expanduser()
-    return wav.with_suffix("")
-
-
 def _find_whisper_json(of_base: Path, wav: Path, of_passed: bool) -> Path | None:
     """Locate the whisper-cli JSON output.
 
@@ -1482,6 +1475,10 @@ _DICTATE_FRIENDLY_KEYS: dict[str, str] = {
     "idle_badge": "dictate_idle_visible",
     "menu_bar": "dictate_menu_bar",
     "menubar": "dictate_menu_bar",
+    "frame_energy": "dictate_frame_energy",
+    "sensitivity": "dictate_frame_energy",
+    "min_energy": "dictate_min_energy",
+    "min_utterance": "dictate_min_utterance",
     "stt_provider": "dictate_stt_provider",
     "injector": "dictate_injector",
     "indicator_provider": "dictate_indicator",
@@ -1502,6 +1499,9 @@ _DICTATE_CONFIG_FIELDS: list[tuple[str, str, str]] = [
     ("dictate_show_indicator", "Indicator", "Floating dictation overlay"),
     ("dictate_idle_visible", "Idle badge", "Keep the indicator dimmed-visible while idle (not just during a session)"),
     ("dictate_menu_bar", "Menu bar", "Menu bar item with Start/Stop, Open Config, About, Quit"),
+    ("dictate_frame_energy", "Frame energy", "Per-frame energy floor for speech detection (lower = more sensitive)"),
+    ("dictate_min_energy", "Min energy", "Minimum utterance energy to transcribe (lower = more sensitive)"),
+    ("dictate_min_utterance", "Min utterance", "Shortest utterance to transcribe, in seconds"),
     ("dictate_stt_provider", "STT provider", "Force STT provider (empty = auto)"),
     ("dictate_injector", "Injector", "Force text injector (empty = auto)"),
     ("dictate_indicator", "Indicator provider", "Force indicator provider (empty = auto)"),
