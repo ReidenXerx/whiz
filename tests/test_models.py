@@ -76,9 +76,15 @@ def test_resolve_exact_alias(tmp_path):
     assert p.name == "ggml-large-v3.bin"
 
 
-def test_resolve_turbo_short_alias(tmp_path):
+def test_resolve_turbo_short_alias(tmp_path, monkeypatch):
+    # Isolated, not _make_config: a short alias resolves only when it matches
+    # exactly one model, and _make_config leaves DEFAULT_MODEL_SEARCH_DIRS in
+    # play. On any machine with both ggml-large-v3-turbo.bin and
+    # ggml-large-v3-turbo-q5_0.bin in ~/.cache/whisper, "turbo" matched two and
+    # resolve() correctly returned None — so the test failed for a real user
+    # while passing in CI and on machines with one turbo model.
     _touch(tmp_path / "ggml-large-v3-turbo-q5_0.bin")
-    config = _make_config([tmp_path])
+    config = _make_isolated_config([tmp_path], monkeypatch)
     p = M.resolve("turbo", config)
     assert p is not None
     assert p.name == "ggml-large-v3-turbo-q5_0.bin"

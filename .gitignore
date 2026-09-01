@@ -16,6 +16,9 @@ macos/vendor/build/
 macos/vendor/install/
 *.xcodeproj/
 *.xcworkspace/
+# Per-user Xcode state written into the package when it is opened in the IDE.
+.swiftpm/xcode/xcuserdata/
+macos/.swiftpm/
 
 # Virtualenvs
 .venv/
