@@ -53,4 +53,7 @@ htmlcov/
 .bearing/gitnexus-api-profile.json
 docs/ARCHITECTURE.gitnexus.md
 .agents/skills/
+# Per-runtime mirrored skills (symlinked/mirrored from .bearing/skills by the
+# teaching bundle; regenerated on bearing:sync-teaching).
+.claude/
 # --- end bearing ---
