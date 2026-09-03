@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import WhizApp
+@testable import WhizKit
 
 // Pins NS-6 for the Swift filter — the mirror of the engine.py tests in
 // tests/test_dictate.py. The wave-1 audit found that vocabulary words

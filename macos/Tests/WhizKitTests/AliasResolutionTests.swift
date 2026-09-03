@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import WhizApp
+@testable import WhizKit
 
 // The Swift resolver used to accept only literal paths and bare filenames,
 // while `resolve()` in whiz/models.py accepts full aliases, short aliases and

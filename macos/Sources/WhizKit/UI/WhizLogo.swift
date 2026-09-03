@@ -61,6 +61,7 @@ struct WhizLogoView: View {
     }
 }
 
+#if DEBUG
 #Preview("Logo at menu bar and pill sizes") {
     HStack(spacing: 24) {
         WhizLogoView(state: .idle, size: 18)
@@ -69,3 +70,4 @@ struct WhizLogoView: View {
     }
     .padding()
 }
+#endif

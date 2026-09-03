@@ -55,6 +55,7 @@ struct AppliesNote: View {
     }
 }
 
+#if DEBUG
 #Preview("Applies-when notes") {
     VStack(alignment: .leading, spacing: 12) {
         AppliesNote(.immediately, detail: "Hotkey is re-registered as you type.")
@@ -64,3 +65,4 @@ struct AppliesNote: View {
     .padding()
     .frame(width: 360, alignment: .leading)
 }
+#endif
