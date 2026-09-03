@@ -19,11 +19,19 @@ let packageDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent
 let vendorInclude = "\(packageDirectory)/vendor/install/include"
 let vendorLib = "\(packageDirectory)/vendor/install/lib"
 
-let cltFrameworks = "/Library/Developer/CommandLineTools/Library/Developer/Frameworks"
-let testFrameworkFlags: [String] =
-    FileManager.default.fileExists(atPath: cltFrameworks + "/Testing.framework")
-        ? ["-F", cltFrameworks]
-        : []
+// `swift test` requires full Xcode. Nothing here works around that, deliberately.
+//
+// An earlier version added `-F` pointing at Command Line Tools' Testing.framework
+// when it found one, so the test target would at least compile on a CLT-only
+// machine. That was wrong twice over. It bought nothing — executing the resulting
+// .xctest bundle needs the `xctest` runner, which ships only with Xcode, so the
+// tests could compile and still never run. And on a machine with *both*
+// installed it actively broke `swift test`, because the flag pointed at CLT's
+// swift-testing runtime while the active toolchain was Xcode's.
+//
+// Detecting the active toolchain instead is not worth it: SwiftPM sandboxes
+// manifest execution, so there is no dependable way to ask, and a correct answer
+// would still only enable a build that cannot be run.
 
 // The whiz macOS app.
 //
@@ -56,10 +64,17 @@ let package = Package(
             name: "CWhisper",
             path: "Sources/CWhisper"
         ),
-        .executableTarget(
-            name: "WhizApp",
+        // Everything lives here. The executable below is a two-line shell.
+        //
+        // Xcode 16 refuses to render SwiftUI previews inside an executable
+        // target (it wants a build setting SwiftPM cannot express), and a test
+        // target is meant to depend on a library rather than `@testable import`
+        // an executable. Both problems disappear by putting the App struct in a
+        // library and calling `App.main()` from the executable.
+        .target(
+            name: "WhizKit",
             dependencies: ["CWhisper"],
-            path: "Sources/WhizApp",
+            path: "Sources/WhizKit",
             // Headers and libraries come from the vendored whisper.cpp build in
             // `vendor/install`, produced by `scripts/build-whisper.sh` from the
             // pinned submodule — never from Homebrew.
@@ -102,12 +117,15 @@ let package = Package(
                 .linkedFramework("CoreML"),
             ]
         ),
+        .executableTarget(
+            name: "WhizApp",
+            dependencies: ["WhizKit"],
+            path: "Sources/WhizApp"
+        ),
         .testTarget(
-            name: "WhizAppTests",
-            dependencies: ["WhizApp"],
-            path: "Tests/WhizAppTests",
-            swiftSettings: [.unsafeFlags(testFrameworkFlags)],
-            linkerSettings: [.unsafeFlags(testFrameworkFlags)]
+            name: "WhizKitTests",
+            dependencies: ["WhizKit"],
+            path: "Tests/WhizKitTests"
         ),
     ]
 )

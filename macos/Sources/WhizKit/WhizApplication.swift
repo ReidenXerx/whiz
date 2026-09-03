@@ -2,15 +2,23 @@ import AppKit
 import Combine
 import SwiftUI
 
-@main
-struct WhizApp: App {
+/// The app itself.
+///
+/// Lives in the library rather than the executable, and is the *only* public
+/// type in it — `@main` is sugar for calling `App.main()`, so the executable can
+/// be two lines and everything else here stays internal. That matters for more
+/// than tidiness: Xcode 16 will not render SwiftUI previews inside an executable
+/// target, and a test target is meant to depend on a library.
+public struct WhizApplication: App {
+
+    public init() {}
 
     /// Keep in step with `pyproject.toml` and `whiz/__init__.py`.
     static let version = "0.14.0"
 
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
-    var body: some Scene {
+    public var body: some Scene {
         MenuBarExtra {
             // `delegate.controller` is a non-optional `let` created with the
             // delegate. It used to be an optional assigned in
@@ -25,7 +33,7 @@ struct WhizApp: App {
             // is ignored in favour of the menu bar's own appearance. State is
             // conveyed by the pill; the menu bar item just marks that whiz is
             // running.
-            Image(nsImage: WhizApp.menuBarIcon)
+            Image(nsImage: WhizApplication.menuBarIcon)
         }
         .menuBarExtraStyle(.menu)
     }
@@ -72,7 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var permissionTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        Log.ui.notice("launching whiz \(WhizApp.version, privacy: .public)")
+        Log.ui.notice("launching whiz \(WhizApplication.version, privacy: .public)")
 
         if controller.config.showIndicator {
             let indicator = IndicatorPanel(controller: controller)

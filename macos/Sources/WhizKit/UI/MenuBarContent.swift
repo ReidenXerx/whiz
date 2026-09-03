@@ -70,7 +70,7 @@ struct MenuBarContent: View {
 
         Divider()
 
-        Text("whiz \(WhizApp.version) · \(controller.config.hotkey)")
+        Text("whiz \(WhizApplication.version) · \(controller.config.hotkey)")
 
         Button("Quit whiz") {
             NSApplication.shared.terminate(nil)

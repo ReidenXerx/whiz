@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import WhizApp
+@testable import WhizKit
 
 // PINS NS-15 for the Swift resolver. `WhisperModel.preference` was previously
 // a global unquantized-first batch, so a machine with only `tiny` +
