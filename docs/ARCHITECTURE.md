@@ -79,17 +79,45 @@ What `expected.json` pins per region:
   policies and refuses to emit the corpus if they disagree, so a case where
   policies diverge on the gate must be redesigned, not pinned.
 
-The seven cases: two utterances in a quiet room; speech at t=0 filling the
-calibration window (the PR #1 regression class); speech late in the window;
-steady noise above the static floor (only calibration rejects it); a short
-click; the exact 27-frame close; a 26-frame gap that must NOT close (the two
-phrases merge into one utterance).
+The eight cases: two utterances in a quiet room; speech at t=0 filling the
+calibration window (pinned post-fix: segmented AND accepted — the first
+word survives); speech late in the window; steady noise above the static
+floor (only calibration rejects it); a short click; the exact 27-frame
+close; a 26-frame gap that must NOT close (the two phrases merge into one
+utterance); and speech over fan noise inside the window (the exclusion
+median itself — speech frames must not disable noise adaptation).
 
 Regenerate after changing `tuning/tuning.toml` or any segmentation logic:
 
 ```
 python3 tuning/golden/generate.py
 ```
+
+## Speech-aware calibration
+
+Calibration is speech-aware in every implementation: a calibration frame
+with RMS ≥ `calibration_speech_floor` (0.03) is speech, not noise, and is
+excluded from the median; if fewer than `noise_min_samples` quiet frames
+remain in the window, calibration aborts and the static gates stay in
+force for the session. The median may never be measured on speech.
+
+This fixes the poisoned-calibration defect: a user who pressed the
+hotkey and talked immediately filled the 1 s window with speech, the
+"ambient noise" median was measured on that speech, the utterance gate
+rose to ~3x the speech RMS, and the first word was silently dropped by
+the energy gate — in both implementations. The corpus pins the fix
+(`speech_during_calibration`, `rejected_by_energy_gate: false`) and the
+mechanism (`speech_over_noise_in_calibration`: speech excluded, gates
+still raised by the noise frames). A tuning change to the floor is a
+contract change — it moves the speech/noise discrimination line in both
+engines and must ship with the corpus regenerated in the same commit.
+
+Accepted trade-off: steady noise at or above the speech floor (loud
+fans, HVAC) can no longer be calibrated against — by energy alone it is
+indistinguishable from speech. That regime is owned by the secondary
+VAD (webrtcvad in Python, Silero in Swift) and the hallucination filter.
+Real fan/cooler levels (~0.02 RMS, measured on a MacBook under load) sit
+well below the 0.03 floor and keep the adaptive path.
 
 ## Known divergences
 
@@ -120,18 +148,6 @@ transcription. Either is fine — the golden contract covers only the
 energy-gate state machine.
 
 ## Known shared defects
-
-**Poisoned calibration kills the first word.** If speech fills the 1-second
-calibration window, the "ambient noise" median is measured on speech, the
-utterance gate rises to ~3x the speech RMS, and the first utterance is
-silently dropped by the energy gate in BOTH implementations. The PR #1 fix
-made segmentation keep the frames (previously they were dropped entirely),
-but the gate still rejects the result. Pinned by the corpus as-is
-(`speech_during_calibration`, `rejected_by_energy_gate: true`) — a fix
-belongs to a separate change and must update the corpus in the same commit.
-Obvious directions when fixing: skip calibration when the window contains
-speech-energy frames above a multiple of the static floor, or measure the
-floor per-frame and ignore outlier frames.
 
 **The min-utterance gate is dead in Python for silence-closed utterances**
 (see divergences above) — it only bites on flushes shorter than the close
