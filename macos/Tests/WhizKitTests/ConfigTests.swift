@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import WhizApp
+@testable import WhizKit
 
 // swift-testing, not XCTest: XCTest ships only with a full Xcode install, while
 // Testing.framework is present in Command Line Tools — which is how this app is

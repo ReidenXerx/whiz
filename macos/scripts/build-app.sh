@@ -6,6 +6,11 @@
 # is what TCC keys permission grants to. Running the raw binary works for a
 # smoke test but re-prompts for Accessibility on every rebuild.
 #
+# The swiftc path compiles WhizKit and WhizApp as one flat set of files rather
+# than as separate modules. That is fine — it produces the same binary, and it
+# sidesteps having to build and link a library first — but it means the module
+# boundary is only enforced by `swift build`. Run that before relying on it.
+#
 # Two build paths. SwiftPM is preferred, but it needs full Xcode: with Command
 # Line Tools alone its manifest fails to link against libPackageDescription
 # (even a three-line package fails), so we fall back to invoking swiftc over the
@@ -72,7 +77,7 @@ build_with_swiftc() {
     -lc++ \
     -framework Metal -framework MetalKit -framework Accelerate \
     -framework Foundation -framework CoreML \
-    $(find "$ROOT/Sources/WhizApp" -name '*.swift') \
+    $(find "$ROOT/Sources/WhizKit" "$ROOT/Sources/WhizApp" -name '*.swift') \
     -o "$out/WhizApp" || return 1
   echo "$out"
 }

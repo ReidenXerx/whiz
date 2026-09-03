@@ -1,6 +1,6 @@
 import Testing
 import Foundation
-@testable import WhizApp
+@testable import WhizKit
 
 /// The shared tuning contract — the Swift half of the cross-platform pins.
 ///
@@ -29,9 +29,9 @@ struct TuningTests {
 
     // MARK: - Fixture location
 
-    /// …/macos/Tests/WhizAppTests/TuningTests.swift → repo root.
+    /// …/macos/Tests/WhizKitTests/TuningTests.swift → repo root.
     private static let repoRoot = URL(fileURLWithPath: #filePath)
-        .deletingLastPathComponent()   // WhizAppTests
+        .deletingLastPathComponent()   // WhizKitTests
         .deletingLastPathComponent()   // Tests
         .deletingLastPathComponent()   // macos
         .deletingLastPathComponent()   // repo root

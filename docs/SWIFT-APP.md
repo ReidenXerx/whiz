@@ -49,6 +49,19 @@ construction, so all of the above stops being necessary rather than being fixed.
 | Mic capture (16 kHz mono) | `Session/AudioCapture.swift` | `sounddevice` |
 | Settings window | `UI/SettingsWindow.swift`, `UI/SettingsView.swift`, `UI/ModelSectionView.swift` | — |
 
+### Targets
+
+| Target | Contents |
+|---|---|
+| `CWhisper` | system library — the vendored whisper.cpp C API |
+| `WhizKit` | everything: STT, session, UI, config. One public type, `WhizApplication` |
+| `WhizApp` | two lines — `WhizApplication.main()` |
+| `WhizKitTests` | 18 tests against `WhizKit` |
+
+`build-app.sh` compiles `WhizKit` and `WhizApp` as one flat set of files rather
+than as separate modules — same binary, but the module boundary is only enforced
+by `swift build`, so run that before relying on it.
+
 Speech recognition is wired and has been exercised by hand, including in a room
 with a robot vacuum running. What remains unverified is called out in
 "Open issues" below.
@@ -428,7 +441,7 @@ same binary.
    since dictation no longer needs Python at all.
 6. **Cutover** — delete `service.py`, `setup.py`, and the `macos_*` providers.
    Sign with a Developer ID and notarize.
-7. **Extract a `WhizKit` library target** — move everything except `@main` and
+7. ~~**Extract a `WhizKit` library target**~~ — **done.** — move everything except `@main` and
    `AppDelegate` out of the executable, leaving a thin app shell.
 
    Two reasons. Xcode 16 refuses to render SwiftUI previews in an executable
@@ -441,10 +454,13 @@ same binary.
    `UI/SettingsView.swift`, `UI/WhizLogo.swift` and `UI/AppliesNote.swift`. They
    compile and cost nothing; they start rendering the moment this lands.
 
-   Cost is ~2,900 lines relocated and seven types made `public`
-   (`SessionController`, `IndicatorPanel`, `HotkeyManager`, `SettingsWindow`,
-   `MenuBarContent`, `WhizLogo`, `Log`) plus the members the shell touches.
-   Mechanical, but it touches every file — worth doing as its own PR so it does
-   not bury a feature change in access-modifier churn.
+   Cost turned out to be far lower than estimated: **one** public type, not
+   seven. `@main` is sugar for `App.main()`, so `WhizApplication` lives in the
+   library and the executable is two lines — every other type stays `internal`
+   because its only consumer moved next to it.
+
+   One wrinkle worth knowing: `#Preview` blocks compile in release builds too,
+   so a preview using a `#if DEBUG` helper breaks `swift build -c release`. The
+   previews are guarded to match.
 8. **Other platforms** — same structure for Windows and Linux; `providers/base.py`
    stays as the seam.

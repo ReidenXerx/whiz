@@ -143,6 +143,7 @@ private struct VisualEffectBackground: NSViewRepresentable {
     func updateNSView(_ nsView: NSVisualEffectView, context: Context) {}
 }
 
+#if DEBUG
 #Preview("Indicator — listening") {
     IndicatorView(controller: .preview(state: .listening, level: 0.7))
         .frame(width: 168, height: 44)
@@ -157,3 +158,4 @@ private struct VisualEffectBackground: NSViewRepresentable {
     IndicatorView(controller: .preview(state: .idle, level: 0.0))
         .frame(width: 168, height: 44)
 }
+#endif

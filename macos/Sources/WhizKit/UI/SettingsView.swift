@@ -163,6 +163,8 @@ struct SettingsView: View {
     }
 }
 
+#if DEBUG
 #Preview("Settings") {
     SettingsView(controller: .preview(state: .idle))
 }
+#endif
