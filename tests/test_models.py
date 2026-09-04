@@ -103,12 +103,35 @@ def test_resolve_unknown_returns_none(tmp_path):
     assert M.resolve("nonexistent-model", config) is None
 
 
-def test_pick_best_prefers_turbo_q5(tmp_path, monkeypatch):
-    # Place a lower-preference and the top-preference model; pick_best must
-    # choose turbo-q5_0 even if medium is also present.
-    _touch(tmp_path / "ggml-medium.bin")
+def test_pick_best_prefers_unquantized_over_quantized(tmp_path, monkeypatch):
+    # NS-15: pick_best must never choose a quantized model while its
+    # unquantized class exists on disk. turbo-q5_0 is the old default —
+    # now it loses to unquantized turbo, and even to medium when no
+    # unquantized large-class model exists.
     _touch(tmp_path / "ggml-large-v3-turbo-q5_0.bin")
-    _touch(tmp_path / "ggml-small.bin")
+    _touch(tmp_path / "ggml-medium.bin")
+    config = _make_isolated_config([tmp_path], monkeypatch)
+    best = M.pick_best(config)
+    assert best is not None
+    assert best.name == "ggml-medium.bin"
+
+
+def test_pick_best_prefers_turbo_when_unquantized_exists(tmp_path, monkeypatch):
+    # The happy case: unquantized turbo beats its q5_0 sibling even when
+    # the quantized file was "the default" for years.
+    _touch(tmp_path / "ggml-large-v3-turbo-q5_0.bin")
+    _touch(tmp_path / "ggml-large-v3-turbo.bin")
+    config = _make_isolated_config([tmp_path], monkeypatch)
+    best = M.pick_best(config)
+    assert best is not None
+    assert best.name == "ggml-large-v3-turbo.bin"
+
+
+def test_pick_best_quantized_only_as_last_resort(tmp_path, monkeypatch):
+    # A quantized model resolves only when NOTHING unquantized is on disk
+    # — the fallback keeps a disk-constrained machine working, but it is
+    # the last resort, not a preference.
+    _touch(tmp_path / "ggml-large-v3-turbo-q5_0.bin")
     config = _make_isolated_config([tmp_path], monkeypatch)
     best = M.pick_best(config)
     assert best is not None
@@ -132,8 +155,15 @@ def test_pick_best_empty_returns_none(tmp_path, monkeypatch):
 def test_list_known_returns_canonical_set():
     known = M.list_known()
     assert "ggml-large-v3-turbo-q5_0.bin" in known
+    assert "ggml-large-v3-turbo.bin" in known
     assert "ggml-tiny.bin" in known
     assert len(known) == len(M.KNOWN_MODELS)
+    # NS-15: every quantized variant in the canonical list must sit behind
+    # its unquantized class — both lists stay honest if a class is added.
+    for name in known:
+        if "-q" in name:
+            base = name.replace("-q8_0", "").replace("-q5_0", "")
+            assert base in known, f"quantized {name} has no unquantized {base}"
 
 
 def test_find_vad_model_finds_silero(tmp_path, monkeypatch):

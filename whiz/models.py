@@ -25,35 +25,44 @@ VAD_DEFAULT = VAD_MODELS[0]
 # Glob pattern for discovering any Silero VAD model on disk.
 VAD_GLOB = "ggml-silero-v*.bin"
 
-# Canonical whisper.cpp models. Order matters for "best" auto-pick (prefer
-# turbo/quantized for speed, then full large).
+# Canonical whisper.cpp models. Order matters for "best" auto-pick —
+# NS-15: unquantized first, quantized variants behind their unquantized
+# class (quantization corrupts transcription quality; explicit, informed
+# use only).
 KNOWN_MODELS: list[str] = [
-    "ggml-large-v3-turbo-q5_0.bin",
     "ggml-large-v3-turbo.bin",
-    "ggml-large-v3-q5_0.bin",
+    "ggml-large-v3-turbo-q5_0.bin",
     "ggml-large-v3.bin",
+    "ggml-large-v3-q5_0.bin",
     "ggml-large-v3-turbo-q8_0.bin",
-    "ggml-medium-q5_0.bin",
     "ggml-medium.bin",
-    "ggml-small-q5_0.bin",
+    "ggml-medium-q5_0.bin",
     "ggml-small.bin",
-    "ggml-base-q5_0.bin",
+    "ggml-small-q5_0.bin",
     "ggml-base.bin",
-    "ggml-tiny-q5_0.bin",
+    "ggml-base-q5_0.bin",
     "ggml-tiny.bin",
+    "ggml-tiny-q5_0.bin",
 ]
 
-# Auto-pick preference: prefer turbo quantized, then turbo, then large quantized, then large.
+# Auto-pick preference: NS-15 — unquantized variants before every quantized
+# sibling of the same class, then the remaining classes. A user who explicitly
+# downloads a quantized model can still name it; pick_best never chooses one
+# while its unquantized class exists on disk.
 PREFERENCE: list[str] = [
-    "ggml-large-v3-turbo-q5_0.bin",
     "ggml-large-v3-turbo.bin",
-    "ggml-large-v3-turbo-q8_0.bin",
-    "ggml-large-v3-q5_0.bin",
     "ggml-large-v3.bin",
-    "ggml-medium-q5_0.bin",
     "ggml-medium.bin",
-    "ggml-small-q5_0.bin",
     "ggml-small.bin",
+    "ggml-base.bin",
+    "ggml-tiny.bin",
+    "ggml-large-v3-turbo-q8_0.bin",
+    "ggml-large-v3-turbo-q5_0.bin",
+    "ggml-large-v3-q5_0.bin",
+    "ggml-medium-q5_0.bin",
+    "ggml-small-q5_0.bin",
+    "ggml-base-q5_0.bin",
+    "ggml-tiny-q5_0.bin",
 ]
 
 
@@ -147,11 +156,20 @@ def resolve(name: str, config: cfg.Config) -> Path | None:
 
 
 def pick_best(config: cfg.Config) -> Path | None:
-    """Auto-pick the best available model by preference order."""
+    """Auto-pick the best available model by preference order.
+
+    PREFERENCE holds filenames (matching KNOWN_MODELS) while discovered models
+    are keyed by alias, so normalize each entry before comparing. The old raw
+    comparison never matched anything and silently fell through to the
+    alphabetical fallback — PREFERENCE was dead code, and the "pick" users got
+    was first-in-alphabet, not first-in-preference (NS-15 made this visible:
+    turbo-q5_0 sorted first alphabetically, hiding the preference entirely).
+    """
     found = {m.alias: m for m in discover(config)}
     for wanted in PREFERENCE:
-        if wanted in found:
-            return found[wanted].path
+        alias = _alias_from_name(wanted)
+        if alias in found:
+            return found[alias].path
     # Fallback: anything we found.
     all_models = sorted(found.values(), key=lambda m: m.alias)
     return all_models[0].path if all_models else None

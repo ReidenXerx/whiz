@@ -104,7 +104,7 @@ pipx install .
 Then make sure a model is available — download one from the official whisper.cpp HuggingFace repo:
 
 ```bash
-whiz models download turbo      # ggml-large-v3-turbo-q5_0.bin — fast & accurate
+whiz models download turbo      # ggml-large-v3-turbo.bin — unquantized (NS-15)
 ```
 
 ## What it does
@@ -224,7 +224,7 @@ Manage whisper, VAD, and diarization models.
 
 ```bash
 whiz models list                       # show discovered ggml models
-whiz models download turbo             # ggml-large-v3-turbo-q5_0.bin — fast & accurate
+whiz models download turbo             # ggml-large-v3-turbo.bin — unquantized (NS-15)
 whiz models download large-v3 --dest ~/models
 whiz models known                      # canonical whisper.cpp model filenames
 whiz models download-vad               # Silero VAD model (default: v5.1.2)
@@ -321,14 +321,16 @@ dictate_show_indicator = true
 dictate_idle_visible = true
 ```
 
-If `model` is empty, whiz auto-picks the best available model by this preference:
+If `model` is empty, whiz auto-picks the best available model by this preference
+(NS-15: unquantized always — quantization corrupts transcription quality, so
+quantized variants sit behind their unquantized class):
 
-1. `large-v3-turbo-q5_0`
-2. `large-v3-turbo`
-3. `large-v3-turbo-q8_0`
-4. `large-v3-q5_0`
-5. `large-v3`
-6. `medium-q5_0` → `medium` → `small-q5_0` → `small`
+1. `large-v3-turbo`
+2. `large-v3`
+3. `medium` → `small` → `base` → `tiny`
+4. `large-v3-turbo-q8_0` → `large-v3-turbo-q5_0` → `large-v3-q5_0` →
+   `medium-q5_0` → `small-q5_0` → `base-q5_0` → `tiny-q5_0` (last resorts,
+   for disk-constrained machines)
 
 ### Model search directories
 
