@@ -28,6 +28,24 @@ enum WhisperModel {
         "ggml-medium.bin",
     ]
 
+    /// The batch pipeline's own order — mirrors `models.py:PREFERENCE` exactly
+    /// (q5_0 turbo first) rather than the dictation list above. NS-15 in the
+    /// north-stars leaves "q5_0 batch vs unquantized turbo" open, so parity
+    /// with the Python pipeline is the only defensible default: diverging
+    /// here is a decision that belongs in `.bearing/northstars.md`, not in
+    /// this code. Pinned in `TranscriptionFlowTests`.
+    static let batchPreference = [
+        "ggml-large-v3-turbo-q5_0.bin",
+        "ggml-large-v3-turbo.bin",
+        "ggml-large-v3-turbo-q8_0.bin",
+        "ggml-large-v3-q5_0.bin",
+        "ggml-large-v3.bin",
+        "ggml-medium-q5_0.bin",
+        "ggml-medium.bin",
+        "ggml-small-q5_0.bin",
+        "ggml-small.bin",
+    ]
+
     /// Mirrors `DEFAULT_MODEL_SEARCH_DIRS` in `whiz/config.py`.
     static var searchDirectories: [URL] {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -45,6 +63,16 @@ enum WhisperModel {
     /// Resolve the model to load. An explicit `configured` path wins; otherwise
     /// walk the preference order across every search directory.
     static func resolve(configured: String) -> URL? {
+        resolve(configured: configured, preference: preference)
+    }
+
+    /// Batch-pipeline variant of `resolve` — same lookup rules, the
+    /// `models.py:PREFERENCE` order instead of dictation's.
+    static func resolveBatch(configured: String) -> URL? {
+        resolve(configured: configured, preference: batchPreference)
+    }
+
+    private static func resolve(configured: String, preference: [String]) -> URL? {
         if !configured.isEmpty {
             let expanded = (configured as NSString).expandingTildeInPath
             let url = URL(fileURLWithPath: expanded)

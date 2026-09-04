@@ -256,3 +256,24 @@ already follows, and it costs context to say so. If a rule here turns out to be 
 project rather than this one, it belongs upstream — say so and it can be promoted.
 
 <!-- Add PP-1, PP-2, … here. -->
+
+- **PP-1** — **Never let AVFoundation mix audio down to mono — take the channel mean yourself.**
+  `AVAssetReader`/`AVAudioConverter` stereo→mono applies equal-power coefficients (×0.7071 per
+  channel, summed) instead of ffmpeg `-ac 1`'s (L+R)/2: correlated stereo comes out +3 dB, and
+  loud correlated material comes back **out of range — ±1.27 measured on a 0.9-amplitude
+  identical-pair stereo file, no clipping, no error**. Any PCM handed to whisper or pinned against
+  the Python pipeline must be read at the source's channel count and averaged in WhizKit code.
+  *Scar: `AudioFileDecoder` shipped its first version trusting AVFoundation's built-in downmix
+  (`AVNumberOfChannelsKey: 1`); the tests caught it — `macos/Tests/WhizKitTests/` now pins the
+  0.5-peak contract and the no-out-of-range guarantee. See GP-1 for the general rule: this is the
+  same lesson, that AVFoundation's audio graph is a runtime you verify, not an API you trust.*
+
+- **PP-2** — **Every window/panel in this accessory app: `[.moveToActiveSpace,
+  .fullScreenAuxiliary]` + present BEFORE `NSApp.activate`.**
+  Activating an accessory app before the window exists on any Space sends macOS hunting for the
+  app's windows across Spaces — dragging the user to the Desktop while the window stays behind.
+  Applies to `NSWindow` (SettingsWindow, commit 2cad76b) AND to `NSOpenPanel`: `runModal` cannot
+  express the order (it presents and blocks), so panels use `panel.begin { … }` followed by
+  activation. *Scar: twice — Settings (opening from a second Space switched the user to the
+  Desktop, window left behind) and the transcription file picker
+  (activate-then-`runModal`, same Desktop drag from a second Space).*

@@ -27,7 +27,8 @@ public struct WhizApplication: App {
             // producing an empty menu that would not open at all.
             MenuBarContent(
                 controller: delegate.controller,
-                onOpenSettings: { delegate.showSettings() })
+                onOpenSettings: { delegate.showSettings() },
+                onTranscribe: { delegate.startTranscription() })
         } label: {
             // MenuBarExtra's label is rendered as a template image, so the tint
             // is ignored in favour of the menu bar's own appearance. State is
@@ -75,6 +76,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     private var indicator: IndicatorPanel?
     private lazy var settings = SettingsWindow(controller: controller)
+    private lazy var transcription = TranscriptionWindow()
     private let hotkeys = HotkeyManager()
     private var cancellables = Set<AnyCancellable>()
     private var permissionTimer: Timer?
@@ -126,6 +128,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     func showSettings() {
         settings.show()
+    }
+
+    func startTranscription() {
+        transcription.start()
     }
 
     private func registerHotkey(_ hotkey: String) {
