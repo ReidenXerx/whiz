@@ -33,15 +33,27 @@ enum SpeakersHTML {
     }
 
     /// Emit the page. `framesDir` is optional: a missing directory or missing
-    /// `segNNNN.jpg` per cue simply emits no thumbnail, and the lightbox +
-    /// script only appear when at least one frame was inlined.
+    /// `segNNNN.jpg` per cue simply emits no thumbnail, and the lightbox only
+    /// appears when at least one frame was inlined. `entries` is the frames
+    /// manifest; rows carrying OCR text render a collapsed "screen" block
+    /// per cue, and because the search filters on the cue's full text
+    /// content, on-screen text becomes searchable too (merge.py on the OCR
+    /// branch).
     static func format(
         _ merged: [LabeledSegment],
         framesDir: URL? = nil,
+        entries: [FrameExtractor.Entry]? = nil,
         title: String = "whiz transcript"
     ) -> String {
         let legend = LabeledTranscript.speakersInOrder(merged).map {
             (label: $0, color: speakerColor($0))
+        }
+        // Manifest rows are 1-based and index-aligned with `merged`, so a
+        // plain {index: ocr} lookup joins the two without re-deriving
+        // anything.
+        var ocrByIndex = [Int: String]()
+        for entry in entries ?? [] where !entry.ocr.isEmpty {
+            ocrByIndex[entry.index] = entry.ocr
         }
 
         var parts: [String] = []
@@ -99,6 +111,14 @@ enum SpeakersHTML {
             parts.append("<span class=\"speaker\" style=\"color:\(color)\">\(htmlEscape(entry.speaker))</span>")
             parts.append("</div>")
             parts.append("<div class=\"text\">\(htmlEscape(text))</div>")
+            // On-screen text, collapsed so it doesn't crowd the spoken
+            // transcript; the summary is lowercased by CSS like Python's.
+            if let screen = ocrByIndex[index + 1], !screen.isEmpty {
+                parts.append("<details class=\"screen\">")
+                parts.append("<summary>screen</summary>")
+                parts.append("<div class=\"screen-text\">\(htmlEscape(screen))</div>")
+                parts.append("</details>")
+            }
             parts.append("</div></div>")
         }
         parts.append("</main>")
@@ -109,12 +129,14 @@ enum SpeakersHTML {
 
         // Lightbox overlay only when at least one frame was inlined — a
         // frames-less transcript emits no <img> tags at all (mirrors Python).
+        // The search script ships regardless, so the box always filters.
+        parts.append("<script>\(searchJS)</script>")
         if hasFrame {
             parts.append("<div class=\"lightbox\" id=\"lightbox\" aria-hidden=\"true\">")
             parts.append("<button class=\"close\" aria-label=\"Close\">&times;</button>")
             parts.append("<img alt=\"fullscreen frame\">")
             parts.append("</div>")
-            parts.append("<script>\(js)</script>")
+            parts.append("<script>\(lightboxJS)</script>")
         }
 
         parts.append("</body>\n</html>")
@@ -187,6 +209,23 @@ enum SpeakersHTML {
     .cue .ts:hover { background: var(--border); color: var(--text); }
     .cue .speaker { font-weight: 650; font-size: .92em; }
     .cue .text { font-size: .95em; white-space: pre-wrap; word-wrap: break-word; }
+    /* On-screen text (OCR), collapsed so it doesn't crowd the spoken transcript. */
+    .cue details.screen { margin-top: .35em; }
+    .cue details.screen summary {
+      cursor: pointer; color: var(--muted); font-size: .76em; font-weight: 600;
+      letter-spacing: .02em; text-transform: uppercase; list-style: none; user-select: none;
+    }
+    .cue details.screen summary::-webkit-details-marker { display: none; }
+    .cue details.screen summary::before { content: "▸ "; display: inline-block; transition: transform .12s; }
+    .cue details.screen[open] summary::before { content: "▾ "; }
+    .cue details.screen summary:hover { color: var(--text); }
+    .cue details.screen .screen-text {
+      margin-top: .3em; padding: .45em .6em;
+      background: #f6f8fa; border: 1px solid var(--border); border-radius: 6px;
+      font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+      font-size: .78em; line-height: 1.45; color: var(--muted);
+      white-space: pre-wrap; word-wrap: break-word; max-height: 16em; overflow: auto;
+    }
     .cue.hidden { display: none; }
     footer.foot { text-align: center; color: var(--muted); font-size: .8em; padding: 1.5em; }
     /* Lightbox */
@@ -203,9 +242,29 @@ enum SpeakersHTML {
     }
     """
 
-    private static let js = """
+    private static let searchJS = """
+    (function () {
+      var search = document.getElementById('search');
+      if (!search) return;
+      search.addEventListener('input', function () {
+        var q = search.value.trim().toLowerCase();
+        document.querySelectorAll('.cue').forEach(function (cue) {
+          var hay = (cue.textContent || '').toLowerCase();
+          var hit = !q || hay.indexOf(q) !== -1;
+          cue.classList.toggle('hidden', !hit);
+          // Reveal a match that lives inside the collapsed on-screen text
+          // block, otherwise the cue looks like a false positive.
+          var det = cue.querySelector('details.screen');
+          if (det) det.open = !!(q && hit && (det.textContent || '').toLowerCase().indexOf(q) !== -1);
+        });
+      });
+    })();
+    """
+
+    private static let lightboxJS = """
     (function () {
       var box = document.getElementById('lightbox');
+      if (!box) return;
       var boxImg = box.querySelector('img');
       function open(src) { boxImg.src = src; box.classList.add('open'); }
       function close() { box.classList.remove('open'); boxImg.src = ''; }
@@ -216,16 +275,6 @@ enum SpeakersHTML {
       });
       box.addEventListener('click', function (e) { if (e.target === box || e.target.classList.contains('close')) close(); });
       document.addEventListener('keydown', function (e) { if (e.key === 'Escape') close(); });
-      var search = document.getElementById('search');
-      if (search) {
-        search.addEventListener('input', function () {
-          var q = search.value.trim().toLowerCase();
-          document.querySelectorAll('.cue').forEach(function (cue) {
-            var hay = (cue.textContent || '').toLowerCase();
-            cue.classList.toggle('hidden', q && hay.indexOf(q) === -1);
-          });
-        });
-      }
     })();
     """
 }

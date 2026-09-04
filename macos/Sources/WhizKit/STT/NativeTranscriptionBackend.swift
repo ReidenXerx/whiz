@@ -35,6 +35,31 @@ struct BatchSettings {
     /// `config.py:diarization_embedding_model` — "" => auto-discover.
     var diarizationEmbeddingModel: String = ""
 
+    /// `config.py:speaker_match_threshold` — 0.8 suits 3D-Speaker embeddings;
+    /// higher = stricter (fewer auto-assignments).
+    var speakerMatchThreshold: Double = 0.8
+    /// `config.py:save_voice_profiles` — merge named speakers' embeddings
+    /// into stored profiles after a run.
+    var saveVoiceProfiles: Bool = true
+
+    // `config.py` OCR keys — opt-in because OCR is the slowest pipeline stage
+    // (one pass per segment frame); it never turns on automatically.
+    /// `config.py:ocr`.
+    var ocr: Bool = false
+    /// `config.py:ocr_languages` — "en-US" style hints for Vision.
+    var ocrLanguages: [String] = ["en-US"]
+    /// `config.py:ocr_min_chars` — drop results shorter than this (noise from
+    /// mostly-empty frames).
+    var ocrMinChars: Int = 8
+    /// `config.py:ocr_max_chars` — truncate one frame's OCR (guards against
+    /// one pathological frame, not the whole prompt).
+    var ocrMaxChars: Int = 4000
+    /// `config.py:ocr_dedupe` — reuse OCR for byte-identical frames.
+    var ocrDedupe: Bool = true
+    /// `config.py:ocr_min_width` — small UI text doesn't survive the default
+    /// 1280 downscale; raised automatically with a notice.
+    var ocrMinWidth: Int = 1920
+
     static func load() -> BatchSettings {
         guard let text = try? String(contentsOf: WhizConfig.path, encoding: .utf8) else {
             return BatchSettings()
@@ -56,6 +81,17 @@ struct BatchSettings {
         if case .int(let v)? = values["cluster_threshold"] { s.clusterThreshold = Double(v) }
         if case .string(let v)? = values["diarization_segmentation_model"] { s.diarizationSegmentationModel = v }
         if case .string(let v)? = values["diarization_embedding_model"] { s.diarizationEmbeddingModel = v }
+        if case .double(let v)? = values["speaker_match_threshold"] { s.speakerMatchThreshold = v }
+        if case .int(let v)? = values["speaker_match_threshold"] { s.speakerMatchThreshold = Double(v) }
+        if case .bool(let v)? = values["save_voice_profiles"] { s.saveVoiceProfiles = v }
+        if case .bool(let v)? = values["ocr"] { s.ocr = v }
+        if case .stringArray(let v)? = values["ocr_languages"] { s.ocrLanguages = v }
+        if case .int(let v)? = values["ocr_min_chars"] { s.ocrMinChars = v }
+        if case .int(let v)? = values["ocr_max_chars"] { s.ocrMaxChars = v }
+        if case .bool(let v)? = values["ocr_dedupe"] { s.ocrDedupe = v }
+        if case .int(let v)? = values["ocr_min_width"] { s.ocrMinWidth = v }
+        // config.py:ocr_engine has no native counterpart — Vision is the only
+        // engine on this platform, which is why the manifest records "apple".
         return s
     }
 }
@@ -168,7 +204,7 @@ struct NativeTranscriptionBackend: TranscriptionBackend {
                     vadModelPath: vadModel,
                     vadThreshold: Float(settings.vadThreshold),
                     onProgress: { fraction in
-                        onEvent(.progress(0.28 + 0.64 * fraction))
+                        onEvent(.progress(0.28 + 0.60 * fraction))
                     },
                     onSegment: { segment in
                         onEvent(.log(TranscriptFormatter.segmentLogLine(segment)))
@@ -185,7 +221,48 @@ struct NativeTranscriptionBackend: TranscriptionBackend {
             throw error
         }
         await engine.unload()
-        onEvent(.progress(0.92))
+        onEvent(.progress(0.88))
+
+        // 4. Voice profiles — cli.py:636-650: one embedding per diarization
+        // cluster, auto-matched against stored profiles; matched names relabel
+        // everything downstream. When `save_voice_profiles` is on, each
+        // auto-named cluster's embedding merges back into its stored profile
+        // (save_profile's sample-weighted mean — that is how profiles grow more
+        // accurate over time). New names still come from the Python CLI
+        // (`--name-speakers`) until the app grows a naming UI; matching and
+        // merging work with whatever the shared store already holds.
+        var nameMap: [String: String] = [:]
+        if !diarSegments.isEmpty,
+           let embModel = DiarizationModel.findEmbeddingModel(
+            explicit: settings.diarizationEmbeddingModel,
+            searchDirectories: WhisperModel.searchDirectories)
+        {
+            onEvent(.phase("Recognizing speakers"))
+            let clusterEmbeddings = try await SpeakerProfiles.computeSpeakerEmbeddings(
+                samples: audio.samples,
+                segments: diarSegments,
+                embeddingModel: embModel)
+            if !clusterEmbeddings.isEmpty {
+                let (names, matches) = SpeakerProfiles.autoAssignNames(
+                    clusterEmbeddings: clusterEmbeddings,
+                    threshold: settings.speakerMatchThreshold)
+                nameMap = names
+                for cid in matches.keys.sorted() {
+                    guard let match = matches[cid] ?? nil else { continue }
+                    log(String(format: "speakers: cluster %d → %@ (score %.3f)",
+                               cid, match.name, match.score))
+                }
+                if settings.saveVoiceProfiles {
+                    for cid in matches.keys.sorted() {
+                        guard let match = matches[cid] ?? nil,
+                              let embedding = clusterEmbeddings[cid]
+                        else { continue }
+                        _ = try? SpeakerProfiles.saveProfile(name: match.name, embedding: embedding, samples: 1)
+                        log("profile: updated \(match.name)")
+                    }
+                }
+            }
+        }
 
         // 4. Outputs — SRT + JSON, mirroring `config.py:outputs` default.
         // Output naming follows the `-of <stem>` convention: the input's stem
@@ -210,22 +287,61 @@ struct NativeTranscriptionBackend: TranscriptionBackend {
         // uses (cli.py:722). Manifest shape is shared with Python's
         // `load_manifest`, so `whiz analyze` reads either side's output.
         let framesDir = outputDirectory.appendingPathComponent("\(stem).frames")
-        let labeled = diarSegments.isEmpty
+        var frameEntries: [FrameExtractor.Entry]? = nil
+        let assigned = diarSegments.isEmpty
             ? segments.map { LabeledSegment(segment: $0, speaker: "Speaker") }
             : LabeledTranscript.assignSpeakers(segments: segments, diar: diarSegments)
+        // cli.py:670-672 parity: profile names apply to the merged list itself
+        // so the frames manifest, HTML, TXT and labeled SRT all carry them.
+        let labeled = nameMap.isEmpty ? assigned : LabeledTranscript.relabel(assigned, nameMap)
         if segments.isEmpty {
             log("frames: skipped — no segments to capture")
         } else if !hasVideo {
             log("frames: skipped — no video track")
         } else {
             onEvent(.phase("Capturing frames"))
-            let entries = try await FrameExtractor.extractFrames(
+            // OCR wants larger frames — small UI text doesn't survive the
+            // 1280 downscale — so the width is raised automatically with a
+            // notice when OCR is on (config.py:ocr_min_width comment).
+            var frameWidth = 1280
+            if settings.ocr {
+                frameWidth = max(frameWidth, settings.ocrMinWidth)
+                log("ocr: frame width raised to \(frameWidth) — small UI text doesn't survive downscaling")
+            }
+            var entries = try await FrameExtractor.extractFrames(
                 video: input,
                 segments: labeled,
                 into: framesDir,
+                width: frameWidth,
                 onProgress: { fraction in
-                    onEvent(.progress(0.92 + 0.05 * fraction))
+                    onEvent(.progress(0.92 + 0.03 * fraction))
                 })
+            // Opt-in OCR (config.py:ocr — never auto, it is the slowest
+            // stage). One pass over the captured frames, texts aligned by
+            // index; failed captures keep an empty ocr because the path is
+            // missing → counted failed by the batch. The manifest is written
+            // once, after OCR, carrying v2's per-segment ocr fields.
+            if settings.ocr {
+                onEvent(.phase("Reading screens (OCR)"))
+                let paths = entries.map { entry in
+                    framesDir.appendingPathComponent(entry.frame)
+                }
+                let outcome = await FrameOCR.frames(
+                    paths,
+                    languages: settings.ocrLanguages,
+                    minChars: settings.ocrMinChars,
+                    maxChars: settings.ocrMaxChars,
+                    dedupe: settings.ocrDedupe,
+                    onProgress: { done, total, _ in
+                        onEvent(.progress(0.95 + 0.04 * Double(done) / Double(max(total, 1))))
+                    })
+                for (index, text) in outcome.texts.enumerated() where index < entries.count {
+                    entries[index].ocr = text
+                }
+                log(String(
+                    format: "ocr: %d read, %d reused, %d empty, %d failed",
+                    outcome.ok, outcome.reused, outcome.empty, outcome.failed))
+            }
             // Written even when some or all captures failed — the manifest
             // aligns by index with empty `frame` fields, exactly like
             // write_manifest's contract.
@@ -234,6 +350,7 @@ struct NativeTranscriptionBackend: TranscriptionBackend {
             let captured = entries.filter { !$0.frame.isEmpty }.count
             log(String(format: "frames: %d/%d extracted", captured, entries.count))
             log("output: \(manifestURL.path)")
+            frameEntries = entries
         }
 
         // 6. The readable artifacts — the self-contained HTML transcript (frames
@@ -248,7 +365,9 @@ struct NativeTranscriptionBackend: TranscriptionBackend {
         if !segments.isEmpty {
             onEvent(.phase("Writing HTML transcript"))
             let htmlURL = outputDirectory.appendingPathComponent("\(stem).speakers.html")
-            try SpeakersHTML.format(labeled, framesDir: framesDir, title: input.lastPathComponent)
+            try SpeakersHTML.format(
+                labeled, framesDir: framesDir, entries: frameEntries,
+                title: input.lastPathComponent)
                 .write(to: htmlURL, atomically: true, encoding: .utf8)
             log("output: \(htmlURL.path)")
 

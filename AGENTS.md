@@ -418,7 +418,7 @@ Run gated scripts from `package.json` when hooks remind you: `bearing.__gate.*` 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **whiz** (3080 symbols, 7614 relationships, 154 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **whiz** (3299 symbols, 8397 relationships, 159 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
@@ -458,11 +458,11 @@ This project is indexed by GitNexus as **whiz** (3080 symbols, 7614 relationship
 | Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
 | Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
 | Work in the Tests area (158 symbols) | `.claude/skills/generated/tests/SKILL.md` |
+| Work in the WhizKitTests area (143 symbols) | `.claude/skills/generated/whizkittests/SKILL.md` |
 | Work in the Whiz area (122 symbols) | `.claude/skills/generated/whiz/SKILL.md` |
-| Work in the WhizKitTests area (103 symbols) | `.claude/skills/generated/whizkittests/SKILL.md` |
 | Work in the Scripts area (52 symbols) | `.claude/skills/generated/scripts/SKILL.md` |
 | Work in the Dictate area (51 symbols) | `.claude/skills/generated/dictate/SKILL.md` |
-| Work in the STT area (41 symbols) | `.claude/skills/generated/stt/SKILL.md` |
+| Work in the STT area (47 symbols) | `.claude/skills/generated/stt/SKILL.md` |
 | Work in the Session area (36 symbols) | `.claude/skills/generated/session/SKILL.md` |
 | Work in the Providers area (32 symbols) | `.claude/skills/generated/providers/SKILL.md` |
 | Work in the UI area (22 symbols) | `.claude/skills/generated/ui/SKILL.md` |
@@ -470,7 +470,8 @@ This project is indexed by GitNexus as **whiz** (3080 symbols, 7614 relationship
 | Work in the Input area (10 symbols) | `.claude/skills/generated/input/SKILL.md` |
 | Work in the Golden area (10 symbols) | `.claude/skills/generated/golden/SKILL.md` |
 | Work in the Bearing-teaching area (9 symbols) | `.claude/skills/generated/bearing-teaching/SKILL.md` |
-| Work in the Cluster_72 area (5 symbols) | `.claude/skills/generated/cluster-72/SKILL.md` |
+| Work in the Media area (8 symbols) | `.claude/skills/generated/media/SKILL.md` |
+| Work in the Cluster_79 area (5 symbols) | `.claude/skills/generated/cluster-79/SKILL.md` |
 | Work in the Config area (4 symbols) | `.claude/skills/generated/config/SKILL.md` |
 
 <!-- gitnexus:end -->

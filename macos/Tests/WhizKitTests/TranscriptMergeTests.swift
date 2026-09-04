@@ -195,7 +195,7 @@ struct TranscriptMergeTests {
         #expect(html.contains("data:image/jpeg;base64,"))
     }
 
-    @Test("no frames means no lightbox and no script")
+    @Test("no frames means no lightbox — but the search script still ships")
     func htmlNoLightboxWithoutFrames() throws {
         let merged = [LabeledSegment(segment: seg(0.0, 1.0, "hi"), speaker: "Speaker A")]
         let emptyDir = FileManager.default.temporaryDirectory
@@ -205,7 +205,10 @@ struct TranscriptMergeTests {
 
         let html = SpeakersHTML.format(merged, framesDir: emptyDir)
         #expect(!html.contains("class=\"lightbox\""))
-        #expect(!html.contains("<script>"))
+        #expect(!html.contains("getElementById('lightbox')"))
+        // The search script ships regardless — the branch fixed the box
+        // filtering only when frames existed.
+        #expect(html.contains("getElementById('search')"))
     }
 
     // MARK: - Colors (merge.py:speaker_palette)
