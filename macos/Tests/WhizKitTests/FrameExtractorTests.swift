@@ -92,7 +92,7 @@ struct FrameExtractorTests {
         let progressSeen = ProgressRecorder()
         let entries = try await FrameExtractor.extractFrames(
             video: video,
-            segments: base.map { (segment: $0, speaker: "Speaker") },
+            segments: base.map { LabeledSegment(segment: $0, speaker: "Speaker") },
             into: framesDir,
             onProgress: { progressSeen.record($0) })
 
@@ -139,7 +139,7 @@ struct FrameExtractorTests {
         #expect(await !FrameExtractor.hasVideoTrack(wav))
         let entries = try await FrameExtractor.extractFrames(
             video: wav,
-            segments: [(segment: WhisperBatchTranscriber.Segment(start: 0.1, end: 0.5, text: "hi"), speaker: "Speaker")],
+            segments: [LabeledSegment(segment: WhisperBatchTranscriber.Segment(start: 0.1, end: 0.5, text: "hi"), speaker: "Speaker")],
             into: tempURL("frames-dir"))
         #expect(entries.isEmpty)
     }

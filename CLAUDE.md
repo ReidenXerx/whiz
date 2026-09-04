@@ -1,7 +1,7 @@
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **whiz** (2909 symbols, 6867 relationships, 157 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **whiz** (3000 symbols, 7295 relationships, 157 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
@@ -42,15 +42,15 @@ This project is indexed by GitNexus as **whiz** (2909 symbols, 6867 relationship
 | Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
 | Work in the Tests area (158 symbols) | `.claude/skills/generated/tests/SKILL.md` |
 | Work in the Whiz area (122 symbols) | `.claude/skills/generated/whiz/SKILL.md` |
-| Work in the WhizKitTests area (76 symbols) | `.claude/skills/generated/whizkittests/SKILL.md` |
+| Work in the WhizKitTests area (96 symbols) | `.claude/skills/generated/whizkittests/SKILL.md` |
 | Work in the Scripts area (52 symbols) | `.claude/skills/generated/scripts/SKILL.md` |
 | Work in the Dictate area (51 symbols) | `.claude/skills/generated/dictate/SKILL.md` |
-| Work in the Session area (34 symbols) | `.claude/skills/generated/session/SKILL.md` |
-| Work in the STT area (32 symbols) | `.claude/skills/generated/stt/SKILL.md` |
+| Work in the Session area (36 symbols) | `.claude/skills/generated/session/SKILL.md` |
+| Work in the STT area (35 symbols) | `.claude/skills/generated/stt/SKILL.md` |
 | Work in the Providers area (32 symbols) | `.claude/skills/generated/providers/SKILL.md` |
 | Work in the UI area (22 symbols) | `.claude/skills/generated/ui/SKILL.md` |
-| Work in the Merge area (13 symbols) | `.claude/skills/generated/merge/SKILL.md` |
-| Work in the Input area (12 symbols) | `.claude/skills/generated/input/SKILL.md` |
+| Work in the Merge area (18 symbols) | `.claude/skills/generated/merge/SKILL.md` |
+| Work in the Input area (10 symbols) | `.claude/skills/generated/input/SKILL.md` |
 | Work in the Golden area (10 symbols) | `.claude/skills/generated/golden/SKILL.md` |
 | Work in the Bearing-teaching area (9 symbols) | `.claude/skills/generated/bearing-teaching/SKILL.md` |
 | Work in the Cluster_71 area (5 symbols) | `.claude/skills/generated/cluster-71/SKILL.md` |
