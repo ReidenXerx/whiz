@@ -54,7 +54,7 @@ enum FrameExtractor {
     /// the caller distinguishes with `hasVideoTrack` for logging.
     static func extractFrames(
         video: URL,
-        segments: [(segment: WhisperBatchTranscriber.Segment, speaker: String)],
+        segments: [LabeledSegment],
         into framesDir: URL,
         width: Int = 1280,
         onProgress: (@Sendable (Double) -> Void)? = nil
