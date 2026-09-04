@@ -38,6 +38,9 @@ enum FrameExtractor {
         let text: String
         /// Filename within the frames directory; empty if capture failed.
         let frame: String
+        /// On-screen text read from the frame (empty unless OCR ran) —
+        /// manifest v2's added field.
+        var ocr: String = ""
     }
 
     /// True if the media file has a video track — "auto-on for video" is
@@ -112,18 +115,25 @@ enum FrameExtractor {
         return entries
     }
 
-    /// Write the frames manifest — `screenshots.py:write_manifest`'s payload
-    /// exactly: version, the frames directory *name*, count, and one row per
-    /// segment in Python's key order. Paths only, never bytes — the manifest
-    /// stays small and re-runnable while the HTML artifact inlines frames as
-    /// base64. Shape-compatible with Python's reader (`load_manifest`), not
-    /// byte-stable with `json.dumps` — non-ASCII stays UTF-8 where Python
-    /// would emit `\uXXXX`.
-    static func writeManifest(_ entries: [Entry], framesDir: URL, to path: URL) throws {
+    /// Write the frames manifest — manifest **v2**: the frames directory
+    /// *name*, count, and one row per segment in Python's key order, plus the
+    /// per-segment `ocr` field and the top-level `ocr_engine` that records
+    /// which engine produced it ("apple" — Vision is ocrmac's engine, so the
+    /// Python OCR branch reads our manifests natively). Paths only, never
+    /// bytes. Shape-compatible with Python's reader; not byte-stable with
+    /// `json.dumps` — non-ASCII stays UTF-8 where Python would emit
+    /// `\uXXXX`.
+    static func writeManifest(
+        _ entries: [Entry],
+        framesDir: URL,
+        to path: URL,
+        ocrEngine: String = "apple"
+    ) throws {
         var json = "{\n"
-        json += "  \"version\": 1,\n"
+        json += "  \"version\": 2,\n"
         json += "  \"frames_dir\": \(escape(framesDir.lastPathComponent)),\n"
         json += "  \"count\": \(entries.count),\n"
+        json += "  \"ocr_engine\": \(escape(ocrEngine)),\n"
         json += "  \"segments\": ["
         for (offset, entry) in entries.enumerated() {
             json += offset == 0 ? "\n" : ",\n"
@@ -133,7 +143,8 @@ enum FrameExtractor {
             json += "      \"end\": \(entry.end),\n"
             json += "      \"speaker\": \(escape(entry.speaker)),\n"
             json += "      \"text\": \(escape(entry.text)),\n"
-            json += "      \"frame\": \(escape(entry.frame))\n"
+            json += "      \"frame\": \(escape(entry.frame)),\n"
+            json += "      \"ocr\": \(escape(entry.ocr))\n"
             json += "    }"
         }
         json += entries.isEmpty ? "]\n" : "\n  ]\n"

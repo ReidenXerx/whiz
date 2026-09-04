@@ -15,7 +15,7 @@ import AppKit
 @Suite("Frame extraction")
 struct FrameExtractorTests {
 
-    @Test("manifest matches screenshots.py's payload shape exactly")
+    @Test("manifest matches the OCR branch's v2 payload shape exactly")
     func manifestShape() throws {
         let path = tempURL("frames.json")
         defer { try? FileManager.default.removeItem(at: path) }
@@ -23,11 +23,13 @@ struct FrameExtractorTests {
         let entries = [
             FrameExtractor.Entry(
                 index: 1, start: 1.5, end: 3.0, speaker: "Speaker",
-                text: "He said \"hi\" and \"bye\"", frame: "seg0001.jpg"),
+                text: "He said \"hi\" and \"bye\"", frame: "seg0001.jpg",
+                ocr: "Menu & <div>"),
             FrameExtractor.Entry(
                 index: 2, start: 3.2, end: 5.5, speaker: "Speaker",
                 // Text with characters that must not appear raw in JSON.
-                text: "tab\tnew\nline", frame: ""),
+                text: "tab\tnew\nline", frame: "",
+                ocr: ""),
         ]
         try FrameExtractor.writeManifest(
             entries,
@@ -35,20 +37,22 @@ struct FrameExtractorTests {
             to: path)
 
         // Exact pin: key order, 2-space indent, no trailing newline — the
-        // same layout `json.dumps(payload, indent=2)` produces.
+        // same layout `json.dumps(payload, indent=2)` produces, v2 edition.
         #expect(try String(contentsOf: path, encoding: .utf8) == """
             {
-              "version": 1,
+              "version": 2,
               "frames_dir": "clip.frames",
               "count": 2,
+              "ocr_engine": "apple",
               "segments": [
                 {
                   "index": 1,
                   "start": 1.5,
                   "end": 3.0,
                   "speaker": "Speaker",
-                  "text": "He said \\"hi\\" and \\"bye\\"",
-                  "frame": "seg0001.jpg"
+                  "text": "He said \\\"hi\\\" and \\\"bye\\\"",
+                  "frame": "seg0001.jpg",
+                  "ocr": "Menu & <div>"
                 },
                 {
                   "index": 2,
@@ -56,7 +60,8 @@ struct FrameExtractorTests {
                   "end": 5.5,
                   "speaker": "Speaker",
                   "text": "tab\\tnew\\nline",
-                  "frame": ""
+                  "frame": "",
+                  "ocr": ""
                 }
               ]
             }
@@ -64,11 +69,13 @@ struct FrameExtractorTests {
 
         // And it parses, so the Python reader's keys are all present.
         let object = try JSONSerialization.jsonObject(with: Data(try String(contentsOf: path, encoding: .utf8).utf8)) as? [String: Any]
-        #expect((object?["version"] as? Int) == 1)
+        #expect((object?["version"] as? Int) == 2)
+        #expect((object?["ocr_engine"] as? String) == "apple")
         #expect((object?["count"] as? Int) == 2)
         let segments = object?["segments"] as? [[String: Any]]
         #expect(segments?.count == 2)
         #expect((segments?[1]["frame"] as? String)?.isEmpty == true)
+        #expect((segments?[0]["ocr"] as? String) == "Menu & <div>")
     }
 
     @Test("frames land at the right timestamps and the manifest aligns")
