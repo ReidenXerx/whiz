@@ -10,6 +10,7 @@ import SwiftUI
 struct MenuBarContent: View {
     @ObservedObject var controller: SessionController
     var onOpenSettings: () -> Void
+    var onTranscribe: () -> Void
 
     @State private var launchesAtLogin = LoginItem.isEnabled
 
@@ -28,6 +29,15 @@ struct MenuBarContent: View {
             Divider()
             Text(error)
         }
+
+        Divider()
+
+        // Batch transcription is a separate concern from dictation, so it gets
+        // its own section rather than living among the dictation controls.
+        Button("Transcribe…") {
+            onTranscribe()
+        }
+        .keyboardShortcut("t")
 
         Divider()
 

@@ -31,6 +31,9 @@ env/
 *.swp
 *.swo
 .DS_Store
+# clangd symbol-index caches (Zed / sourcekit-lsp write .cache/clangd
+# under whatever project root they detect, e.g. macos/vendor/).
+.cache/
 
 # Test / coverage
 .pytest_cache/

@@ -124,7 +124,7 @@ let package = Package(
         ),
         .testTarget(
             name: "WhizKitTests",
-            dependencies: ["WhizKit"],
+            dependencies: ["WhizKit", "CWhisper"],
             path: "Tests/WhizKitTests"
         ),
     ]
