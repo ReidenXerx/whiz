@@ -182,3 +182,39 @@ def test_find_vad_model_prefers_known_versions(tmp_path, monkeypatch):
     # v5.1.2 is listed first in VAD_MODELS (preferred).
     assert p is not None
     assert p.name == "ggml-silero-v5.1.2.bin"
+
+
+# ---------- NS-15: PREFERENCE ordering invariants ----------
+
+
+def _unquantized_base(name: str) -> str:
+    return name.replace("-q8_0", "").replace("-q5_0", "")
+
+
+def test_preference_covers_exactly_known_models():
+    """PREFERENCE must be a reordering of KNOWN_MODELS: a model added to
+    one list without a deliberate slot in the other fails loudly here."""
+    assert set(M.PREFERENCE) == set(M.KNOWN_MODELS)
+    assert len(M.PREFERENCE) == len(set(M.PREFERENCE))  # no duplicates
+
+
+def test_preference_quantized_always_behind_unquantized_base():
+    """NS-15: every -q* entry must sit AFTER its unquantized class, so
+    pick_best never chooses a quantized model while its base exists on disk."""
+    for name in M.PREFERENCE:
+        if "-q" not in name:
+            continue
+        base = _unquantized_base(name)
+        assert base in M.PREFERENCE, f"{name} has no unquantized {base}"
+        assert M.PREFERENCE.index(base) < M.PREFERENCE.index(name), (
+            f"{name} must rank behind {base} (NS-15)")
+
+
+def test_preference_all_unquantized_before_any_quantized():
+    """NS-15: the unquantized models form one leading batch — no quantized
+    model is reachable while ANY unquantized model exists on disk."""
+    quantized = [i for i, n in enumerate(M.PREFERENCE) if "-q" in n]
+    unquantized = [i for i, n in enumerate(M.PREFERENCE) if "-q" not in n]
+    assert unquantized, "PREFERENCE must list unquantized models"
+    assert quantized, "PREFERENCE must keep quantized fallbacks (last resort)"
+    assert max(unquantized) < min(quantized)

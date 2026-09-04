@@ -380,7 +380,7 @@ whiz transcribe --speakers 4 --name-speakers meeting.mov
 whiz transcribe recording.mov --speakers-names Alice,Bob,Carol,Dave
 ```
 
-If diarization is auto-enabled but sherpa-onnx or its models aren't installed yet, whiz skips speaker labeling with a one-line hint (and still transcribes + captures screenshots) instead of crashing — run the one-time setup above to turn it on. An explicitly requested `--outputs html` is never dropped: when speaker labels are unavailable the HTML transcript is still written, with every cue carrying a generic `Speaker` label and a warning explaining why.
+If diarization is auto-enabled but sherpa-onnx or its models aren't installed yet, whiz skips speaker labeling with a one-line hint (and still transcribes + captures screenshots) instead of crashing — run the one-time setup above to turn it on. An explicitly requested `--speakers` degrades with a louder warning. An explicitly requested `--outputs html` is never dropped: when speaker labels are unavailable the HTML transcript is still written, with every cue carrying a generic `Speaker` label and a warning explaining why. `--speakers-names` / `--name-speakers` are discarded in that case, and the warning says so — the names are never silently dropped.
 
 This produces the normal whisper-cli outputs (SRT, JSON) plus two labeled files alongside the input:
 
@@ -399,7 +399,9 @@ For video inputs `--screenshots` is on by default; pass `--no-screenshots` to sk
 
 Add `html` to `--outputs` (or pass `--outputs html` to `whiz merge`) to write a self-contained `<stem>.speakers.html` alongside the input. Each segment is rendered as a color-coded cue with a timestamp link, the speaker label, and (when `--screenshots` was set) the on-screen frame inlined as a base64 `data:` URI — so the file is fully portable with no external image dependencies.
 
-If diarization is unavailable (sherpa-onnx not installed or it produced no segments), the HTML transcript is still written — every cue gets a generic `Speaker` label and a warning tells you why, instead of the HTML being silently skipped. The labeled `.speakers.srt`/`.speakers.txt` are not produced in that case; they require real diarization.
+Because the HTML is built from the parsed whisper JSON, `--outputs html` also forces JSON output (`-oj`): an extra `<stem>.json` file remains alongside the input even when you only asked for `html`.
+
+If diarization is unavailable (sherpa-onnx not installed or it produced no segments), the HTML transcript is still written instead of being silently skipped — every cue gets a bare generic `Speaker` label (not the letterized `Speaker A` used for real diarization), and a muted note line at the top of the page records that no diarization ran, so a degraded page is never mistaken for a one-speaker transcript. The labeled `.speakers.srt` is not produced in that case; it requires real diarization. On audio runs a generic-label `.speakers.txt` is still written so `whiz analyze` can find a transcript.
 
 The transcript page has a sticky header with the title, a color-coded speaker legend, and a live search box that filters cues by text or speaker. Each cue is a card with a left color border matching its speaker and a hover lift. Clicking any frame thumbnail opens a fullscreen lightbox overlay (close with the × button, the backdrop, or the Escape key). The layout is responsive down to mobile widths.
 
