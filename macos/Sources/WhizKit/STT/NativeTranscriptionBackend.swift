@@ -152,16 +152,17 @@ struct NativeTranscriptionBackend: TranscriptionBackend {
         // until diarization lands. Manifest shape is shared with Python's
         // `load_manifest`, so `whiz analyze` and the future HTML pass read
         // either side's output.
+        let framesDir = outputDirectory.appendingPathComponent("\(stem).frames")
+        let labeled = segments.map { LabeledSegment(segment: $0, speaker: "Speaker") }
         if segments.isEmpty {
             log("frames: skipped — no segments to capture")
         } else if await !FrameExtractor.hasVideoTrack(input) {
             log("frames: skipped — no video track")
         } else {
             onEvent(.phase("Capturing frames"))
-            let framesDir = outputDirectory.appendingPathComponent("\(stem).frames")
             let entries = try await FrameExtractor.extractFrames(
                 video: input,
-                segments: segments.map { (segment: $0, speaker: "Speaker") },
+                segments: labeled,
                 into: framesDir,
                 onProgress: { fraction in
                     onEvent(.progress(0.95 + 0.04 * fraction))
@@ -174,6 +175,28 @@ struct NativeTranscriptionBackend: TranscriptionBackend {
             let captured = entries.filter { !$0.frame.isEmpty }.count
             log(String(format: "frames: %d/%d extracted", captured, entries.count))
             log("output: \(manifestURL.path)")
+        }
+
+        // 6. The readable artifacts — the self-contained HTML transcript (frames
+        // inlined as base64 when present) and the dialogue TXT, built from the
+        // same labeled segments as the frames manifest. A documented divergence
+        // from the Python pipeline, which writes these only on the diarized
+        // path: there are no speaker labels yet, so every segment carries the
+        // same generic "Speaker", and real labels arrive with diarization
+        // through this exact shape. The labeled SRT is ported and pinned in
+        // TranscriptMergeTests but deliberately not written here — with one
+        // generic speaker it would only duplicate the plain SRT.
+        if !segments.isEmpty {
+            onEvent(.phase("Writing HTML transcript"))
+            let htmlURL = outputDirectory.appendingPathComponent("\(stem).speakers.html")
+            try SpeakersHTML.format(labeled, framesDir: framesDir, title: input.lastPathComponent)
+                .write(to: htmlURL, atomically: true, encoding: .utf8)
+            log("output: \(htmlURL.path)")
+
+            let txtURL = outputDirectory.appendingPathComponent("\(stem).speakers.txt")
+            try LabeledTranscript.formatDialogueTXT(labeled)
+                .write(to: txtURL, atomically: true, encoding: .utf8)
+            log("output: \(txtURL.path)")
         }
 
         onEvent(.phase("Finished"))
