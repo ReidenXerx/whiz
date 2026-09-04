@@ -1,0 +1,13 @@
+// sherpa-onnx's C API, exposed to Swift.
+//
+// Dylibs + this header are vendored into vendor/sherpa-onnx by
+// scripts/build-sherpa.sh, which copies them from the sherpa_onnx Python
+// distribution — the same binary `whiz transcribe` runs, so diarization
+// agrees with the Python pipeline. Unlike whisper.cpp there is no source
+// build; the header path is relative for the same load-bearing reason as
+// CWhisper's (a .systemLibrary accepts no cSettings, so the header must be
+// named where clang can find it).
+module CSherpa [system] {
+    header "../../vendor/sherpa-onnx/include/sherpa-onnx/c-api/c-api.h"
+    export *
+}
