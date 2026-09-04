@@ -146,6 +146,36 @@ struct NativeTranscriptionBackend: TranscriptionBackend {
             to: jsonURL, atomically: true, encoding: .utf8)
         log("output: \(jsonURL.path)")
 
+        // 5. Frames — auto-on for video, mirroring cli.py:676 and cli.py:720:
+        // one JPEG per segment plus the manifest, labeled with the same
+        // generic "Speaker" the Python no-diarization path uses (cli.py:722)
+        // until diarization lands. Manifest shape is shared with Python's
+        // `load_manifest`, so `whiz analyze` and the future HTML pass read
+        // either side's output.
+        if segments.isEmpty {
+            log("frames: skipped — no segments to capture")
+        } else if await !FrameExtractor.hasVideoTrack(input) {
+            log("frames: skipped — no video track")
+        } else {
+            onEvent(.phase("Capturing frames"))
+            let framesDir = outputDirectory.appendingPathComponent("\(stem).frames")
+            let entries = try await FrameExtractor.extractFrames(
+                video: input,
+                segments: segments.map { (segment: $0, speaker: "Speaker") },
+                into: framesDir,
+                onProgress: { fraction in
+                    onEvent(.progress(0.95 + 0.04 * fraction))
+                })
+            // Written even when some or all captures failed — the manifest
+            // aligns by index with empty `frame` fields, exactly like
+            // write_manifest's contract.
+            let manifestURL = outputDirectory.appendingPathComponent("\(stem).frames.json")
+            try FrameExtractor.writeManifest(entries, framesDir: framesDir, to: manifestURL)
+            let captured = entries.filter { !$0.frame.isEmpty }.count
+            log(String(format: "frames: %d/%d extracted", captured, entries.count))
+            log("output: \(manifestURL.path)")
+        }
+
         onEvent(.phase("Finished"))
         onEvent(.progress(1))
         return outputDirectory
