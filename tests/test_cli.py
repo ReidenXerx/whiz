@@ -1,4 +1,5 @@
-"""Tests for whiz.cli helpers — model-picker recommendation heuristic.
+"""Tests for whiz.cli helpers — model-picker recommendation heuristic,
+vision resolution, and output fallbacks (HTML without diarization).
 
 Run with: pytest tests/test_cli.py
 """
@@ -7,6 +8,9 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -154,3 +158,230 @@ def test_resolve_vision_no_vision_overrides_auto_enable():
     assert use is False
     assert kind == ""
     assert msg == ""
+
+
+# ---------- output fallbacks (HTML without diarization) ----------
+
+# whisper-cli -oj fixture: two segments the merge/HTML path can parse.
+_WHISPER_JSON = (
+    '{"transcription": ['
+    '{"timestamps":{"from":"00:00:00,000","to":"00:00:02,000"},"text":"hello world"},'
+    '{"timestamps":{"from":"00:00:02,000","to":"00:00:04,500"},"text":"second line"}'
+    "]}"
+)
+
+
+def _transcribe_args(file, outputs="srt,html", speakers=1):
+    return SimpleNamespace(
+        file=str(file),
+        output="",
+        outputs=outputs,
+        model="",
+        threads=0,
+        language="",
+        vad=False,
+        no_timestamps=False,
+        print_progress=False,
+        no_progress=True,
+        keep_wav=False,
+        no_auto_vad_download=True,
+        translate=False,
+        speakers=speakers,
+        no_speakers=False,
+        cluster_threshold=None,
+        name_speakers=False,
+        no_name_speakers=True,
+        speakers_names=None,
+        screenshots=False,
+        no_screenshots=True,
+        screenshot_width=None,
+        no_voice_profiles=True,
+        resume=False,
+        verbose=False,
+        extra=[],
+        dry_run=False,
+        analyze=False,
+        vision=False,
+        no_vision=False,
+    )
+
+
+def _setup_transcribe(monkeypatch, tmp_path, *, diarize_enabled, screenshots=False, name="meeting"):
+    """Create a fake audio input + whisper JSON and stub out the heavy machinery.
+
+    Returns the input Path. ``diarize_enabled``/``screenshots`` are what the
+    stubbed _build_transcribe_args reports (the real one derives them from
+    --speakers/video detection).
+    """
+    audio = tmp_path / f"{name}.m4a"
+    audio.write_bytes(b"fake audio")
+    (tmp_path / f"{name}.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+
+    def fake_build(args, config):
+        return (["whisper-cli"], "model.bin", audio, audio, False,
+                audio.with_suffix(""), diarize_enabled, screenshots)
+
+    monkeypatch.setattr(cli, "_build_transcribe_args", fake_build)
+    monkeypatch.setattr(cli, "_run_whisper_streaming", lambda cmd: SimpleNamespace(returncode=0))
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    return audio
+
+
+def test_transcribe_html_fallback_when_diarization_unavailable(tmp_path, monkeypatch, capsys):
+    """--speakers with --outputs html must not silently skip the HTML when
+    diarization is unavailable: it degrades to generic 'Speaker' labels."""
+    audio = _setup_transcribe(monkeypatch, tmp_path, diarize_enabled=True)
+    monkeypatch.setattr(cli, "_run_diarize_or_fallback", lambda wav, config, args: [])
+
+    rc = cli.cmd_transcribe(_transcribe_args(audio, outputs="srt,html", speakers=1))
+
+    assert rc == 0
+    html_path = tmp_path / "meeting.speakers.html"
+    assert html_path.exists(), "HTML transcript was silently skipped"
+    content = html_path.read_text(encoding="utf-8")
+    assert "hello world" in content
+    assert ">Speaker<" in content  # generic label, not 'Speaker A'
+    assert "Speaker A" not in content
+    # The labeled outputs are NOT faked — they need real diarization.
+    assert not (tmp_path / "meeting.speakers.srt").exists()
+    assert not (tmp_path / "meeting.speakers.txt").exists()
+    # Loud degradation, not silence.
+    assert "Speakers unavailable" in capsys.readouterr().err
+
+
+def test_transcribe_html_without_speakers(tmp_path, monkeypatch, capsys):
+    """--outputs html on an audio run without diarization still writes the
+    HTML (previously silently skipped); no speaker warning is needed."""
+    audio = _setup_transcribe(monkeypatch, tmp_path, diarize_enabled=False)
+
+    rc = cli.cmd_transcribe(_transcribe_args(audio, outputs="srt,html", speakers=None))
+
+    assert rc == 0
+    assert (tmp_path / "meeting.speakers.html").exists()
+    assert not (tmp_path / "meeting.speakers.srt").exists()
+    assert "Speakers unavailable" not in capsys.readouterr().err
+
+
+def test_transcribe_html_and_frames_fallback_for_video(tmp_path, monkeypatch, capsys):
+    """Video + --speakers + --outputs html with diarization unavailable:
+    the frames manifest AND the HTML are written with generic labels, and
+    frames are still inlined into the HTML."""
+    video = tmp_path / "recording.mov"
+    video.write_bytes(b"fake video")
+    (tmp_path / "recording.wav.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    frames_dir = tmp_path / "recording.frames"
+    frames_dir.mkdir()
+    (frames_dir / "seg0001.jpg").write_bytes(b"\xff\xd8jpeg\xff\xd9")
+    manifest = tmp_path / "recording.frames.json"
+
+    def fake_build(args, config):
+        wav = tmp_path / "recording.wav"
+        return (["whisper-cli"], "model.bin", wav, video, False,
+                tmp_path / "recording", True, True)
+
+    monkeypatch.setattr(cli, "_build_transcribe_args", fake_build)
+    monkeypatch.setattr(cli, "_run_whisper_streaming", lambda cmd: SimpleNamespace(returncode=0))
+    monkeypatch.setattr(cli, "_run_diarize_or_fallback", lambda wav, config, args: [])
+    monkeypatch.setattr(
+        cli, "_extract_and_manifest_screenshots",
+        lambda in_path, merged, of_base, ffmpeg, width, dry_run: (frames_dir, manifest),
+    )
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+
+    rc = cli.cmd_transcribe(_transcribe_args(video, outputs="html", speakers=1))
+
+    assert rc == 0
+    html = (tmp_path / "recording.speakers.html").read_text(encoding="utf-8")
+    assert "hello world" in html
+    assert "<img" in html  # frame inlined even without speaker labels
+    assert "Speakers unavailable" in capsys.readouterr().err
+    # Labeled outputs are not faked.
+    assert not (tmp_path / "recording.speakers.srt").exists()
+
+
+def test_transcribe_no_crash_when_json_missing(tmp_path, monkeypatch):
+    """A missing whisper JSON on the unlabeled path must warn, not crash
+    (the old screenshots-only block read an unbound 'result')."""
+    video = tmp_path / "recording.mov"
+    video.write_bytes(b"fake video")
+
+    def fake_build(args, config):
+        wav = tmp_path / "recording.wav"
+        return (["whisper-cli"], "model.bin", wav, video, False,
+                tmp_path / "recording", False, True)
+
+    monkeypatch.setattr(cli, "_build_transcribe_args", fake_build)
+    monkeypatch.setattr(cli, "_run_whisper_streaming", lambda cmd: SimpleNamespace(returncode=0))
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+
+    rc = cli.cmd_transcribe(_transcribe_args(video, outputs="html", speakers=None))
+
+    assert rc == 0
+    assert not (tmp_path / "recording.speakers.html").exists()
+
+
+def test_build_args_forces_json_with_html_output(tmp_path, monkeypatch):
+    """--outputs html must force -oj so the HTML can be rendered even when
+    diarization is unavailable (segments are needed to build the page)."""
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+    monkeypatch.setattr(cli.M, "pick_best", lambda config: Path("/models/turbo.bin"))
+    monkeypatch.setattr(cli, "_find_whisper_cli", lambda configured="": "whisper-cli")
+
+    cmd, *_rest = cli._build_transcribe_args(
+        _transcribe_args(audio, outputs="html", speakers=None),
+        cli.cfg.Config(vad=False),
+    )
+
+    assert "-oj" in cmd
+
+
+# ---------- merge fallback ----------
+
+
+def _merge_args(file, outputs="html", speakers=1):
+    return SimpleNamespace(
+        file=str(file), json="", outputs=outputs, speakers=speakers,
+        no_speakers=False, cluster_threshold=None, name_speakers=False,
+        no_name_speakers=True, speakers_names=None, screenshots=False,
+        no_screenshots=False, screenshot_width=None, no_voice_profiles=True,
+    )
+
+
+def _raise_sherpa_missing(wav, config, num_speakers=0, threshold=0.9):
+    raise RuntimeError("The 'sherpa_onnx' package is required for diarization")
+
+
+def test_merge_html_fallback_when_diarization_unavailable(tmp_path, monkeypatch, capsys):
+    """whiz merge --speakers --outputs html with sherpa-onnx missing degrades
+    to a generic-label HTML transcript instead of exiting."""
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
+
+    rc = cli.cmd_merge(_merge_args(audio, outputs="html", speakers=1))
+
+    assert rc == 0
+    html_path = tmp_path / "meeting.m4a.speakers.html"
+    assert html_path.exists(), "HTML transcript was silently skipped"
+    content = html_path.read_text(encoding="utf-8")
+    assert "hello world" in content
+    assert ">Speaker<" in content
+    # Labeled outputs are not faked.
+    assert not (tmp_path / "meeting.speakers.srt").exists()
+    assert "diarization unavailable" in capsys.readouterr().err
+
+
+def test_merge_still_raises_when_nothing_else_requested(tmp_path, monkeypatch):
+    """Without --outputs html (or screenshots) there is nothing to fall back
+    to: an explicit --speakers merge against missing sherpa-onnx stays loud."""
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
+
+    with pytest.raises(SystemExit, match="sherpa_onnx"):
+        cli.cmd_merge(_merge_args(audio, outputs="", speakers=1))

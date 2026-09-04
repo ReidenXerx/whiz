@@ -227,10 +227,11 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
     # Outputs. Normalize to a list (the flag/config may be a comma string).
     raw_outputs = args.outputs if args.outputs else ",".join(config.outputs)
     outputs = [o.strip() for o in raw_outputs.split(",") if o.strip()]
-    # We need a parseable whisper JSON to merge diarization against AND to
-    # drive the per-segment screenshots path (even without diarization). Force
-    # JSON (in addition to any user-requested formats) so we can parse segments.
-    if (diarize_enabled or screenshots) and "json" not in outputs and "json-full" not in outputs:
+    # We need a parseable whisper JSON to merge diarization against, to drive
+    # the per-segment screenshots path (even without diarization), AND to build
+    # the HTML transcript (even with no speaker labels at all). Force JSON
+    # (in addition to any user-requested formats) so we can parse segments.
+    if (diarize_enabled or screenshots or "html" in outputs) and "json" not in outputs and "json-full" not in outputs:
         outputs = outputs + ["json"]
     out_flags = []
     for o in outputs:
@@ -617,7 +618,10 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
 
     # --- Merge diarization with whisper output ---
     written: list[str] = []
-    if diarize_enabled and rc == 0:
+    want_html = _outputs_include(args, config, "html")
+    want_frames = screenshots and aud.needs_extraction(in_path)
+    whisper_segs: list[MR.WhisperSeg] = []
+    if (diarize_enabled or want_frames or want_html) and rc == 0:
         json_path = _find_whisper_json(of_base, wav, of_passed=bool(args.output))
         if not json_path.exists():
             ui.status(f"Warning: expected whisper JSON output at {json_path} but it's missing; skipping merge.",
@@ -628,98 +632,92 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             except Exception as e:  # noqa: BLE001
                 ui.status(f"Warning: failed to parse {json_path}: {e}", kind="warn")
                 whisper_segs = []
-            if whisper_segs and diar_segments:
-                ui.phase("merging speakers")
-                merged = MR.assign_speakers(whisper_segs, diar_segments)
-                want_html = _outputs_include(args, config, "html")
-                want_frames = screenshots and aud.needs_extraction(in_path)
-                # Voice profiles: compute per-cluster embeddings and auto-match
-                # against any stored profiles. The match seeds speaker names
-                # (used as defaults); --speakers-names/--name-speakers can override.
-                profile_names: dict[str, str] = {}
-                cluster_embeddings: dict[int, list[float]] = {}
-                if not args.no_voice_profiles:
-                    try:
-                        cluster_embeddings = P.compute_speaker_embeddings(wav, diar_segments, config)
-                        if cluster_embeddings:
-                            profile_names, matches = P.auto_assign_names(
-                                cluster_embeddings, threshold=config.speaker_match_threshold,
-                            )
-                            profile_names = {k: v for k, v in profile_names.items() if v}
-                    except Exception as e:  # noqa: BLE001
-                        ui.status(f"Warning: voice-profile matching skipped: {e}", kind="warn")
-                # Frames must be extracted before writing HTML so they can be
-                # inlined; for the diarized path we extract after the labeled
-                # outputs but before HTML if both are requested.
-                srt_out, txt_out, name_map = _write_labeled_outputs(
-                    merged, of_base,
-                    name_speakers=_name_speakers_enabled(args, diarize_enabled),
-                    speakers_names=args.speakers_names,
-                    html=want_html and not want_frames,
-                    title=in_path.name,
-                    profile_names=profile_names or None,
-                    cluster_embeddings=cluster_embeddings or None,
-                    save_profiles=config.save_voice_profiles and not args.no_voice_profiles,
-                )
-                ui.wrote("Wrote labeled SRT", srt_out)
-                ui.wrote("Wrote dialogue TXT", txt_out)
-                written.append(str(srt_out))
-                written.append(str(txt_out))
-                # Apply the resolved names to the caller's merged list so the
-                # screenshots manifest and the HTML pass carry real names too
-                # (_write_labeled_outputs relabels a local copy only).
-                if name_map:
-                    merged = MR.relabel(merged, name_map)
-                # Video screenshots: one frame per segment, using the relabeled
-                # merged list so the manifest carries final speaker names.
-                frames_dir = None
-                if want_frames:
-                    ui.phase("capturing frames")
-                    width = args.screenshot_width if args.screenshot_width is not None else 1280
-                    result = _extract_and_manifest_screenshots(
-                        in_path, merged, of_base,
-                        ffmpeg=aud.find_ffmpeg(config.ffmpeg),
-                        width=width,
-                        dry_run=args.dry_run,
-                    )
-                    if result is not None:
-                        frames_dir = result[0]
-                        ui.wrote("Wrote frames manifest", result[1])
-                        written.append(str(result[1]))
-                # Write HTML after frames exist so they can be inlined.
-                if want_html and want_frames and frames_dir is not None:
-                    ui.phase("writing HTML transcript")
-                    _write_labeled_outputs(
-                        merged, of_base,
-                        name_speakers=False,
-                        speakers_names=None,
-                        html=True,
-                        frames_dir=frames_dir,
-                        title=in_path.name,
-                    )
-                    html_path = Path(str(of_base) + ".speakers.html")
-                    ui.wrote("Wrote HTML transcript", html_path)
-                    written.append(str(html_path))
 
-    # --- Screenshots without diarization ---
-    # Video input (or explicit --screenshots) without usable diarization: one
-    # frame per whisper segment, labeled with a single generic speaker.
-    if (
-        screenshots
-        and not diarize_enabled
-        and rc == 0
-        and aud.needs_extraction(in_path)
-    ):
-        json_path = _find_whisper_json(of_base, wav, of_passed=bool(args.output))
-        if json_path.exists():
-            try:
-                whisper_segs = MR.parse_whisper_json(json_path)
-            except Exception as e:  # noqa: BLE001
-                ui.status(f"Warning: failed to parse {json_path}: {e}", kind="warn")
-                whisper_segs = []
-            if whisper_segs:
+        if diarize_enabled and whisper_segs and diar_segments:
+            ui.phase("merging speakers")
+            merged = MR.assign_speakers(whisper_segs, diar_segments)
+            # Voice profiles: compute per-cluster embeddings and auto-match
+            # against any stored profiles. The match seeds speaker names
+            # (used as defaults); --speakers-names/--name-speakers can override.
+            profile_names: dict[str, str] = {}
+            cluster_embeddings: dict[int, list[float]] = {}
+            if not args.no_voice_profiles:
+                try:
+                    cluster_embeddings = P.compute_speaker_embeddings(wav, diar_segments, config)
+                    if cluster_embeddings:
+                        profile_names, matches = P.auto_assign_names(
+                            cluster_embeddings, threshold=config.speaker_match_threshold,
+                        )
+                        profile_names = {k: v for k, v in profile_names.items() if v}
+                except Exception as e:  # noqa: BLE001
+                    ui.status(f"Warning: voice-profile matching skipped: {e}", kind="warn")
+            # Frames must be extracted before writing HTML so they can be
+            # inlined; for the diarized path we extract after the labeled
+            # outputs but before HTML if both are requested.
+            srt_out, txt_out, name_map = _write_labeled_outputs(
+                merged, of_base,
+                name_speakers=_name_speakers_enabled(args, diarize_enabled),
+                speakers_names=args.speakers_names,
+                html=want_html and not want_frames,
+                title=in_path.name,
+                profile_names=profile_names or None,
+                cluster_embeddings=cluster_embeddings or None,
+                save_profiles=config.save_voice_profiles and not args.no_voice_profiles,
+            )
+            ui.wrote("Wrote labeled SRT", srt_out)
+            ui.wrote("Wrote dialogue TXT", txt_out)
+            written.append(str(srt_out))
+            written.append(str(txt_out))
+            # Apply the resolved names to the caller's merged list so the
+            # screenshots manifest and the HTML pass carry real names too
+            # (_write_labeled_outputs relabels a local copy only).
+            if name_map:
+                merged = MR.relabel(merged, name_map)
+            # Video screenshots: one frame per segment, using the relabeled
+            # merged list so the manifest carries final speaker names.
+            frames_dir = None
+            if want_frames:
                 ui.phase("capturing frames")
-                unlabeled = [(seg, "Speaker") for seg in whisper_segs]
+                width = args.screenshot_width if args.screenshot_width is not None else 1280
+                result = _extract_and_manifest_screenshots(
+                    in_path, merged, of_base,
+                    ffmpeg=aud.find_ffmpeg(config.ffmpeg),
+                    width=width,
+                    dry_run=args.dry_run,
+                )
+                if result is not None:
+                    frames_dir = result[0]
+                    ui.wrote("Wrote frames manifest", result[1])
+                    written.append(str(result[1]))
+            # Write HTML after frames exist so they can be inlined.
+            if want_html and want_frames and frames_dir is not None:
+                ui.phase("writing HTML transcript")
+                _write_labeled_outputs(
+                    merged, of_base,
+                    name_speakers=False,
+                    speakers_names=None,
+                    html=True,
+                    frames_dir=frames_dir,
+                    title=in_path.name,
+                )
+                html_path = Path(str(of_base) + ".speakers.html")
+                ui.wrote("Wrote HTML transcript", html_path)
+                written.append(str(html_path))
+        elif whisper_segs and (want_frames or want_html):
+            # --- Unlabeled fallback ---
+            # Diarization was requested but produced no segments (sherpa-onnx
+            # or its models missing, or no speech clusters found) — or the run
+            # never had speaker labels at all. Honor --screenshots and an
+            # explicit --outputs html with a generic "Speaker" label instead
+            # of silently skipping them. The labeled .speakers.srt/.txt are
+            # NOT faked here: they require real diarization.
+            if diarize_enabled:
+                ui.status("Speakers unavailable; writing unlabeled output with generic 'Speaker' labels.",
+                          kind="warn")
+            unlabeled = [(seg, "Speaker") for seg in whisper_segs]
+            frames_dir = None
+            if want_frames:
+                ui.phase("capturing frames")
                 width = args.screenshot_width if args.screenshot_width is not None else 1280
                 result = _extract_and_manifest_screenshots(
                     in_path, unlabeled, of_base,
@@ -727,9 +725,19 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                     width=width,
                     dry_run=args.dry_run,
                 )
-        if result is not None:
-            ui.wrote("Wrote frames manifest", result[1])
-            written.append(str(result[1]))
+                if result is not None:
+                    frames_dir = result[0]
+                    ui.wrote("Wrote frames manifest", result[1])
+                    written.append(str(result[1]))
+            if want_html:
+                ui.phase("writing HTML transcript")
+                html_out = Path(str(of_base) + ".speakers.html")
+                html_out.write_text(
+                    MR.format_speakers_html(unlabeled, frames_dir=frames_dir, title=in_path.name),
+                    encoding="utf-8",
+                )
+                ui.wrote("Wrote HTML transcript", html_out)
+                written.append(str(html_out))
 
     # Clean up the intermediate WAV unless asked to keep it.
     if wav != in_path and not keep_wav and wav.exists():
@@ -1207,6 +1215,8 @@ def cmd_merge(args: argparse.Namespace) -> int:
     thr = args.cluster_threshold if args.cluster_threshold is not None else config.cluster_threshold
     ui.muted(f"Diarize: num_speakers={num_sp or 'auto'} cluster_threshold={thr}")
 
+    want_html = _outputs_include(args, config, "html")
+    want_frames = screenshots and aud.needs_extraction(in_path)
     try:
         ui.phase("diarizing")
         diar_segments = D.run_diarization(wav, config, num_speakers=num_sp, threshold=thr)
@@ -1214,10 +1224,18 @@ def cmd_merge(args: argparse.Namespace) -> int:
         msg = str(e)
         if "sherpa_onnx" in msg or "models not found" in msg or "download-diarization" in msg:
             if speakers_auto and args.speakers is None:
-                # Auto-enabled only: fall back to screenshots-only, don't crash.
+                # Auto-enabled only: fall back to unlabeled output, don't crash.
                 ui.status(f"Speakers: diarization unavailable — {msg.splitlines()[0]}",
                           kind="hint",
                           detail="Skipping speaker labels. Enable with: pipx inject whiz sherpa-onnx && whiz models download-diarization")
+                diar_segments = []
+            elif want_html or want_frames:
+                # Explicitly requested, but an HTML transcript / screenshots can
+                # still be produced: degrade to generic 'Speaker' labels instead
+                # of crashing (mirrors the `whiz transcribe` fallback).
+                ui.status(f"Speakers: diarization unavailable — {msg.splitlines()[0]}",
+                          kind="warn",
+                          detail="Falling back to generic 'Speaker' labels. Enable with: pipx inject whiz sherpa-onnx && whiz models download-diarization")
                 diar_segments = []
             else:
                 raise SystemExit(
@@ -1227,8 +1245,10 @@ def cmd_merge(args: argparse.Namespace) -> int:
         else:
             raise
     if not diar_segments:
-        if speakers_requested:
-            ui.status("Diarization produced no segments; writing screenshots only.", kind="warn")
+        if want_html or want_frames:
+            ui.status("Diarization produced no segments; writing unlabeled output with generic 'Speaker' labels.", kind="warn")
+        elif speakers_requested:
+            ui.status("Diarization produced no segments; nothing to merge.", kind="warn")
         else:
             raise SystemExit("Diarization produced no segments; cannot merge.")
 
@@ -1263,7 +1283,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
             merged, of_base,
             name_speakers=_name_speakers_enabled(args, diarize_enabled=True),
             speakers_names=args.speakers_names,
-            html=_outputs_include(args, config, "html") and not (screenshots and aud.needs_extraction(in_path)),
+            html=want_html and not want_frames,
             title=in_path.name,
             profile_names=profile_names or None,
             cluster_embeddings=cluster_embeddings or None,
@@ -1280,11 +1300,13 @@ def cmd_merge(args: argparse.Namespace) -> int:
 
     # Video screenshots: re-extract frames against the existing merged list.
     # Frame extraction is cheap (~seconds), so merge --screenshots re-runs it.
+    # When no merged list exists (diarization unavailable), frames fall back
+    # to a generic 'Speaker' label so the manifest + HTML still get written.
     frames_dir = None
-    if screenshots and aud.needs_extraction(in_path):
+    shot_list = merged if merged else [(seg, "Speaker") for seg in whisper_segs]
+    if want_frames:
         ui.phase("capturing frames")
         width = args.screenshot_width if args.screenshot_width is not None else 1280
-        shot_list = merged if merged else [(seg, "Speaker") for seg in whisper_segs]
         result = _extract_and_manifest_screenshots(
             in_path, shot_list, of_base,
             ffmpeg=aud.find_ffmpeg(config.ffmpeg),
@@ -1296,7 +1318,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
             ui.wrote("Wrote frames manifest", result[1])
             written.append(str(result[1]))
     # Write HTML after frames exist so they can be inlined.
-    if _outputs_include(args, config, "html") and frames_dir is not None and merged:
+    if want_html and frames_dir is not None and merged:
         ui.phase("writing HTML transcript")
         _write_labeled_outputs(
             merged, of_base,
@@ -1309,6 +1331,20 @@ def cmd_merge(args: argparse.Namespace) -> int:
         html_path = Path(str(of_base) + ".speakers.html")
         ui.wrote("Wrote HTML transcript", html_path)
         written.append(str(html_path))
+    # --- Unlabeled HTML fallback ---
+    # Diarization produced nothing but HTML was explicitly requested: emit
+    # the transcript with generic 'Speaker' labels instead of silently
+    # skipping it (mirrors the `whiz transcribe` fallback). The labeled
+    # .speakers.srt/.txt are not faked: they require real diarization.
+    if want_html and not merged and whisper_segs:
+        ui.phase("writing HTML transcript")
+        html_out = Path(str(of_base) + ".speakers.html")
+        html_out.write_text(
+            MR.format_speakers_html(shot_list, frames_dir=frames_dir, title=in_path.name),
+            encoding="utf-8",
+        )
+        ui.wrote("Wrote HTML transcript", html_out)
+        written.append(str(html_out))
     ui.summary(written)
     return 0
 
