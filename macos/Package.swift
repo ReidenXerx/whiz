@@ -18,6 +18,7 @@ import PackageDescription
 let packageDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
 let vendorInclude = "\(packageDirectory)/vendor/install/include"
 let vendorLib = "\(packageDirectory)/vendor/install/lib"
+let sherpaLib = "\(packageDirectory)/vendor/sherpa-onnx/lib"
 
 // `swift test` requires full Xcode. Nothing here works around that, deliberately.
 //
@@ -64,6 +65,17 @@ let package = Package(
             name: "CWhisper",
             path: "Sources/CWhisper"
         ),
+        // sherpa-onnx's C API — prebuilt dylibs vendored from the sherpa_onnx
+        // Python distribution by scripts/build-sherpa.sh, giving the app the
+        // same diarization binary the Python pipeline runs. Dynamic, unlike
+        // whisper.cpp: the dylibs use @rpath install names, so every binary
+        // that links WhizKit (the app and the test runner) also adds the
+        // vendor dir to its rpath — an absolute path, fine for local builds;
+        // build-app.sh owns embedding + rewriting for distribution.
+        .systemLibrary(
+            name: "CSherpa",
+            path: "Sources/CSherpa"
+        ),
         // Everything lives here. The executable below is a two-line shell.
         //
         // Xcode 16 refuses to render SwiftUI previews inside an executable
@@ -73,7 +85,7 @@ let package = Package(
         // library and calling `App.main()` from the executable.
         .target(
             name: "WhizKit",
-            dependencies: ["CWhisper"],
+            dependencies: ["CWhisper", "CSherpa"],
             path: "Sources/WhizKit",
             // Headers and libraries come from the vendored whisper.cpp build in
             // `vendor/install`, produced by `scripts/build-whisper.sh` from the
@@ -90,9 +102,10 @@ let package = Package(
             // evaluation time, hence the literal "vendor/install".
             //
             // NOTE: `swift build` still needs `scripts/build-whisper.sh` to have
-            // run first. `scripts/build-app.sh` does that automatically and is
-            // the supported path; this manifest exists for `swift test` and
-            // editor tooling.
+            // run first, and now `scripts/build-sherpa.sh` too (both vendored
+            // dylibs/headers that don't exist until then). `scripts/build-app.sh`
+            // runs both automatically and is the supported path; this manifest
+            // exists for `swift test` and editor tooling.
             cSettings: [
                 .unsafeFlags(["-I\(vendorInclude)"]),
             ],
@@ -115,6 +128,14 @@ let package = Package(
                 .linkedFramework("MetalKit"),
                 .linkedFramework("Accelerate"),
                 .linkedFramework("CoreML"),
+                // sherpa-onnx diarization. The rpath is what makes
+                // @rpath/libsherpa-onnx-c-api.dylib (and its
+                // @rpath/libonnxruntime.dylib dependency) resolve at runtime.
+                .unsafeFlags([
+                    "-L\(sherpaLib)",
+                    "-lsherpa-onnx-c-api",
+                    "-Xlinker", "-rpath", "-Xlinker", sherpaLib,
+                ]),
             ]
         ),
         .executableTarget(
@@ -125,7 +146,16 @@ let package = Package(
         .testTarget(
             name: "WhizKitTests",
             dependencies: ["WhizKit", "CWhisper"],
-            path: "Tests/WhizKitTests"
+            path: "Tests/WhizKitTests",
+            // The test binary statically links WhizKit, so it needs the same
+            // sherpa link + rpath treatment the app target gets.
+            linkerSettings: [
+                .unsafeFlags([
+                    "-L\(sherpaLib)",
+                    "-lsherpa-onnx-c-api",
+                    "-Xlinker", "-rpath", "-Xlinker", sherpaLib,
+                ]),
+            ]
         ),
     ]
 )
