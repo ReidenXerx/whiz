@@ -30,6 +30,7 @@ DEPLOYMENT_TARGET="13.0"
 # our own build is what makes the app distributable: no Homebrew requirement, no
 # absolute /opt/homebrew paths, and a deployment target we control.
 "$ROOT/scripts/build-whisper.sh" || exit 1
+"$ROOT/scripts/build-sherpa.sh" || exit 1
 
 if [ ! -f "$VENDOR/lib/libwhisper.a" ]; then
   echo "error: vendored whisper.cpp not built at $VENDOR" >&2
