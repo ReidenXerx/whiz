@@ -414,3 +414,19 @@ Optional: `GITNEXUS_MODE=guide` (nudge-only). Paths: `.bearing/hooks.json`. Play
 
 Run gated scripts from `package.json` when hooks remind you: `bearing.__gate.*` — they document the enforced playbook for this repo.
 <!-- bearing:END -->
+
+## Shell tool usage — required fields (crash prevention)
+
+Three child agents in this repo died unrecoverably because their `run_shell_command` call was rejected with:
+
+> Response stream finished unexpectedly with internal error: Key: 'RunShellCommandToolCall.wait_params.reason' Error: Field validation for 'reason' failed on the 'required' tag
+
+A missing required field is not a retryable tool error — it kills the **entire response stream** and the agent run cannot be resumed. Every shell call MUST carry its mode's required parameters:
+
+- `mode: "wait"` → `wait_params` is **required** and MUST contain BOTH:
+  - `reason`: one sentence — *why* you're running the command and *what specific information* you need from the output.
+  - `do_not_summarize_output`: boolean (only `true` for byte-exact output needs like JSON parsing).
+- `mode: "interact"` → pass `interact_task` with the monitoring instructions.
+- Always set `uses_pager: true` for VCS/pager-capable commands (`git log`, `git diff`, `less`, `man`, …).
+
+Generalize: before calling ANY tool with a structured schema, re-read the schema and fill every required field. Emit the complete call in one response — never send a placeholder and "fill it in next turn", because there may be no next turn if validation fails.
