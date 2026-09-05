@@ -104,7 +104,7 @@ pipx install .
 Then make sure a model is available — download one from the official whisper.cpp HuggingFace repo:
 
 ```bash
-whiz models download turbo      # ggml-large-v3-turbo-q5_0.bin — fast & accurate
+whiz models download turbo      # ggml-large-v3-turbo.bin — unquantized (NS-15)
 ```
 
 ## What it does
@@ -224,7 +224,7 @@ Manage whisper, VAD, and diarization models.
 
 ```bash
 whiz models list                       # show discovered ggml models
-whiz models download turbo             # ggml-large-v3-turbo-q5_0.bin — fast & accurate
+whiz models download turbo             # ggml-large-v3-turbo.bin — unquantized (NS-15)
 whiz models download large-v3 --dest ~/models
 whiz models known                      # canonical whisper.cpp model filenames
 whiz models download-vad               # Silero VAD model (default: v5.1.2)
@@ -321,14 +321,19 @@ dictate_show_indicator = true
 dictate_idle_visible = true
 ```
 
-If `model` is empty, whiz auto-picks the best available model by this preference:
+If `model` is empty, whiz auto-picks the best available model by this preference
+(NS-15: quantization corrupts transcription quality, so within each class the
+unquantized model ranks first and every quantized variant is a last resort —
+a quantized file resolves only when its own unquantized class is absent):
 
-1. `large-v3-turbo-q5_0`
-2. `large-v3-turbo`
-3. `large-v3-turbo-q8_0`
-4. `large-v3-q5_0`
-5. `large-v3`
-6. `medium-q5_0` → `medium` → `small-q5_0` → `small`
+1. `large-v3-turbo` → `large-v3-turbo-q8_0` → `large-v3-turbo-q5_0`
+2. `large-v3` → `large-v3-q5_0`
+3. `medium` → `medium-q5_0`
+4. `small` → `small-q5_0`
+5. `base` → `base-q5_0`
+
+`tiny` is excluded entirely (useless quality) — never listed, recommended, or
+auto-picked, though `whiz models download tiny` still works if you insist.
 
 ### Model search directories
 
@@ -378,7 +383,7 @@ whiz transcribe --speakers 4 --name-speakers meeting.mov
 whiz transcribe recording.mov --speakers-names Alice,Bob,Carol,Dave
 ```
 
-If diarization is auto-enabled but sherpa-onnx or its models aren't installed yet, whiz skips speaker labeling with a one-line hint (and still transcribes + captures screenshots) instead of crashing — run the one-time setup above to turn it on.
+If diarization is auto-enabled but sherpa-onnx or its models aren't installed yet, whiz skips speaker labeling with a one-line hint (and still transcribes + captures screenshots) instead of crashing — run the one-time setup above to turn it on. An explicitly requested `--speakers` degrades with a louder warning. An `--outputs html` **passed on that invocation** is never dropped: when speaker labels are unavailable the HTML transcript is still written, with every cue carrying a generic `Speaker` label and a warning explaining why. (`html` supplied only via config.toml describes the diarized happy path and is not treated as explicit — a degraded run keeps skipping it.) `--speakers-names` / `--name-speakers` are discarded in that case, and the warning says so — the names are never silently dropped. The degraded artifacts never overwrite speaker files an earlier diarized run left next to the media: each existing `.speakers.txt` / `.speakers.html` is kept with a warning instead of being collapsed to generic labels.
 
 This produces the normal whisper-cli outputs (SRT, JSON) plus two labeled files alongside the input:
 
@@ -396,6 +401,10 @@ For video inputs `--screenshots` is on by default; pass `--no-screenshots` to sk
 ### HTML transcript
 
 Add `html` to `--outputs` (or pass `--outputs html` to `whiz merge`) to write a self-contained `<stem>.speakers.html` alongside the input. Each segment is rendered as a color-coded cue with a timestamp link, the speaker label, and (when `--screenshots` was set) the on-screen frame inlined as a base64 `data:` URI — so the file is fully portable with no external image dependencies.
+
+Because the HTML is built from the parsed whisper JSON, `--outputs html` also forces JSON output (`-oj`): an extra `<stem>.json` file remains alongside the input even when you only asked for `html`.
+
+If diarization is unavailable (sherpa-onnx not installed or it produced no segments), an `--outputs html` passed on that invocation is still honored instead of being silently skipped — every cue gets a bare generic `Speaker` label (not the letterized `Speaker A` used for real diarization), and a muted note line at the top of the page records that no diarization ran, so a degraded page is never mistaken for a one-speaker transcript. The labeled `.speakers.srt` is not produced in that case; it requires real diarization. On audio runs a generic-label `.speakers.txt` is still written so `whiz analyze` can find a transcript. Existing speaker outputs from an earlier diarized run are never overwritten — each existing file is kept with a warning rather than collapsed to generic labels.
 
 The transcript page has a sticky header with the title, a color-coded speaker legend, and a live search box that filters cues by text or speaker. Each cue is a card with a left color border matching its speaker and a hover lift. Clicking any frame thumbnail opens a fullscreen lightbox overlay (close with the × button, the backdrop, or the Escape key). The layout is responsive down to mobile widths.
 

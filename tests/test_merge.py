@@ -211,3 +211,18 @@ def test_format_speakers_html_no_lightbox_without_frames(tmp_path):
     html = MR.format_speakers_html(merged, frames_dir=empty_dir)
     assert 'class="lightbox"' not in html
     assert "<script>" not in html
+
+
+def test_format_speakers_html_note_renders_muted_and_escaped():
+    """note= renders one muted provenance line (used by the unlabeled
+    fallback so a degraded page self-identifies), escaped like any text."""
+    merged = [(_seg(0.0, 1.0, "hi"), "Speaker")]
+    html = MR.format_speakers_html(merged, note="No diarization & <fallback>")
+    assert 'class="note"' in html
+    assert "No diarization &amp; &lt;fallback&gt;" in html
+
+
+def test_format_speakers_html_no_note_by_default():
+    merged = [(_seg(0.0, 1.0, "hi"), "Speaker A")]
+    html = MR.format_speakers_html(merged)
+    assert 'class="note"' not in html
