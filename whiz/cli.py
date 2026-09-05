@@ -75,6 +75,40 @@ def _outputs_include(args: argparse.Namespace, config: cfg.Config, fmt: str) -> 
     return fmt in [o.strip() for o in raw.split(",") if o.strip()]
 
 
+def _outputs_explicitly_include(args: argparse.Namespace, fmt: str) -> bool:
+    """True if ``fmt`` was passed via ``--outputs`` on THIS invocation.
+
+    Distinct from ``_outputs_include``, which also counts config-supplied
+    outputs. The unlabeled (degraded) fallbacks are gated on this: silently
+    dropping an ``--outputs html`` the user just typed is the bug, while a
+    config default describes the success path — when diarization produces
+    nothing, a config-html run keeps master's quieter skip instead of
+    surprising the user with degraded artifacts they never asked for by
+    flag.
+    """
+    raw = getattr(args, "outputs", None)
+    if not raw:
+        return False
+    return fmt in [o.strip() for o in raw.split(",") if o.strip()]
+
+
+def _will_write_generic_labels(args: argparse.Namespace) -> bool:
+    """True when the unlabeled fallback will actually write generic-label
+    artifacts for this invocation: an explicit ``--outputs html``, or a
+    video run whose screenshots are (auto-)enabled — the frames manifest
+    and degraded transcript carry generic 'Speaker' labels. Audio runs
+    without an explicit html write nothing speaker-related at all, so
+    their fallback message must say "skipping", not "falling back to
+    generic labels" (the message has to describe what happens next).
+    """
+    if _outputs_explicitly_include(args, "html"):
+        return True
+    file_arg = getattr(args, "file", None)
+    if not file_arg:
+        return False
+    return aud.needs_extraction(Path(file_arg)) and not getattr(args, "no_screenshots", False)
+
+
 def _run_whisper_streaming(cmd: list[str]) -> subprocess.Popen:
     """Run whisper-cli, streaming its stdout/stderr line-by-line to our stderr.
 
@@ -349,9 +383,14 @@ def _find_whisper_json(of_base: Path, wav: Path, of_passed: bool) -> Path | None
     """
     candidates: list[Path] = []
     if of_passed:
+        # -of was passed: whisper-cli appends ".json" to the base exactly
+        # once and writes nothing else, so <of_base>.json is the only real
+        # candidate. The with_suffix fallbacks that used to sit here would
+        # happily ingest a stale out.json from an older run whenever the
+        # real out.v2.json was absent — exactly the failure the docstring
+        # warns about — so they are gone. A missing candidate is returned
+        # as-is so the caller warns instead of silently merging stale data.
         candidates.append(Path(str(of_base) + ".json"))
-        candidates.append(of_base.with_suffix(".json"))
-        candidates.append(Path(str(of_base) + ".json.json"))
     else:
         # whisper-cli appends the format extension to the full input path.
         candidates.append(Path(str(wav) + ".json"))
@@ -513,12 +552,15 @@ def _write_labeled_outputs(
     profile_names: dict[str, str] | None = None,
     cluster_embeddings: dict[int, list[float]] | None = None,
     save_profiles: bool = False,
-) -> tuple[Path, Path, dict[str, str]]:
+) -> tuple[Path, Path, Path | None, dict[str, str]]:
     """Optionally relabel speakers, then write .speakers.srt and .speakers.txt.
 
-    Returns the (srt_path, txt_path, name_map) used. When ``html`` is True also
-    writes a self-contained ``.speakers.html`` (frames inlined as base64 if
-    ``frames_dir`` is given). Naming precedence:
+    Returns the (srt_path, txt_path, html_path, name_map) used — ``html_path``
+    is None unless ``html`` was requested. When ``html`` is True also writes
+    a self-contained ``.speakers.html`` (frames inlined as base64 if
+    ``frames_dir`` is given); the write is NOT announced here, so callers
+    report artifacts in srt → txt → frames → html order, matching the
+    summary panel. Naming precedence:
 
     1. Voice-profile auto-match (``profile_names``) seeds defaults.
     2. ``--speakers-names`` supplies a non-interactive list (assigned by total
@@ -558,19 +600,17 @@ def _write_labeled_outputs(
     txt_out = Path(str(of_base) + ".speakers.txt")
     srt_out.write_text(labeled_srt + "\n", encoding="utf-8")
     txt_out.write_text(dialogue + "\n", encoding="utf-8")
+    html_out: Path | None = None
     if html:
         html_out = Path(str(of_base) + ".speakers.html")
         html_out.write_text(
             MR.format_speakers_html(merged, frames_dir=frames_dir, title=title),
             encoding="utf-8",
         )
-        # Announce here so the audio path (html without frames, where the
-        # caller never re-reports it) doesn't write the HTML silently.
-        ui.wrote("Wrote HTML transcript", html_out)
     # Save voice profiles for speakers that received a real name.
     if save_profiles and cluster_embeddings and name_map:
         _save_named_profiles(name_map, cluster_embeddings)
-    return srt_out, txt_out, name_map
+    return srt_out, txt_out, html_out, name_map
 
 
 # Provenance line rendered inside degraded (unlabeled) HTML transcripts: a
@@ -597,20 +637,42 @@ def _write_html_transcript(
     generic-label ``.speakers.txt`` so ``whiz analyze``, which needs a frames
     manifest or a ``.speakers.txt``, still finds a transcript. Returns the
     paths written.
+
+    Never overwrites an existing speaker output: an earlier diarized run
+    (possibly with named speakers) may have left a real ``.speakers.txt``/
+    ``.speakers.html`` next to the media, and this degraded rewrite would
+    collapse every cue to one generic ``Speaker`` (``format_dialogue_txt``
+    coalesces same-label lines), destroying the named data while a stale
+    ``.speakers.srt`` survived beside it. Each existing file is kept with a
+    warning; only files this run actually wrote are announced/returned.
     """
+    def _kept(existing: Path) -> None:
+        ui.status(
+            f"{existing.name} already exists — kept (this run had no speaker "
+            "labels; a degraded rewrite would destroy its speaker names).",
+            kind="warn",
+            detail=str(existing),
+        )
+
     written: list[Path] = []
     html_out = Path(str(of_base) + ".speakers.html")
-    html_out.write_text(
-        MR.format_speakers_html(merged, frames_dir=frames_dir, title=title, note=note),
-        encoding="utf-8",
-    )
-    ui.wrote("Wrote HTML transcript", html_out)
-    written.append(html_out)
+    if html_out.exists():
+        _kept(html_out)
+    else:
+        html_out.write_text(
+            MR.format_speakers_html(merged, frames_dir=frames_dir, title=title, note=note),
+            encoding="utf-8",
+        )
+        ui.wrote("Wrote HTML transcript", html_out)
+        written.append(html_out)
     if transcript_txt:
         txt_out = Path(str(of_base) + ".speakers.txt")
-        txt_out.write_text(MR.format_dialogue_txt(merged) + "\n", encoding="utf-8")
-        ui.wrote("Wrote dialogue TXT", txt_out)
-        written.append(txt_out)
+        if txt_out.exists():
+            _kept(txt_out)
+        else:
+            txt_out.write_text(MR.format_dialogue_txt(merged) + "\n", encoding="utf-8")
+            ui.wrote("Wrote dialogue TXT", txt_out)
+            written.append(txt_out)
     return written
 
 
@@ -632,8 +694,13 @@ def _run_diarize_or_fallback(wav: Path, config: cfg.Config, args: argparse.Names
             # Explicitly requested --speakers degrades loudly (warn); merely
             # auto-enabled diarization stays a quiet hint (mirrors cmd_merge).
             kind = "warn" if args.speakers is not None else "hint"
-            detail = ("Skipping speaker labels for this run. Enable with: "
-                      "pipx inject whiz sherpa-onnx && whiz models download-diarization")
+            # The detail must describe what happens NEXT, not just what
+            # failed: generic-label artifacts when the fallback will write
+            # them (mirrors cmd_merge's wording), a plain skip otherwise.
+            lead = ("Falling back to generic 'Speaker' labels. Enable with: "
+                    if _will_write_generic_labels(args) else
+                    "Skipping speaker labels for this run. Enable with: ")
+            detail = lead + "pipx inject whiz sherpa-onnx && whiz models download-diarization"
             extra = _discarded_naming_detail(args)
             if extra:
                 detail += f" {extra}"
@@ -643,7 +710,13 @@ def _run_diarize_or_fallback(wav: Path, config: cfg.Config, args: argparse.Names
             return []
         raise
     if not diar_segments:
-        ui.status("Warning: diarization produced no segments; falling back to unlabeled output.",
+        # Same what-happens-next rule as the except branch above: the
+        # fallback writes generic-label artifacts on video/explicit-html
+        # runs; with nothing to write, it is a plain skip.
+        outcome = ("falling back to unlabeled output"
+                   if _will_write_generic_labels(args) else
+                   "skipping speaker labels for this run")
+        ui.status(f"Warning: diarization produced no segments; {outcome}.",
                   kind="warn",
                   detail=_discarded_naming_detail(args))
     return diar_segments
@@ -705,6 +778,11 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     # --- Merge diarization with whisper output ---
     written: list[str] = []
     want_html = _outputs_include(args, config, "html")
+    # The degraded (unlabeled) fallback honors only an EXPLICIT --outputs
+    # html; config-supplied html keeps master's skip when diarization
+    # yields nothing (a typed flag is a promise; a config default describes
+    # the success path).
+    explicit_html = _outputs_explicitly_include(args, "html")
     want_frames = screenshots and aud.needs_extraction(in_path)
     whisper_segs: list[MR.WhisperSeg] = []
     if (diarize_enabled or want_frames or want_html) and rc == 0:
@@ -740,7 +818,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             # Frames must be extracted before writing HTML so they can be
             # inlined; for the diarized path we extract after the labeled
             # outputs but before HTML if both are requested.
-            srt_out, txt_out, name_map = _write_labeled_outputs(
+            srt_out, txt_out, html_out, name_map = _write_labeled_outputs(
                 merged, of_base,
                 name_speakers=_name_speakers_enabled(args, diarize_enabled),
                 speakers_names=args.speakers_names,
@@ -754,11 +832,12 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             ui.wrote("Wrote dialogue TXT", txt_out)
             written.append(str(srt_out))
             written.append(str(txt_out))
-            if want_html and not want_frames:
-                # Audio diarized run: the HTML was already written (and
-                # announced) inside _write_labeled_outputs; no frames pass
-                # follows, so record the artifact for the summary here.
-                written.append(str(Path(str(of_base) + ".speakers.html")))
+            if want_html and not want_frames and html_out is not None:
+                # Audio diarized run: no frames pass follows, so announce
+                # the HTML the helper wrote here — after srt/txt, matching
+                # the order the summary panel lists the files in.
+                ui.wrote("Wrote HTML transcript", html_out)
+                written.append(str(html_out))
             # Apply the resolved names to the caller's merged list so the
             # screenshots manifest and the HTML pass carry real names too
             # (_write_labeled_outputs relabels a local copy only).
@@ -781,10 +860,9 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                     ui.wrote("Wrote frames manifest", result[1])
                     written.append(str(result[1]))
             # Write HTML after frames exist so they can be inlined.
-            # (The write is announced inside _write_labeled_outputs.)
             if want_html and want_frames and frames_dir is not None:
                 ui.phase("writing HTML transcript")
-                _write_labeled_outputs(
+                _srt, _txt, html_out, _map = _write_labeled_outputs(
                     merged, of_base,
                     name_speakers=False,
                     speakers_names=None,
@@ -792,21 +870,22 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                     frames_dir=frames_dir,
                     title=in_path.name,
                 )
-                written.append(str(Path(str(of_base) + ".speakers.html")))
-        elif whisper_segs and (want_frames or want_html):
+                if html_out is not None:
+                    ui.wrote("Wrote HTML transcript", html_out)
+                    written.append(str(html_out))
+        elif whisper_segs and (want_frames or explicit_html):
             # --- Unlabeled fallback ---
             # Diarization was requested but produced no segments (sherpa-onnx
             # or its models missing, or no speech clusters found) — or the run
             # never had speaker labels at all. Honor --screenshots and an
-            # explicit --outputs html with a generic "Speaker" label instead
-            # of silently skipping them. The labeled .speakers.srt is NOT
-            # faked here: it requires real diarization. On audio runs (no
-            # frames manifest for `whiz analyze` to fall back on) a
-            # generic-label .speakers.txt is written so analyze still works.
-            if diarize_enabled:
-                ui.status("Speakers unavailable; writing unlabeled output with generic 'Speaker' labels.",
-                          kind="warn",
-                          detail=_discarded_naming_detail(args))
+            # EXPLICIT --outputs html with a generic "Speaker" label instead
+            # of silently skipping them; config-supplied html keeps master's
+            # quieter skip (a typed flag is a promise, a config default
+            # describes the success path). The labeled .speakers.srt is NOT
+            # faked here: it requires real diarization. The degraded writer
+            # never overwrites existing speaker outputs, and on audio runs
+            # (no frames manifest for `whiz analyze` to fall back on) it
+            # writes a generic-label .speakers.txt so analyze still works.
             unlabeled = [(seg, "Speaker") for seg in whisper_segs]
             frames_dir = None
             if want_frames:
@@ -822,7 +901,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                     frames_dir = result[0]
                     ui.wrote("Wrote frames manifest", result[1])
                     written.append(str(result[1]))
-            if want_html:
+            if explicit_html:
                 ui.phase("writing HTML transcript")
                 written.extend(str(p) for p in _write_html_transcript(
                     unlabeled, of_base, frames_dir, in_path.name,
@@ -1307,7 +1386,17 @@ def cmd_merge(args: argparse.Namespace) -> int:
     ui.muted(f"Diarize: num_speakers={num_sp or 'auto'} cluster_threshold={thr}")
 
     want_html = _outputs_include(args, config, "html")
+    # Degraded outputs honor only an EXPLICIT --outputs html (a typed flag
+    # is a promise; config-supplied html describes the success path and
+    # keeps master's skip when diarization yields nothing).
+    explicit_html = _outputs_explicitly_include(args, "html")
     want_frames = screenshots and aud.needs_extraction(in_path)
+    # Set when the diarization-unavailable status below has already said
+    # what happens next (skip / fall back to generic labels): the follow-up
+    # "produced no segments" block would only repeat it (review: the
+    # sherpa-missing path double-warned). It stays silent for the
+    # genuinely-new case — diarization RAN and returned nothing.
+    degraded_note_shown = False
     try:
         ui.phase("diarizing")
         diar_segments = D.run_diarization(wav, config, num_speakers=num_sp, threshold=thr)
@@ -1327,10 +1416,11 @@ def cmd_merge(args: argparse.Namespace) -> int:
                           kind="hint",
                           detail=detail)
                 diar_segments = []
-            elif want_html or want_frames:
-                # Explicitly requested, but an HTML transcript / screenshots can
-                # still be produced: degrade to generic 'Speaker' labels instead
-                # of crashing (mirrors the `whiz transcribe` fallback).
+                degraded_note_shown = True
+            elif explicit_html or want_frames:
+                # Explicitly requested, but an HTML transcript / screenshots
+                # can still be produced: degrade to generic 'Speaker' labels
+                # instead of crashing (mirrors the `whiz transcribe` fallback).
                 detail = ("Falling back to generic 'Speaker' labels. Enable with: "
                           "pipx inject whiz sherpa-onnx && whiz models download-diarization")
                 if naming:
@@ -1339,6 +1429,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
                           kind="warn",
                           detail=detail)
                 diar_segments = []
+                degraded_note_shown = True
             else:
                 raise SystemExit(
                     f"{msg}\nEnable diarization with: pipx inject whiz sherpa-onnx && "
@@ -1347,7 +1438,9 @@ def cmd_merge(args: argparse.Namespace) -> int:
         else:
             raise
     if not diar_segments:
-        if want_html or want_frames:
+        if degraded_note_shown:
+            pass  # already said what happens next — a second status is noise
+        elif want_html or want_frames:
             ui.status("Diarization produced no segments; writing unlabeled output with generic 'Speaker' labels.",
                       kind="warn",
                       detail=_discarded_naming_detail(args))
@@ -1383,7 +1476,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
     written: list[str] = []
     if merged:
         ui.phase("merging speakers")
-        srt_out, txt_out, name_map = _write_labeled_outputs(
+        srt_out, txt_out, html_out, name_map = _write_labeled_outputs(
             merged, of_base,
             name_speakers=_name_speakers_enabled(args, diarize_enabled=True),
             speakers_names=args.speakers_names,
@@ -1397,10 +1490,11 @@ def cmd_merge(args: argparse.Namespace) -> int:
         ui.wrote("Wrote dialogue TXT", txt_out)
         written.append(str(srt_out))
         written.append(str(txt_out))
-        if want_html and not want_frames:
-            # Audio merge: the HTML was already written (and announced)
-            # inside _write_labeled_outputs; record it for the summary.
-            written.append(str(Path(str(of_base) + ".speakers.html")))
+        if want_html and not want_frames and html_out is not None:
+            # Audio merge: no frames pass follows, so announce the HTML the
+            # helper wrote here — after srt/txt, matching the summary order.
+            ui.wrote("Wrote HTML transcript", html_out)
+            written.append(str(html_out))
         # Apply the resolved names to the caller's merged list so the
         # screenshots manifest and the HTML pass carry real names too.
         if name_map:
@@ -1426,10 +1520,9 @@ def cmd_merge(args: argparse.Namespace) -> int:
             ui.wrote("Wrote frames manifest", result[1])
             written.append(str(result[1]))
     # Write HTML after frames exist so they can be inlined.
-    # (The write is announced inside _write_labeled_outputs.)
     if want_html and frames_dir is not None and merged:
         ui.phase("writing HTML transcript")
-        _write_labeled_outputs(
+        _srt, _txt, html_out, _map = _write_labeled_outputs(
             merged, of_base,
             name_speakers=False,
             speakers_names=None,
@@ -1437,15 +1530,19 @@ def cmd_merge(args: argparse.Namespace) -> int:
             frames_dir=frames_dir,
             title=in_path.name,
         )
-        written.append(str(Path(str(of_base) + ".speakers.html")))
+        if html_out is not None:
+            ui.wrote("Wrote HTML transcript", html_out)
+            written.append(str(html_out))
     # --- Unlabeled HTML fallback ---
-    # Diarization produced nothing but HTML was explicitly requested: emit
+    # Diarization produced nothing but HTML was EXPLICITLY requested: emit
     # the transcript with generic 'Speaker' labels instead of silently
-    # skipping it (mirrors the `whiz transcribe` fallback). The labeled
-    # .speakers.srt is not faked: it requires real diarization; on audio
-    # runs a generic-label .speakers.txt is still written so `whiz analyze`
-    # finds a transcript (it needs a frames manifest or a .speakers.txt).
-    if want_html and not merged and whisper_segs:
+    # skipping it (mirrors the `whiz transcribe` fallback); config-supplied
+    # html keeps master's skip. The labeled .speakers.srt is not faked: it
+    # requires real diarization; on audio runs a generic-label
+    # .speakers.txt is still written so `whiz analyze` finds a transcript
+    # (it needs a frames manifest or a .speakers.txt). Existing speaker
+    # outputs from an earlier diarized run are never overwritten.
+    if explicit_html and not merged and whisper_segs:
         ui.phase("writing HTML transcript")
         written.extend(str(p) for p in _write_html_transcript(
             shot_list, of_base, frames_dir, in_path.name,

@@ -231,9 +231,12 @@ def _setup_transcribe(monkeypatch, tmp_path, *, diarize_enabled, screenshots=Fal
 
 def test_transcribe_html_fallback_when_diarization_unavailable(tmp_path, monkeypatch, capsys):
     """--speakers with --outputs html must not silently skip the HTML when
-    diarization is unavailable: it degrades to generic 'Speaker' labels."""
+    diarization is unavailable: it degrades to generic 'Speaker' labels.
+    Uses the real _run_diarize_or_fallback (with run_diarization stubbed to
+    raise the sherpa-missing error) so the 'diarization unavailable' warn is
+    exercised end-to-end."""
     audio = _setup_transcribe(monkeypatch, tmp_path, diarize_enabled=True)
-    monkeypatch.setattr(cli, "_run_diarize_or_fallback", lambda wav, config, args: [])
+    monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
 
     rc = cli.cmd_transcribe(_transcribe_args(audio, outputs="srt,html", speakers=1))
 
@@ -253,8 +256,11 @@ def test_transcribe_html_fallback_when_diarization_unavailable(tmp_path, monkeyp
     # The degraded page self-identifies with a muted note line.
     assert 'class="note"' in content
     assert "No speaker diarization" in content
-    # Loud degradation, not silence.
-    assert "Speakers unavailable" in capsys.readouterr().err
+    # Loud degradation via the real fallback helper, honest about what
+    # happens next (audio run, explicit html → generic labels written).
+    err = capsys.readouterr().err
+    assert "diarization unavailable" in err
+    assert "Falling back to generic 'Speaker' labels" in err
 
 
 def test_transcribe_html_without_speakers(tmp_path, monkeypatch, capsys):
@@ -268,7 +274,8 @@ def test_transcribe_html_without_speakers(tmp_path, monkeypatch, capsys):
     assert (tmp_path / "meeting.speakers.html").exists()
     assert (tmp_path / "meeting.speakers.txt").exists()
     assert not (tmp_path / "meeting.speakers.srt").exists()
-    assert "Speakers unavailable" not in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "diarization unavailable" not in err  # diarization was never on
 
 
 def test_transcribe_html_and_frames_fallback_for_video(tmp_path, monkeypatch, capsys):
@@ -290,7 +297,7 @@ def test_transcribe_html_and_frames_fallback_for_video(tmp_path, monkeypatch, ca
 
     monkeypatch.setattr(cli, "_build_transcribe_args", fake_build)
     monkeypatch.setattr(cli, "_run_whisper_streaming", lambda cmd: SimpleNamespace(returncode=0))
-    monkeypatch.setattr(cli, "_run_diarize_or_fallback", lambda wav, config, args: [])
+    monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
     monkeypatch.setattr(
         cli, "_extract_and_manifest_screenshots",
         lambda in_path, merged, of_base, ffmpeg, width, dry_run: (frames_dir, manifest),
@@ -304,7 +311,11 @@ def test_transcribe_html_and_frames_fallback_for_video(tmp_path, monkeypatch, ca
     assert "hello world" in html
     assert "<img" in html  # frame inlined even without speaker labels
     assert 'class="note"' in html  # degraded page self-identifies
-    assert "Speakers unavailable" in capsys.readouterr().err
+    # Explicit --speakers + artifacts to write → loud warn via the real
+    # fallback helper, honest that generic labels are being written.
+    err = capsys.readouterr().err
+    assert "diarization unavailable" in err
+    assert "Falling back to generic 'Speaker' labels" in err
     # Labeled outputs are not faked; video runs have a frames manifest, so
     # no generic-label .speakers.txt is needed for `whiz analyze`.
     assert not (tmp_path / "recording.speakers.srt").exists()
@@ -360,6 +371,17 @@ def test_find_whisper_json_dotted_output_stem(tmp_path):
     (tmp_path / "out.json").write_text("{}", encoding="utf-8")
     found = cli._find_whisper_json(of_base, wav, of_passed=True)
     assert found == wanted
+
+
+def test_find_whisper_json_of_passed_stale_only_never_wins(tmp_path):
+    """with -of out.v2, whisper-cli writes out.v2.json and nothing else —
+    when only the stale out.json exists, it must NOT be ingested: the
+    caller warns on the missing out.v2.json instead of merging old data."""
+    of_base = tmp_path / "out.v2"
+    wav = tmp_path / "in.wav"
+    (tmp_path / "out.json").write_text("{}", encoding="utf-8")  # stale
+    found = cli._find_whisper_json(of_base, wav, of_passed=True)
+    assert found == tmp_path / "out.v2.json"  # reported missing, not stale
 
 
 # ---------- merge fallback ----------
@@ -475,7 +497,7 @@ def test_transcribe_fallback_warns_discarded_speakers_names(tmp_path, monkeypatc
     """The fallback must say --speakers-names was discarded, not let the
     user believe the names were applied."""
     audio = _setup_transcribe(monkeypatch, tmp_path, diarize_enabled=True)
-    monkeypatch.setattr(cli, "_run_diarize_or_fallback", lambda wav, config, args: [])
+    monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
 
     args = _transcribe_args(audio, outputs="html", speakers=1)
     args.speakers_names = ["Alice,Bob"]
@@ -574,3 +596,136 @@ def test_diarize_fallback_stays_hint_when_auto_enabled(tmp_path, monkeypatch):
     kinds = [k for _m, k, _d in calls]
     assert "hint" in kinds
     assert "warn" not in kinds
+
+
+# ---------- blocker fixes: no-clobber + explicit-html gating ----------
+
+
+def test_transcribe_fallback_never_clobbers_existing_named_outputs(tmp_path, monkeypatch, capsys):
+    """Blocker 2 regression: a diarized run (with real names) left a named
+    .speakers.txt/.html; a later degraded run must keep them, not collapse
+    them to a one-line generic 'Speaker' wall."""
+    audio = _setup_transcribe(monkeypatch, tmp_path, diarize_enabled=True)
+    monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
+    # Earlier diarized run's outputs, with real speaker names.
+    named_txt = tmp_path / "meeting.speakers.txt"
+    named_html = tmp_path / "meeting.speakers.html"
+    named_srt = tmp_path / "meeting.speakers.srt"
+    named_txt.write_text("Vadim (00:00:00): real named content\n", encoding="utf-8")
+    named_html.write_text("<html>named run</html>", encoding="utf-8")
+    named_srt.write_text("1\n00:00:00,000 --> ...\nVadim: real named content\n", encoding="utf-8")
+
+    rc = cli.cmd_transcribe(_transcribe_args(audio, outputs="srt,html", speakers=1))
+
+    assert rc == 0
+    assert named_txt.read_text(encoding="utf-8") == "Vadim (00:00:00): real named content\n"
+    assert named_html.read_text(encoding="utf-8") == "<html>named run</html>"
+    assert "real named content" in named_srt.read_text(encoding="utf-8")
+    err = capsys.readouterr().err
+    assert "kept" in err and "meeting.speakers.txt" in err
+    assert "kept" in err and "meeting.speakers.html" in err
+
+
+def test_merge_fallback_never_clobbers_existing_named_outputs(tmp_path, monkeypatch, capsys):
+    """Same no-clobber contract on the merge path. The run writes nothing
+    (both artifacts were kept), so merge exits 1 per the approved
+    nothing-written-is-not-success semantics — with warnings explaining
+    the keeps."""
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
+    named_txt = tmp_path / "meeting.m4a.speakers.txt"
+    named_html = tmp_path / "meeting.m4a.speakers.html"
+    named_txt.write_text("Vadim (00:00:00): real named content\n", encoding="utf-8")
+    named_html.write_text("\u003chtml\u003enamed run\u003c/html\u003e", encoding="utf-8")
+
+    rc = cli.cmd_merge(_merge_args(audio, outputs="html", speakers=1))
+
+    assert rc == 1  # this run wrote nothing: the named outputs were kept
+    assert named_txt.read_text(encoding="utf-8") == "Vadim (00:00:00): real named content\n"
+    assert named_html.read_text(encoding="utf-8") == "\u003chtml\u003enamed run\u003c/html\u003e"
+    err = capsys.readouterr().err
+    assert "kept" in err and "meeting.m4a.speakers.txt" in err
+    assert "kept" in err and "meeting.m4a.speakers.html" in err
+
+
+def test_transcribe_config_html_is_not_degraded(tmp_path, monkeypatch, capsys):
+    """Blocker 3: html in config.outputs alone must NOT trigger the
+    degraded fallback on a failed-diarization run (a typed --outputs html
+    is a promise; a config default describes the success path)."""
+    audio = _setup_transcribe(monkeypatch, tmp_path, diarize_enabled=True)
+    monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
+
+    def fake_load():
+        config = cli.cfg.Config()
+        config.outputs = ["srt", "html"]
+        return config
+
+    monkeypatch.setattr(cli.cfg, "load", fake_load)
+
+    rc = cli.cmd_transcribe(_transcribe_args(audio, outputs="", speakers=1))
+
+    assert rc == 0
+    assert not (tmp_path / "meeting.speakers.html").exists()
+    assert not (tmp_path / "meeting.speakers.txt").exists()
+    # The diarization-unavailable status still fires (it is honest about the
+    # run) — it just does not promise degraded artifacts it will not write.
+    err = capsys.readouterr().err
+    assert "diarization unavailable" in err
+    assert "Falling back to generic" not in err
+
+
+def test_merge_config_html_is_not_degraded(tmp_path, monkeypatch, capsys):
+    """Blocker 3 on the merge path: config-only html + explicit --speakers
+    with sherpa missing stays loud (SystemExit), exactly like master."""
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+
+    def fake_load():
+        config = cli.cfg.Config()
+        config.outputs = ["srt", "html"]
+        return config
+
+    monkeypatch.setattr(cli.cfg, "load", fake_load)
+    monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
+
+    with pytest.raises(SystemExit, match="sherpa_onnx"):
+        cli.cmd_merge(_merge_args(audio, outputs="", speakers=1))
+
+
+def test_transcribe_fallback_honest_skip_when_nothing_to_write(tmp_path, monkeypatch, capsys):
+    """Message fidelity: audio run, NO explicit html (and no video frames):
+    diarization fails → the message must say "skipping", not promise a
+    generic-label fallback that will not happen."""
+    audio = _setup_transcribe(monkeypatch, tmp_path, diarize_enabled=True)
+    monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
+
+    rc = cli.cmd_transcribe(_transcribe_args(audio, outputs="srt", speakers=1))
+
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "Skipping speaker labels" in err
+    assert "Falling back to generic" not in err
+    assert not (tmp_path / "meeting.speakers.html").exists()
+
+
+def test_merge_sherpa_missing_does_not_double_warn(tmp_path, monkeypatch, capsys):
+    """Review fix: the except branch already said 'falling back to generic
+    labels'; the follow-up 'produced no segments' block must not repeat it.
+    It stays for the genuinely-new case (ran and returned nothing) — covered
+    by test_merge_zero_segments_falls_back_to_unlabeled_html."""
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
+
+    rc = cli.cmd_merge(_merge_args(audio, outputs="html", speakers=1))
+
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert err.count("diarization unavailable") == 1
+    assert err.count("Diarization produced no segments") == 0

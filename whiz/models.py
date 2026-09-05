@@ -25,44 +25,45 @@ VAD_DEFAULT = VAD_MODELS[0]
 # Glob pattern for discovering any Silero VAD model on disk.
 VAD_GLOB = "ggml-silero-v*.bin"
 
-# Canonical whisper.cpp models. Order matters for "best" auto-pick —
-# NS-15: unquantized first, quantized variants behind their unquantized
-# class (quantization corrupts transcription quality; explicit, informed
-# use only).
+# Canonical whisper.cpp models, grouped per class with the unquantized
+# variant first (NS-15: quantization corrupts transcription quality —
+# quantized files exist for explicit, informed use only). `tiny` is
+# deliberately excluded from the canonical set: useless quality. It still
+# downloads and runs when named explicitly, but is never listed or
+# auto-picked.
 KNOWN_MODELS: list[str] = [
     "ggml-large-v3-turbo.bin",
+    "ggml-large-v3-turbo-q8_0.bin",
     "ggml-large-v3-turbo-q5_0.bin",
     "ggml-large-v3.bin",
     "ggml-large-v3-q5_0.bin",
-    "ggml-large-v3-turbo-q8_0.bin",
     "ggml-medium.bin",
     "ggml-medium-q5_0.bin",
     "ggml-small.bin",
     "ggml-small-q5_0.bin",
     "ggml-base.bin",
     "ggml-base-q5_0.bin",
-    "ggml-tiny.bin",
-    "ggml-tiny-q5_0.bin",
 ]
 
-# Auto-pick preference: NS-15 — unquantized variants before every quantized
-# sibling of the same class, then the remaining classes. A user who explicitly
-# downloads a quantized model can still name it; pick_best never chooses one
-# while its unquantized class exists on disk.
+# Auto-pick preference (NS-15), grouped per class: within a class the
+# unquantized model ranks first, then its quantized variants best-quality
+# first (q8_0 before q5_0); classes rank large-v3-turbo > large-v3 >
+# medium > small > base. A quantized model resolves only when its OWN
+# unquantized class is absent from disk — not merely when any unquantized
+# model exists (the old global batch let `tiny` outrank
+# `large-v3-turbo-q8_0`, which is never acceptable).
 PREFERENCE: list[str] = [
     "ggml-large-v3-turbo.bin",
-    "ggml-large-v3.bin",
-    "ggml-medium.bin",
-    "ggml-small.bin",
-    "ggml-base.bin",
-    "ggml-tiny.bin",
     "ggml-large-v3-turbo-q8_0.bin",
     "ggml-large-v3-turbo-q5_0.bin",
+    "ggml-large-v3.bin",
     "ggml-large-v3-q5_0.bin",
+    "ggml-medium.bin",
     "ggml-medium-q5_0.bin",
+    "ggml-small.bin",
     "ggml-small-q5_0.bin",
+    "ggml-base.bin",
     "ggml-base-q5_0.bin",
-    "ggml-tiny-q5_0.bin",
 ]
 
 
@@ -175,15 +176,52 @@ def pick_best(config: cfg.Config) -> Path | None:
     return all_models[0].path if all_models else None
 
 
-def download(model: str, config: cfg.Config, dest_dir: Path | None = None) -> Path:
-    """Download a model from the HuggingFace whisper.cpp repo.
+def _resolve_download_filename(model: str) -> str:
+    """Expand a short alias to a canonical filename (NS-15).
 
-    `model` may be a bare name like 'large-v3' (resolved to ggml-large-v3.bin)
-    or a full filename like 'ggml-large-v3-turbo-q5_0.bin'.
+    ``whiz models download turbo`` must fetch ``ggml-large-v3-turbo.bin``;
+    the literal ``ggml-turbo.bin`` does not exist upstream and the download
+    404s. Expansion walks PREFERENCE — exact alias, then short alias, then
+    prefix — so ``turbo`` resolves to the unquantized class, never a
+    quantized variant. Names that match nothing canonical (``tiny``, custom
+    or quantized files) pass through unchanged: explicit, informed use stays
+    possible.
     """
     filename = model if model.startswith("ggml-") else f"ggml-{model}.bin"
     if not filename.endswith(".bin"):
         filename += ".bin"
+    if filename in KNOWN_MODELS:
+        return filename
+    m = re.search(r"-q\d+_\d+\.bin$", filename)
+    if m:
+        # Explicit quantized request: expand only the CLASS part ("turbo-q8_0"
+        # -> ggml-large-v3-turbo-q8_0.bin) and never silently swap the requested
+        # quantization for an unquantized file — explicit, informed use means
+        # the user's -q variant is honored as typed.
+        return (_resolve_download_filename(filename[: m.start()] + ".bin")
+                [:-len(".bin")] + m.group(0))
+    aliases = [_alias_from_name(w) for w in PREFERENCE]
+    alias = _alias_from_name(filename)
+    if alias in aliases:
+        return PREFERENCE[aliases.index(alias)]
+    shorts = [_short_alias(a) for a in aliases]
+    if _short_alias(alias) in shorts:
+        return PREFERENCE[shorts.index(_short_alias(alias))]
+    prefixed = [w for w in PREFERENCE if _alias_from_name(w).startswith(alias)]
+    if prefixed:
+        return prefixed[0]
+    return filename
+
+
+def download(model: str, config: cfg.Config, dest_dir: Path | None = None) -> Path:
+    """Download a model from the HuggingFace whisper.cpp repo.
+
+    `model` may be a bare name like 'large-v3' (resolved to ggml-large-v3.bin),
+    a short alias like 'turbo' (expanded via PREFERENCE to the unquantized
+    ggml-large-v3-turbo.bin), or a full filename like
+    'ggml-large-v3-turbo-q5_0.bin'.
+    """
+    filename = _resolve_download_filename(model)
 
     target_dir = dest_dir or (Path.home() / ".cache" / "whisper")
     target_dir.mkdir(parents=True, exist_ok=True)
