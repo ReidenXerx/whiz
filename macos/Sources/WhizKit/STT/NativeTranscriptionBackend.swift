@@ -60,6 +60,19 @@ struct BatchSettings {
     /// 1280 downscale; raised automatically with a notice.
     var ocrMinWidth: Int = 1920
 
+    // `config.py` AI keys.
+    /// `config.py:ai_base_url` — chat completions base (without
+    /// /chat/completions).
+    var aiBaseURL: String = "http://localhost:11434/v1"
+    /// `config.py:ai_model` — empty ⇒ analysis is skipped (the app's
+    /// equivalent of not passing `--analyze`).
+    var aiModel: String = ""
+    /// `config.py:ai_api_key` — set for cloud OpenAI-compatible providers;
+    /// Ollama ignores it.
+    var aiAPIKey: String = ""
+    /// `config.py:ai_max_frames` — max frames sent to a vision model.
+    var aiMaxFrames: Int = 50
+
     static func load() -> BatchSettings {
         guard let text = try? String(contentsOf: WhizConfig.path, encoding: .utf8) else {
             return BatchSettings()
@@ -90,6 +103,10 @@ struct BatchSettings {
         if case .int(let v)? = values["ocr_max_chars"] { s.ocrMaxChars = v }
         if case .bool(let v)? = values["ocr_dedupe"] { s.ocrDedupe = v }
         if case .int(let v)? = values["ocr_min_width"] { s.ocrMinWidth = v }
+        if case .string(let v)? = values["ai_base_url"] { s.aiBaseURL = v }
+        if case .string(let v)? = values["ai_model"] { s.aiModel = v }
+        if case .string(let v)? = values["ai_api_key"] { s.aiAPIKey = v }
+        if case .int(let v)? = values["ai_max_frames"] { s.aiMaxFrames = v }
         // config.py:ocr_engine has no native counterpart — Vision is the only
         // engine on this platform, which is why the manifest records "apple".
         return s
@@ -120,7 +137,7 @@ struct NativeTranscriptionBackend: TranscriptionBackend {
         outputDirectory: URL,
         onEvent: @escaping @Sendable (TranscriptionEvent) -> Void
     ) async throws -> URL {
-        func log(_ text: String) {
+        @Sendable func log(_ text: String) {
             onEvent(.log(text))
         }
 
@@ -381,6 +398,63 @@ struct NativeTranscriptionBackend: TranscriptionBackend {
                 try LabeledTranscript.formatLabeledSRT(labeled)
                     .write(to: labeledSRTURL, atomically: true, encoding: .utf8)
                 log("output: \(labeledSRTURL.path)")
+            }
+        }
+
+        // 7. AI analysis — the app's equivalent of chaining `whiz analyze`
+        // after a transcription (cmd_transcribe's --analyze flag): opted in
+        // by configuring `ai_model`. The inputs mirror cmd_analyze's
+        // preference order (frames manifest rows when present, else the
+        // labeled transcript) and the output is the same `<stem>.analysis.md`
+        // artifact — prompt recorded with the transcript elided, then the
+        // response. Analysis failures are logged and skipped, never fatal:
+        // the transcription artifacts are the run's primary output.
+        if !settings.aiModel.isEmpty, !segments.isEmpty {
+            let client = AnalysisEngine.HTTPChatClient(
+                baseURL: settings.aiBaseURL,
+                model: settings.aiModel,
+                apiKey: settings.aiAPIKey)
+            let (reachable, probeError) = await AnalysisEngine.probeModel(client: client)
+            if !reachable {
+                log("ai: model '\(settings.aiModel)' unavailable — analysis skipped")
+                log("ai: \(probeError)")
+            } else {
+                onEvent(.phase("Analyzing (AI)"))
+                let transcript = frameEntries.map { AnalysisEngine.transcriptText(entries: $0) }
+                    ?? AnalysisEngine.transcriptText(labeled: labeled)
+                let (prompt, mode) = await AnalysisEngine.resolvePromptAuto(
+                    transcript: transcript, client: client)
+                log("ai: auto-detected \(mode)")
+                let hasFrames = (frameEntries ?? []).contains { !$0.frame.isEmpty }
+                let (useVision, visionMessage) = AnalysisEngine.resolveVision(
+                    hasFrames: hasFrames, model: settings.aiModel)
+                if !visionMessage.isEmpty {
+                    log("ai: \(visionMessage)")
+                }
+                do {
+                    let response = try await AnalysisEngine.analyze(
+                        prompt: prompt,
+                        transcript: transcript,
+                        entries: frameEntries,
+                        framesDir: useVision ? framesDir : nil,
+                        useVision: useVision,
+                        maxFrames: settings.aiMaxFrames,
+                        client: client,
+                        onProgress: { message in log("ai: \(message)") })
+                    let mdURL = outputDirectory.appendingPathComponent("\(stem).analysis.md")
+                    try AnalysisEngine.reportMarkdown(
+                        inputName: input.lastPathComponent,
+                        model: settings.aiModel,
+                        vision: useVision,
+                        mode: mode,
+                        promptTemplate: prompt.template,
+                        response: response
+                    ).write(to: mdURL, atomically: true, encoding: .utf8)
+                    log("output: \(mdURL.path)")
+                } catch {
+                    log("ai: analysis failed — "
+                        + ((error as? LocalizedError)?.errorDescription ?? String(describing: error)))
+                }
             }
         }
 
