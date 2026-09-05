@@ -321,7 +321,7 @@ enum SpeakerProfiles {
                             defer { SherpaOnnxDestroyOnlineStream(stream) }
 
                             let count = blockEnd - offset
-                            _ = request.samples[offset..<blockEnd].withUnsafeBufferPointer { buffer in
+                            request.samples[offset..<blockEnd].withUnsafeBufferPointer { buffer in
                                 SherpaOnnxOnlineStreamAcceptWaveform(
                                     stream, Int32(sampleRate), buffer.baseAddress, Int32(count))
                             }
