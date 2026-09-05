@@ -2,45 +2,54 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Batch transcription flow: menu → file picker → progress window → Finder
-/// reveal. This file is the UI shell; the pipeline behind it is
-/// `NativeTranscriptionBackend` (`AudioFileDecoder` → `WhisperBatchTranscriber`
-/// → `TranscriptFormatter` outputs), driven through the
-/// `TranscriptionBackend` protocol in this file.
+/// Batch transcription flow: menu → setup window → progress → Finder
+/// reveal, all inside ONE window whose content is a conditional render
+/// (TranscriptionFlowView: setup phase until Run, progress phase after).
+/// The window manager only creates the window, installs that view once, and
+/// routes the Browse panel — phase changes are SwiftUI view updates, not
+/// contentView swaps.
 ///
-/// One window per run: picking a new file cancels a run still in flight and
-/// replaces the content. The window manager mirrors `SettingsWindow`'s
-/// activation dance — whiz is an accessory app, so a bare `makeKeyAndOrderFront`
-/// would leave this behind whatever the user was doing.
+/// It mirrors `SettingsWindow`'s activation dance — whiz is an accessory
+/// app, so a bare `makeKeyAndOrderFront` would leave this behind whatever
+/// the user was doing.
 @MainActor
 final class TranscriptionWindow: NSObject, NSWindowDelegate {
 
     private var window: NSWindow?
-    private var viewModel: TranscriptionViewModel?
+    private let flow = TranscriptionFlowModel()
+    private var hasShown = false
 
-    /// Menu entry point: pick a file, then present the running window.
+    /// Menu entry point. A run in flight means "show me my window", not
+    /// "restart and kill it"; anything else gets a fresh setup snapshot,
+    /// picking up config edits made since the last open.
     func start() {
-        pickFile { input in
-            guard let input else { return }
-
-            // A previous run may still be going; cancel it before starting fresh.
-            self.viewModel?.cancel()
-            let model = TranscriptionViewModel(
-                input: input,
-                output: TranscriptionOutputs.directory(for: input),
-                backend: NativeTranscriptionBackend())
-            self.viewModel = model
-
-            if self.window == nil { self.build() }
-            self.window?.contentView = NSHostingView(rootView: TranscriptionView(viewModel: model))
-            self.show()
-            model.start()
+        if flow.hasActiveRun {
+            show()
+            return
         }
+        flow.restart()
+        if window == nil { build() }
+        show()
     }
 
-    // MARK: - File picking
+    // MARK: - Content
 
-    private func pickFile(onPick: @escaping (URL?) -> Void) {
+    private func installContent() {
+        window?.contentView = NSHostingView(rootView: TranscriptionFlowView(
+            model: flow,
+            browse: { [weak self] setup in
+                self?.browse { url in
+                    if let url { setup.pathText = url.path }
+                }
+            },
+            onCancel: { [weak self] in
+                self?.window?.performClose(nil)
+            }))
+    }
+
+    // MARK: - File picking (the setup form's Browse button)
+
+    private func browse(onPick: @escaping (URL?) -> Void) {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
@@ -48,7 +57,7 @@ final class TranscriptionWindow: NSObject, NSWindowDelegate {
         panel.allowedContentTypes = [.movie, .video, .audio]
         panel.title = "Transcribe"
         panel.message = "Choose a video or audio file to transcribe."
-        panel.prompt = "Transcribe"
+        panel.prompt = "Open"
 
         // Same Space handling the Settings window needed (commit 2cad76b):
         // follow the user's current Space, including full-screen ones. Without
@@ -56,17 +65,29 @@ final class TranscriptionWindow: NSObject, NSWindowDelegate {
         // switches the user to wherever that is.
         panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
 
-        // Present first, activate second — the SettingsWindow ordering, and
-        // `begin` instead of `runModal` is what makes it possible here.
-        // Activating an accessory app before the panel exists on any Space
-        // sends macOS hunting for the app's windows, dragging the user to the
-        // Desktop — the exact bug this mirrors from Settings. After `begin`,
-        // the panel is already placed on the active Space, so activation has
-        // something local to raise.
-        panel.begin { response in
-            onPick(response == .OK ? panel.url : nil)
+        // Presented as a sheet on the transcribe window, not as a free-floating
+        // panel. `panel.begin` is modeless: from an accessory app it could end up
+        // ordered behind the window that opened it, so clicking Browse appeared
+        // to do nothing at all.
+        //
+        // A sheet also keeps the Space fix that `begin` was chosen for. It is
+        // attached to a window that is already on the user's current Space, so
+        // there is nothing for macOS to go hunting for and no jump to the
+        // Desktop (the SettingsWindow bug, commit 2cad76b).
+        if let window {
+            NSApp.activate(ignoringOtherApps: true)
+            panel.beginSheetModal(for: window) { response in
+                onPick(response == .OK ? panel.url : nil)
+            }
+        } else {
+            // No window to attach to — should not happen, since Browse is only
+            // reachable from the form, but fall back rather than silently
+            // dropping the click.
+            panel.begin { response in
+                onPick(response == .OK ? panel.url : nil)
+            }
+            NSApp.activate(ignoringOtherApps: true)
         }
-        NSApp.activate(ignoringOtherApps: true)
     }
 
     // MARK: - Window plumbing (mirrors SettingsWindow)
@@ -83,19 +104,36 @@ final class TranscriptionWindow: NSObject, NSWindowDelegate {
         window.isReleasedWhenClosed = false  // reused across runs
         window.delegate = self
         self.window = window
+
+        // Install the content here, while building, exactly as SettingsWindow
+        // does. It used to be guarded by `if window?.contentView == nil` from
+        // start(), which never fired: NSWindow supplies a default empty NSView
+        // on init, so contentView is never nil. The window opened showing that
+        // blank default view instead of the setup form.
+        //
+        // Safe to do once: the view observes `flow`, so a fresh run re-renders
+        // through the model rather than needing new content.
+        installContent()
     }
 
     private func show() {
         guard let window else { return }
+        // Centre on first open only, so a window the user has moved stays put —
+        // the same convention SettingsWindow uses. Before ordering front, so
+        // the window never appears in the default spot and visibly jumps.
+        if !hasShown {
+            window.center()
+        }
         NSApp.setActivationPolicy(.regular)
         // Order front *before* activating — see SettingsWindow.show() for why.
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        hasShown = true
     }
 
     func windowWillClose(_ notification: Notification) {
         // Closing the window mid-run stops the transcription, not just the UI.
-        viewModel?.cancel()
+        flow.cancelActiveRun()
         NSApp.setActivationPolicy(.accessory)
     }
 }

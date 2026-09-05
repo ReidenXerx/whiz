@@ -134,6 +134,14 @@ let package = Package(
                 .unsafeFlags([
                     "-L\(sherpaLib)",
                     "-lsherpa-onnx-c-api",
+                    // Two rpaths, tried in order. The bundle-relative one comes
+                    // first so a packaged .app loads the dylibs it ships in
+                    // Contents/Frameworks; without it the only rpath was an
+                    // absolute path into this source tree, so a copied app died
+                    // at launch with "Library not loaded: @rpath/libsherpa…".
+                    // The vendor path stays as the fallback for `swift run` and
+                    // `swift test`, where the binary is not in a bundle.
+                    "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks",
                     "-Xlinker", "-rpath", "-Xlinker", sherpaLib,
                 ]),
             ]
@@ -153,6 +161,14 @@ let package = Package(
                 .unsafeFlags([
                     "-L\(sherpaLib)",
                     "-lsherpa-onnx-c-api",
+                    // Two rpaths, tried in order. The bundle-relative one comes
+                    // first so a packaged .app loads the dylibs it ships in
+                    // Contents/Frameworks; without it the only rpath was an
+                    // absolute path into this source tree, so a copied app died
+                    // at launch with "Library not loaded: @rpath/libsherpa…".
+                    // The vendor path stays as the fallback for `swift run` and
+                    // `swift test`, where the binary is not in a bundle.
+                    "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks",
                     "-Xlinker", "-rpath", "-Xlinker", sherpaLib,
                 ]),
             ]
