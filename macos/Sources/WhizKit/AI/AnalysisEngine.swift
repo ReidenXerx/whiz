@@ -466,7 +466,7 @@ enum AnalysisEngine {
         if let names = await getModelNames(url: root + "/api/tags", session: session) {
             return names
         }
-        var chatBase = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
+        let chatBase = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
         return await getModelNames(url: chatBase + "/models", session: session) ?? []
     }
 
