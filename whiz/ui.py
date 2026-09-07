@@ -98,6 +98,12 @@ def status(msg: str, kind: str = "info", detail: str | None = None) -> None:
 
     kind is one of: ok, warn, hint, info. ``detail`` (if given) is printed on a
     dimmed indented follow-up line — used for remediation hints under warnings.
+
+    ``msg``/``detail`` are rendered as LITERAL text: messages routinely carry
+    data-derived strings (paths, commands like ``pipx inject whiz
+    'whiz[diarize]'``), and rich would otherwise parse ``[...]`` as a style
+    tag and silently eat it. Callers wanting markup should assemble a Text
+    or use a dedicated renderer.
     """
     style = {
         "ok": "whiz.ok",
@@ -105,19 +111,29 @@ def status(msg: str, kind: str = "info", detail: str | None = None) -> None:
         "hint": "whiz.hint",
         "info": "whiz.info",
     }.get(kind, "whiz.info")
-    _console.print(f"[{style}]{msg}[/]")
+    # Text(style=...) — NOT an f-string with {Text(...)}: interpolating a
+    # Text back into a markup string calls str() on it and rich re-parses
+    # the result, defeating the escape. A Text passed as the renderable is
+    # taken literally.
+    _console.print(Text(msg, style=style))
     if detail:
-        _console.print(f"    [whiz.muted]{detail}[/]")
+        _console.print(Text(f"    {detail}", style="whiz.muted"))
 
 
 def info(msg: str) -> None:
-    """Plain info line (not a warning). Kept for non-status informational prints."""
-    _console.print(f"[whiz.info]{msg}[/]")
+    """Plain info line (not a warning). Kept for non-status informational prints.
+
+    Literal text for the same reason as ``status`` (square brackets in
+    commands/paths must not be parsed as rich markup).
+    """
+    _console.print(Text(msg, style="whiz.info"))
 
 
 def muted(msg: str) -> None:
-    """A dimmed line, e.g. 'removed intermediate foo.wav'."""
-    _console.print(f"[whiz.muted]{msg}[/]")
+    """A dimmed line, e.g. 'removed intermediate foo.wav'. Literal text — see
+    ``status`` for why (commands like ``pipx inject whiz 'whiz[diarize]'
+    must survive verbatim)."""
+    _console.print(Text(msg, style="whiz.muted"))
 
 
 def note(msg: str) -> None:

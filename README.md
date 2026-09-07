@@ -351,13 +351,19 @@ whiz can label who spoke when on mono recordings (meetings, screen recordings) v
 
 ### One-time setup
 
+Nothing to remember: the first run that needs diarization performs the setup itself. When diarization is about to run — auto-enabled for a video, or an explicit `--speakers` — and sherpa-onnx or its models are missing, whiz installs the package into the environment it's running in and downloads the diarization models (~90 MB, one time), with live progress in the terminal. `whiz transcribe recording.mov` on a fresh machine just works.
+
+Prefer to do it yourself (e.g. before an offline session)? The manual equivalent:
+
 ```bash
 # 1. Install the optional dependency into whiz's environment
-pipx inject whiz sherpa-onnx
+pipx inject whiz 'whiz[diarize]'
 
 # 2. Download the diarization models (~90 MB total)
 whiz models download-diarization
 ```
+
+Opt out with `--no-auto-diarization-setup` on `transcribe`/`merge`: whiz then skips or degrades speaker labeling (see below) instead of installing anything. `whiz upgrade` re-injects the diarize extra automatically, so an auto-installed sherpa-onnx survives upgrades.
 
 ### Usage
 
@@ -383,7 +389,7 @@ whiz transcribe --speakers 4 --name-speakers meeting.mov
 whiz transcribe recording.mov --speakers-names Alice,Bob,Carol,Dave
 ```
 
-If diarization is auto-enabled but sherpa-onnx or its models aren't installed yet, whiz skips speaker labeling with a one-line hint (and still transcribes + captures screenshots) instead of crashing — run the one-time setup above to turn it on. An explicitly requested `--speakers` degrades with a louder warning. An `--outputs html` **passed on that invocation** is never dropped: when speaker labels are unavailable the HTML transcript is still written, with every cue carrying a generic `Speaker` label and a warning explaining why. (`html` supplied only via config.toml describes the diarized happy path and is not treated as explicit — a degraded run keeps skipping it.) `--speakers-names` / `--name-speakers` are discarded in that case, and the warning says so — the names are never silently dropped. The degraded artifacts never overwrite speaker files an earlier diarized run left next to the media: each existing `.speakers.txt` / `.speakers.html` is kept with a warning instead of being collapsed to generic labels.
+When diarization is about to run but sherpa-onnx or its models aren't set up yet, whiz performs the one-time setup on the spot (see above) — that is the normal path on a fresh machine. The degraded behavior below applies only when the setup **fails** (offline, disk full, ...) or you opted out with `--no-auto-diarization-setup`: an auto-enabled video run then skips speaker labeling with a one-line hint (and still transcribes + captures screenshots) instead of crashing. An explicitly requested `--speakers` degrades with a louder warning. An `--outputs html` **passed on that invocation** is never dropped: when speaker labels are unavailable the HTML transcript is still written, with every cue carrying a generic `Speaker` label and a warning explaining why. (`html` supplied only via config.toml describes the diarized happy path and is not treated as explicit — a degraded run keeps skipping it.) `--speakers-names` / `--name-speakers` are discarded in that case, and the warning says so — the names are never silently dropped. The degraded artifacts never overwrite speaker files an earlier diarized run left next to the media: each existing `.speakers.txt` / `.speakers.html` is kept with a warning instead of being collapsed to generic labels.
 
 This produces the normal whisper-cli outputs (SRT, JSON) plus two labeled files alongside the input:
 

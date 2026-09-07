@@ -186,6 +186,107 @@ def _diarization_available(config: cfg.Config) -> bool:
     return True
 
 
+def _install_sherpa_onnx() -> bool:
+    """Install the ``diarize`` extra (sherpa-onnx) into the running venv.
+
+    Runs ``{sys.executable} -m pip install sherpa-onnx`` streaming output live,
+    then refreshes Python's import caches so the very next ``import
+    sherpa_onnx`` in THIS process sees the fresh wheel without a restart
+    (pip puts it in site-packages; importlib.invalidate_caches + a
+    find_spec probe is enough — sherpa_onnx is a normal top-level module,
+    not a lazy stub). Returns True on success.
+
+    ``sys.executable`` (not a pipx binary) installs into whatever venv is
+    running whiz — a dev ``uv run`` venv, a pipx venv, anything — so this
+    also covers upgrade-reinstalled environments. Under pipx, ``pipx inject
+    whiz 'whiz[diarize]'`` is the equivalent manual command (see README).
+    """
+    import importlib
+
+    ui.status("Speakers: sherpa-onnx missing — installing the diarize extra now", kind="info")
+    ui.muted("One-time setup (a ~90 MB wheel + model download on first run). Opt out with: --no-auto-diarization-setup")
+    rc = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "sherpa-onnx"],
+        check=False,
+    ).returncode
+    if rc != 0:
+        ui.status(f"Warning: pip install sherpa-onnx failed (exit {rc}).", kind="warn",
+                  detail="Run manually: pipx inject whiz 'whiz[diarize]'")
+        return False
+    importlib.invalidate_caches()
+    try:
+        import importlib.util
+
+        if importlib.util.find_spec("sherpa_onnx") is None:
+            return False
+    except Exception:  # noqa: BLE001
+        return False
+    ui.status("sherpa-onnx installed.", kind="ok")
+    return True
+
+
+def _ensure_diarization_ready(config: cfg.Config, *, dry_run: bool = False, setup_allowed: bool = True) -> bool:
+    """Make diarization possible before a run: install package + download models.
+
+    Proactive-first policy (user decision, 2026-09-05): when diarization is
+    about to run — auto-enabled for video or explicitly requested — and the
+    one-time setup is missing, whiz performs it on the spot instead of
+    degrading: ``_install_sherpa_onnx`` (pip install into the running venv),
+    then ``D.download_diarization_models`` (~90 MB one-time download). The
+    degraded fallbacks stay as the safety net for when setup fails (offline,
+    disk full, ...) or is opted out via ``--no-auto-diarization-setup``.
+
+    Returns True when diarization is ready (either it already was, or setup
+    succeeded). DRY-RUN reports what would be installed/downloaded and never
+    performs the setup. A False return must leave callers on their existing
+    degraded/skip path — setup failure is never a crash here.
+    """
+    if _diarization_available(config):
+        return True
+    if dry_run:
+        ui.muted("DRY-RUN: diarization setup would run — pip install sherpa-onnx + "
+                 "download diarization models (~90 MB one-time).")
+        return False
+    if not setup_allowed:
+        return False
+    # Package first: the model finders are filesystem-only, but installing
+    # models without the package that runs them would leave half a setup.
+    try:
+        import sherpa_onnx  # type: ignore[import-not-found]  # noqa: F401
+    except ImportError:
+        if not _install_sherpa_onnx():
+            return False
+    if D.find_segmentation_model(config) is None or D.find_embedding_model(config) is None:
+        try:
+            D.download_diarization_models()
+        except Exception as e:  # noqa: BLE001
+            ui.status(f"Warning: diarization model download failed: {e}", kind="warn",
+                      detail="Run manually: whiz models download-diarization")
+            return False
+        ui.status("Diarization models downloaded.", kind="ok")
+    # Re-check rather than assume: a partial download (e.g. one model file)
+    # must still land on the caller's degraded path, not a broken run.
+    return _diarization_available(config)
+
+
+def _print_zero_segments_hints() -> None:
+    """Actionable tips after diarization ran but produced no segments.
+
+    Review follow-up: the old message stated the outcome but not what to DO
+    about it. Segmentation finding no speech is an audio-content property —
+    no install or setting repairs it — so the honest fix is guidance: lock
+    the speaker count, loosen clustering, or accept that silence produces no
+    segments (no auto-retry; it would re-run the multi-minute pipeline to
+    the same verdict).
+    """
+    for hint in (
+        "If you know the speaker count, pass it: --speakers N (locks clustering; the biggest accuracy lever)",
+        "Auto-detect found nothing: try a lower --cluster-threshold (e.g. 0.85; smaller = more speakers)",
+        "Diarization segments speech only — silence or non-speech audio produces no segments",
+    ):
+        ui.muted(f"  {hint}")
+
+
 def _name_speakers_enabled(args: argparse.Namespace, diarize_enabled: bool) -> bool:
     """Resolve whether the interactive speaker-naming prompt should run.
 
@@ -235,13 +336,20 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
     # diarize_enabled is True when the user passed --speakers (with or without
     # a count) OR when it's auto-enabled for a video input.
     diarize_enabled = args.speakers is not None or speakers_auto
-    # Graceful fallback: if diarization was only auto-enabled (not explicitly
-    # requested) but sherpa-onnx/models aren't available, skip it silently with
-    # a hint instead of crashing. VAD then stays on and screenshots still run.
-    if speakers_auto and args.speakers is None and not _diarization_available(config):
-        ui.status("Speakers: diarization not available (sherpa-onnx or models missing); skipping speaker labels for this run.",
+    # Proactive-first (user decision, 2026-09-05): diarization about to run —
+    # even merely auto-enabled for video — gets its one-time setup performed
+    # on the spot (pip install sherpa-onnx + ~90 MB model download) instead
+    # of being skipped. Only when the setup fails (or --no-auto-diarization-setup)
+    # does the quiet skip-with-hint below remain, mirroring the VAD model's
+    # auto-download; VAD stays on and screenshots still run either way.
+    if (speakers_auto or args.speakers is not None) and not _ensure_diarization_ready(
+        config,
+        dry_run=getattr(args, "dry_run", False),
+        setup_allowed=not getattr(args, "no_auto_diarization_setup", False),
+    ) and speakers_auto and args.speakers is None:
+        ui.status("Speakers: diarization not available (setup incomplete); skipping speaker labels for this run.",
                   kind="hint",
-                  detail="Enable with: pipx inject whiz sherpa-onnx && whiz models download-diarization")
+                  detail="Run manually: pipx inject whiz 'whiz[diarize]' && whiz models download-diarization")
         ui.muted("  Or silence this with: --no-speakers")
         diarize_enabled = False
         speakers_auto = False
@@ -700,7 +808,7 @@ def _run_diarize_or_fallback(wav: Path, config: cfg.Config, args: argparse.Names
             lead = ("Falling back to generic 'Speaker' labels. Enable with: "
                     if _will_write_generic_labels(args) else
                     "Skipping speaker labels for this run. Enable with: ")
-            detail = lead + "pipx inject whiz sherpa-onnx && whiz models download-diarization"
+            detail = lead + "pipx inject whiz 'whiz[diarize]' && whiz models download-diarization"
             extra = _discarded_naming_detail(args)
             if extra:
                 detail += f" {extra}"
@@ -719,6 +827,7 @@ def _run_diarize_or_fallback(wav: Path, config: cfg.Config, args: argparse.Names
         ui.status(f"Warning: diarization produced no segments; {outcome}.",
                   kind="warn",
                   detail=_discarded_naming_detail(args))
+        _print_zero_segments_hints()
     return diar_segments
 
 
@@ -1342,6 +1451,18 @@ def cmd_merge(args: argparse.Namespace) -> int:
     screenshots, speakers_auto = _video_auto_flags(args, in_path)
     speakers_requested = args.speakers is not None or speakers_auto
 
+    # Proactive-first (user decision, 2026-09-05): merge re-runs diarization, so
+    # the missing one-time setup is performed here too — same policy as
+    # transcribe. Only when diarization will actually run (explicit --speakers
+    # or video auto-enable); --no-speakers merges run straight to the JSON
+    # path without paying an unrelated setup.
+    if speakers_requested:
+        _ensure_diarization_ready(
+            config,
+            dry_run=False,
+            setup_allowed=not getattr(args, "no_auto_diarization_setup", False),
+        )
+
     # Resolve the audio (WAV) to diarize. Reuse an existing sibling WAV if the
     # transcribe run kept it; otherwise re-extract from the video.
     if aud.is_audio(in_path):
@@ -1408,7 +1529,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
             naming = _discarded_naming_detail(args)
             if speakers_auto and args.speakers is None:
                 # Auto-enabled only: fall back to unlabeled output, don't crash.
-                detail = ("Skipping speaker labels. Enable with: pipx inject whiz sherpa-onnx "
+                detail = ("Skipping speaker labels. Enable with: pipx inject whiz 'whiz[diarize]' "
                           "&& whiz models download-diarization")
                 if naming:
                     detail += f" {naming}"
@@ -1422,7 +1543,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
                 # can still be produced: degrade to generic 'Speaker' labels
                 # instead of crashing (mirrors the `whiz transcribe` fallback).
                 detail = ("Falling back to generic 'Speaker' labels. Enable with: "
-                          "pipx inject whiz sherpa-onnx && whiz models download-diarization")
+                          "pipx inject whiz 'whiz[diarize]' && whiz models download-diarization")
                 if naming:
                     detail += f" {naming}"
                 ui.status(f"Speakers: diarization unavailable — {msg.splitlines()[0]}",
@@ -1432,7 +1553,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
                 degraded_note_shown = True
             else:
                 raise SystemExit(
-                    f"{msg}\nEnable diarization with: pipx inject whiz sherpa-onnx && "
+                    f"{msg}\nEnable diarization with: pipx inject whiz 'whiz[diarize]' && "
                     f"whiz models download-diarization"
                 )
         else:
@@ -1444,8 +1565,10 @@ def cmd_merge(args: argparse.Namespace) -> int:
             ui.status("Diarization produced no segments; writing unlabeled output with generic 'Speaker' labels.",
                       kind="warn",
                       detail=_discarded_naming_detail(args))
+            _print_zero_segments_hints()
         elif speakers_requested:
             ui.status("Diarization produced no segments; nothing to merge.", kind="warn")
+            _print_zero_segments_hints()
         else:
             raise SystemExit("Diarization produced no segments; cannot merge.")
 
@@ -1868,6 +1991,19 @@ def cmd_speakers_match(args: argparse.Namespace) -> int:
 
     num_sp = args.speakers if args.speakers else 0
     thr = args.cluster_threshold if args.cluster_threshold is not None else config.cluster_threshold
+    # Proactive-first: this command needs diarization by definition; attempt
+    # the one-time setup before failing (unless the caller opts out).
+    if not _ensure_diarization_ready(
+        config,
+        dry_run=False,
+        setup_allowed=not getattr(args, "no_auto_diarization_setup", False),
+    ):
+        raise SystemExit(
+            "Diarization unavailable (sherpa-onnx or models missing, setup "
+            "failed or opted out).\n"
+            "Run manually: pipx inject whiz 'whiz[diarize]' && "
+            "whiz models download-diarization"
+        )
     ui.phase("diarizing")
     diar_segments = D.run_diarization(wav, config, num_speakers=num_sp, threshold=thr)
     if not diar_segments:
@@ -1998,6 +2134,15 @@ def _dictate_extra_installed() -> bool:
         return False
 
 
+def _diarize_extra_installed() -> bool:
+    """True if sherpa-onnx (the 'diarize' extra) is importable."""
+    try:
+        import sherpa_onnx  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def _service_plist_exists() -> bool:
     """True if the whiz dictate LaunchAgent plist is on disk."""
     from whiz.dictate import service
@@ -2031,6 +2176,8 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
        upgraded whiz picks up any new/changed extra deps). Skipped if the
        extra was never installed — we don't want to surprise a user who only
        uses whiz for transcription with a 1.6 GB mlx-whisper download.
+       The 'diarize' extra follows the same rule: sherpa-onnx survives
+       `pipx install --force` only if it is re-injected after the reinstall.
     3. Restart the LaunchAgent IF it's installed (unload + load) so launchd
        re-execs the agent from the freshly installed code. Skipped if no
        service is installed.
@@ -2074,6 +2221,24 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
             ui.status("dictate extra refreshed", kind="ok")
     else:
         ui.muted("dictate extra not installed — skipping (install with: pipx inject whiz 'whiz[dictate]')")
+
+    # 2b. Same for the diarize extra: sherpa-onnx was either auto-installed by
+    # _ensure_diarization_ready or injected manually — either way a
+    # `pipx install --force` wipes the venv, so without a re-inject the next
+    # transcribe silently re-runs the auto-setup (or degrades, when opted out).
+    if _diarize_extra_installed():
+        ui.phase("refreshing the diarize extra")
+        rc = _run_live(["pipx", "inject", "whiz", "whiz[diarize]"])
+        if rc != 0:
+            ui.status(
+                f"pipx inject whiz[diarize] failed (exit {rc}). "
+                "The extra may be stale — re-run: pipx inject whiz 'whiz[diarize]'",
+                kind="warn",
+            )
+        else:
+            ui.status("diarize extra refreshed", kind="ok")
+    else:
+        ui.muted("diarize extra not installed — skipping (install with: pipx inject whiz 'whiz[diarize]'")
 
     # 3. Restart the LaunchAgent if it's installed.
     if _service_plist_exists():
@@ -2130,6 +2295,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--no-progress", dest="no_progress", action="store_true", help="Disable whisper-cli progress passthrough (forces -np)")
     t.add_argument("--keep-wav", action="store_true", help="Keep the intermediate extracted WAV (default: deleted after)")
     t.add_argument("--no-auto-vad-download", action="store_true", help="Don't auto-download the Silero VAD model when VAD is enabled and missing")
+    t.add_argument("--no-auto-diarization-setup", dest="no_auto_diarization_setup", action="store_true", help="Don't auto-install sherpa-onnx / auto-download diarization models when diarization is enabled and missing (one-time setup, ~90 MB)")
     t.add_argument("--speakers", type=int, default=None, nargs="?", const=0, help="Enable speaker diarization via sherpa-onnx. Optional integer = known speaker count; omit = auto-detect. Auto-enabled for video inputs (see --no-speakers)")
     t.add_argument("--no-speakers", dest="no_speakers", action="store_true", help="Disable the auto-enabled speaker diarization for video inputs (opt out)")
     t.add_argument("--cluster-threshold", type=float, default=None, help="Diarization clustering threshold when auto-detecting (larger = fewer speakers; default 0.9)")
@@ -2156,6 +2322,7 @@ def build_parser() -> argparse.ArgumentParser:
     mg.add_argument("--outputs", default=None, help="Comma-separated whiz post-merge output formats: html (others are whisper-cli formats, ignored here)")
     mg.add_argument("--speakers", type=int, default=None, nargs="?", const=0, help="Known speaker count; omit = auto-detect. Auto-enabled for video inputs (see --no-speakers)")
     mg.add_argument("--no-speakers", dest="no_speakers", action="store_true", help="Disable the auto-enabled speaker diarization for video inputs (opt out)")
+    mg.add_argument("--no-auto-diarization-setup", dest="no_auto_diarization_setup", action="store_true", help="Don't auto-install sherpa-onnx / auto-download diarization models when diarization is enabled and missing (one-time setup, ~90 MB)")
     mg.add_argument("--cluster-threshold", type=float, default=None, help="Clustering threshold when auto-detecting (larger = fewer speakers; default 0.9)")
     mg.add_argument("--name-speakers", action="store_true", help="Interactively prompt to name each detected speaker. Auto-enabled when diarization runs (see --no-name-speakers)")
     mg.add_argument("--no-name-speakers", dest="no_name_speakers", action="store_true", help="Disable the auto-enabled interactive speaker-naming prompt (opt out)")

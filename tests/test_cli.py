@@ -1,5 +1,6 @@
 """Tests for whiz.cli helpers — model-picker recommendation heuristic,
-vision resolution, and output fallbacks (HTML without diarization).
+vision resolution, output fallbacks (HTML without diarization), and the
+proactive diarization auto-setup (user decision, 2026-09-05).
 
 Run with: pytest tests/test_cli.py
 """
@@ -187,6 +188,7 @@ def _transcribe_args(file, outputs="srt,html", speakers=1):
         no_progress=True,
         keep_wav=False,
         no_auto_vad_download=True,
+        no_auto_diarization_setup=False,
         translate=False,
         speakers=speakers,
         no_speakers=False,
@@ -213,7 +215,8 @@ def _setup_transcribe(monkeypatch, tmp_path, *, diarize_enabled, screenshots=Fal
 
     Returns the input Path. ``diarize_enabled``/``screenshots`` are what the
     stubbed _build_transcribe_args reports (the real one derives them from
-    --speakers/video detection).
+    --speakers/video detection). The proactive diarization auto-setup is
+    stubbed ready=True so no test ever runs pip or downloads models.
     """
     audio = tmp_path / f"{name}.m4a"
     audio.write_bytes(b"fake audio")
@@ -226,6 +229,7 @@ def _setup_transcribe(monkeypatch, tmp_path, *, diarize_enabled, screenshots=Fal
     monkeypatch.setattr(cli, "_build_transcribe_args", fake_build)
     monkeypatch.setattr(cli, "_run_whisper_streaming", lambda cmd: SimpleNamespace(returncode=0))
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    monkeypatch.setattr(cli, "_ensure_diarization_ready", lambda config, dry_run=False, setup_allowed=True: True)
     return audio
 
 
@@ -387,10 +391,11 @@ def test_find_whisper_json_of_passed_stale_only_never_wins(tmp_path):
 # ---------- merge fallback ----------
 
 
-def _merge_args(file, outputs="html", speakers=1, speakers_names=None):
+def _merge_args(file, outputs="html", speakers=1, speakers_names=None, no_speakers=False):
     return SimpleNamespace(
         file=str(file), json="", outputs=outputs, speakers=speakers,
-        no_speakers=False, cluster_threshold=None, name_speakers=False,
+        no_speakers=no_speakers, no_auto_diarization_setup=False,
+        cluster_threshold=None, name_speakers=False,
         no_name_speakers=True, speakers_names=speakers_names, screenshots=False,
         no_screenshots=False, screenshot_width=None, no_voice_profiles=True,
     )
@@ -400,6 +405,26 @@ def _raise_sherpa_missing(wav, config, num_speakers=0, threshold=0.9):
     raise RuntimeError("The 'sherpa_onnx' package is required for diarization")
 
 
+def _stub_setup_unavailable(monkeypatch):
+    """Simulate the proactive setup having run and failed (pip offline,
+    model download error, ...) — the safety-net case every degraded path
+    below still guards. Without this stub cmd_merge would attempt a REAL
+    `pip install sherpa-onnx`, since merge now calls the setup before
+    diarizing."""
+    monkeypatch.setattr(
+        cli, "_ensure_diarization_ready",
+        lambda config, dry_run=False, setup_allowed=True: False,
+    )
+
+
+def _stub_setup_ready(monkeypatch):
+    """Simulate a successful one-time setup (package + models ready)."""
+    monkeypatch.setattr(
+        cli, "_ensure_diarization_ready",
+        lambda config, dry_run=False, setup_allowed=True: True,
+    )
+
+
 def test_merge_html_fallback_when_diarization_unavailable(tmp_path, monkeypatch, capsys):
     """whiz merge --speakers --outputs html with sherpa-onnx missing degrades
     to a generic-label HTML transcript instead of exiting."""
@@ -407,6 +432,7 @@ def test_merge_html_fallback_when_diarization_unavailable(tmp_path, monkeypatch,
     audio.write_bytes(b"fake audio")
     (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    _stub_setup_unavailable(monkeypatch)
     monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
 
     rc = cli.cmd_merge(_merge_args(audio, outputs="html", speakers=1))
@@ -435,6 +461,7 @@ def test_merge_still_raises_when_nothing_else_requested(tmp_path, monkeypatch):
     audio.write_bytes(b"fake audio")
     (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    _stub_setup_unavailable(monkeypatch)
     monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
 
     with pytest.raises(SystemExit, match="sherpa_onnx"):
@@ -473,6 +500,7 @@ def test_merge_diarized_success_writes_labeled_outputs(tmp_path, monkeypatch):
     audio.write_bytes(b"fake audio")
     (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    _stub_setup_ready(monkeypatch)
     monkeypatch.setattr(
         cli.D, "run_diarization",
         lambda wav, config, num_speakers=0, threshold=0.9: [
@@ -504,7 +532,10 @@ def test_transcribe_fallback_warns_discarded_speakers_names(tmp_path, monkeypatc
     rc = cli.cmd_transcribe(args)
 
     assert rc == 0
-    assert "--speakers-names had no effect" in capsys.readouterr().err
+    # Whitespace-normalized: rich wraps long status lines at the console
+    # width, which may split the phrase across lines (assert on content,
+    # not on wrap luck).
+    assert "--speakers-names had no effect" in " ".join(capsys.readouterr().err.split())
 
 
 def test_merge_fallback_warns_discarded_speakers_names(tmp_path, monkeypatch, capsys):
@@ -512,13 +543,15 @@ def test_merge_fallback_warns_discarded_speakers_names(tmp_path, monkeypatch, ca
     audio.write_bytes(b"fake audio")
     (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    _stub_setup_unavailable(monkeypatch)
     monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
 
     rc = cli.cmd_merge(_merge_args(audio, outputs="html", speakers=1,
                                    speakers_names=["Alice,Bob"]))
 
     assert rc == 0
-    assert "--speakers-names had no effect" in capsys.readouterr().err
+    # Wrap-insensitive (see the transcribe twin above).
+    assert "--speakers-names had no effect" in " ".join(capsys.readouterr().err.split())
 
 
 def test_merge_zero_segments_falls_back_to_unlabeled_html(tmp_path, monkeypatch, capsys):
@@ -528,6 +561,7 @@ def test_merge_zero_segments_falls_back_to_unlabeled_html(tmp_path, monkeypatch,
     audio.write_bytes(b"fake audio")
     (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    _stub_setup_ready(monkeypatch)
     monkeypatch.setattr(
         cli.D, "run_diarization",
         lambda wav, config, num_speakers=0, threshold=0.9: [],
@@ -550,6 +584,7 @@ def test_merge_returns_1_when_nothing_written(tmp_path, monkeypatch, capsys):
     audio.write_bytes(b"fake audio")
     (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    _stub_setup_ready(monkeypatch)
     monkeypatch.setattr(
         cli.D, "run_diarization",
         lambda wav, config, num_speakers=0, threshold=0.9: [],
@@ -635,6 +670,7 @@ def test_merge_fallback_never_clobbers_existing_named_outputs(tmp_path, monkeypa
     audio.write_bytes(b"fake audio")
     (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    _stub_setup_unavailable(monkeypatch)
     monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
     named_txt = tmp_path / "meeting.m4a.speakers.txt"
     named_html = tmp_path / "meeting.m4a.speakers.html"
@@ -690,6 +726,7 @@ def test_merge_config_html_is_not_degraded(tmp_path, monkeypatch, capsys):
         return config
 
     monkeypatch.setattr(cli.cfg, "load", fake_load)
+    _stub_setup_unavailable(monkeypatch)
     monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
 
     with pytest.raises(SystemExit, match="sherpa_onnx"):
@@ -721,6 +758,7 @@ def test_merge_sherpa_missing_does_not_double_warn(tmp_path, monkeypatch, capsys
     audio.write_bytes(b"fake audio")
     (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    _stub_setup_unavailable(monkeypatch)
     monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
 
     rc = cli.cmd_merge(_merge_args(audio, outputs="html", speakers=1))
@@ -729,3 +767,308 @@ def test_merge_sherpa_missing_does_not_double_warn(tmp_path, monkeypatch, capsys
     err = capsys.readouterr().err
     assert err.count("diarization unavailable") == 1
     assert err.count("Diarization produced no segments") == 0
+
+
+# ---------- proactive diarization auto-setup (user decision, 2026-09-05) ----------
+#
+# Policy: when diarization is about to run — auto-enabled for video or
+# explicitly requested — whiz performs the one-time setup itself (pip
+# install sherpa-onnx + ~90 MB model download) instead of degrading; the
+# fallbacks above remain only as the safety net for a failed setup or
+# --no-auto-diarization-setup. These tests run the REAL setup helpers by
+# stubbing their inputs (availability probe, pip, model download) so no
+# test ever touches the network or mutates the venv.
+
+
+def test_no_auto_diarization_setup_flags_registered():
+    """--no-auto-diarization-setup exists on transcribe AND merge (mirrors
+    --no-auto-vad-download) and defaults to False: setup-on-first-use is
+    on by default."""
+    parser = cli.build_parser()
+    args = parser.parse_args(["transcribe", "x.wav", "--no-auto-diarization-setup"])
+    assert args.no_auto_diarization_setup is True
+    args = parser.parse_args(["transcribe", "x.wav"])
+    assert args.no_auto_diarization_setup is False
+    args = parser.parse_args(["merge", "x.wav", "--no-auto-diarization-setup"])
+    assert args.no_auto_diarization_setup is True
+    args = parser.parse_args(["merge", "x.wav"])
+    assert args.no_auto_diarization_setup is False
+
+
+def test_ensure_diarization_ready_short_circuits_when_available(monkeypatch):
+    """Already-available diarization returns True with no install, no
+    download, and no status output — every later run stays quiet."""
+    calls = _capture_status(monkeypatch)
+
+    def _boom(*_a, **_k):
+        raise AssertionError("nothing may run when diarization is ready")
+
+    monkeypatch.setattr(cli, "_diarization_available", lambda config: True)
+    monkeypatch.setattr(cli, "_install_sherpa_onnx", _boom)
+    monkeypatch.setattr(cli.D, "download_diarization_models", _boom)
+
+    assert cli._ensure_diarization_ready(cli.cfg.Config()) is True
+    assert calls == []
+
+
+def test_ensure_diarization_ready_happy_path_installs_then_downloads(monkeypatch, capsys):
+    """Fresh machine: install the package FIRST, then download the models —
+    models without the package that runs them would leave half a setup —
+    then confirm readiness with a final availability re-check."""
+    events: list[str] = []
+    # Not ready at entry; ready once the models are on disk — the re-check
+    # then sees the freshly installed package + downloaded models.
+    monkeypatch.setattr(cli, "_diarization_available", lambda config: "download" in events)
+    # A None entry makes `import sherpa_onnx` raise ImportError, forcing the
+    # install branch deterministically regardless of the host venv.
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", None)
+    monkeypatch.setattr(cli, "_install_sherpa_onnx", lambda: events.append("install") or True)
+    monkeypatch.setattr(cli.D, "download_diarization_models", lambda: events.append("download"))
+    monkeypatch.setattr(cli.D, "find_segmentation_model", lambda config: None)
+    monkeypatch.setattr(cli.D, "find_embedding_model", lambda config: None)
+
+    assert cli._ensure_diarization_ready(cli.cfg.Config()) is True
+    assert events == ["install", "download"]
+    assert "Diarization models downloaded" in capsys.readouterr().err
+
+
+def test_ensure_diarization_ready_opt_out_skips_setup(monkeypatch, capsys):
+    """--no-auto-diarization-setup (setup_allowed=False): report the honest
+    False but install and download NOTHING — silent degradation is the
+    user's explicit choice."""
+    monkeypatch.setattr(cli.D, "find_segmentation_model", lambda config: None)
+    monkeypatch.setattr(cli.D, "find_embedding_model", lambda config: None)
+
+    def _boom(*_a, **_k):
+        raise AssertionError("opted-out setup must not install or download")
+
+    monkeypatch.setattr(cli, "_install_sherpa_onnx", _boom)
+    monkeypatch.setattr(cli.D, "download_diarization_models", _boom)
+
+    assert cli._ensure_diarization_ready(cli.cfg.Config(), setup_allowed=False) is False
+    assert capsys.readouterr().err == ""
+
+
+def test_ensure_diarization_ready_dry_run_never_sets_up(monkeypatch, capsys):
+    """dry_run announces the setup it WOULD perform and runs none of it."""
+    monkeypatch.setattr(cli.D, "find_segmentation_model", lambda config: None)
+    monkeypatch.setattr(cli.D, "find_embedding_model", lambda config: None)
+
+    def _boom(*_a, **_k):
+        raise AssertionError("dry-run must not install or download")
+
+    monkeypatch.setattr(cli, "_install_sherpa_onnx", _boom)
+    monkeypatch.setattr(cli.D, "download_diarization_models", _boom)
+
+    assert cli._ensure_diarization_ready(cli.cfg.Config(), dry_run=True) is False
+    err = capsys.readouterr().err
+    assert "DRY-RUN" in err
+    assert "~90 MB" in err
+
+
+def test_install_sherpa_onnx_targets_running_venv_and_reports_progress(monkeypatch, capsys):
+    """The installer runs pip via sys.executable (installs into the RUNNING
+    venv — dev uv venv, pipx venv, anything; a bare `pipx` binary would
+    miss dev venvs), announces itself with the --no-auto-diarization-setup
+    opt-out, and verifies the fresh wheel is importable."""
+    seen: dict[str, list[str]] = {}
+
+    def fake_run(cmd, check=False):
+        seen["cmd"] = cmd
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+
+    assert cli._install_sherpa_onnx() is True
+    assert seen["cmd"] == [sys.executable, "-m", "pip", "install", "sherpa-onnx"]
+    err = capsys.readouterr().err
+    assert "installing the diarize extra" in err    # status line up front
+    assert "--no-auto-diarization-setup" in err      # the opt-out is surfaced
+    assert "sherpa-onnx installed" in err
+
+
+def test_ensure_diarization_ready_install_failure_returns_false(monkeypatch, capsys):
+    """A failed pip install (offline, disk full, ...) returns False so the
+    caller stays on its degraded path — with the manual remediation hint.
+    No model download may follow the miss."""
+    monkeypatch.setattr(cli, "_diarization_available", lambda config: False)
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", None)  # force the install branch
+    monkeypatch.setattr(cli.subprocess, "run", lambda cmd, check=False: SimpleNamespace(returncode=1))
+
+    def _boom(*_a, **_k):
+        raise AssertionError("models must not download when the install failed")
+
+    monkeypatch.setattr(cli.D, "download_diarization_models", _boom)
+
+    assert cli._ensure_diarization_ready(cli.cfg.Config()) is False
+    err = capsys.readouterr().err
+    assert "pip install sherpa-onnx failed" in err
+    assert "pipx inject whiz 'whiz[diarize]'" in err
+
+
+def _fresh_machine_stubs(monkeypatch, events):
+    """Shared wiring-test setup: stub the setup's inputs so the REAL
+    _ensure_diarization_ready runs inside the real command paths, with
+    ``events`` recording the (stubbed) install + download steps."""
+    monkeypatch.setattr(cli, "_diarization_available", lambda config: "download" in events)
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", None)
+    monkeypatch.setattr(cli, "_install_sherpa_onnx", lambda: events.append("install") or True)
+    monkeypatch.setattr(cli.D, "download_diarization_models", lambda: events.append("download"))
+    monkeypatch.setattr(cli.D, "find_segmentation_model", lambda config: None)
+    monkeypatch.setattr(cli.D, "find_embedding_model", lambda config: None)
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    monkeypatch.setattr(cli.M, "pick_best", lambda config: Path("/models/turbo.bin"))
+    monkeypatch.setattr(cli, "_find_whisper_cli", lambda configured="": "whisper-cli")
+    monkeypatch.setattr(cli.aud, "find_ffmpeg", lambda configured="": "ffmpeg")
+    monkeypatch.setattr(cli.aud, "extract_audio", lambda src, ffmpeg, dest_dir=None, dry_run=False: src.with_suffix(".wav"))
+    monkeypatch.setattr(cli, "_run_whisper_streaming", lambda cmd: SimpleNamespace(returncode=0))
+
+
+def test_transcribe_auto_diarization_setup_success_writes_speakers_html(tmp_path, monkeypatch, capsys):
+    """The headline behavior: `whiz transcribe recording.mov --outputs html`
+    on a fresh machine just works — the setup runs (real
+    _build_transcribe_args, real _ensure_diarization_ready), diarization
+    produces real labels, and the old quiet auto-skip hint never appears."""
+    events: list[str] = []
+    _fresh_machine_stubs(monkeypatch, events)
+    video = tmp_path / "recording.mov"
+    video.write_bytes(b"fake video")
+    (tmp_path / "recording.wav.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    monkeypatch.setattr(
+        cli.D, "run_diarization",
+        lambda wav, config, num_speakers=0, threshold=0.9: [
+            DiarSegment(start=0.0, end=3.0, speaker=0),
+        ],
+    )
+    # Frames: stub the extractor (the diarized HTML path inlines frames);
+    # the real one would run ffmpeg on the fake video bytes.
+    frames_dir = tmp_path / "recording.frames"
+    frames_dir.mkdir()
+    monkeypatch.setattr(
+        cli, "_extract_and_manifest_screenshots",
+        lambda in_path, merged, of_base, ffmpeg, width, dry_run: (frames_dir, tmp_path / "recording.frames.json"),
+    )
+
+    rc = cli.cmd_transcribe(_transcribe_args(video, outputs="html", speakers=None))
+
+    assert rc == 0
+    assert events == ["install", "download"]  # the one-time setup ran
+    html = (tmp_path / "recording.speakers.html").read_text(encoding="utf-8")
+    assert "Speaker A" in html  # real labels, not the degraded generic 'Speaker'
+    err = capsys.readouterr().err
+    assert "skipping speaker labels" not in err  # the skip hint is obsolete now
+
+
+def test_transcribe_auto_diarization_skips_after_failed_setup(tmp_path, monkeypatch, capsys):
+    """Setup failed + merely auto-enabled diarization: the run still
+    completes, and the hint says the setup is incomplete and offers
+    --no-speakers — a hint, never a crash."""
+    video = tmp_path / "recording.mov"
+    video.write_bytes(b"fake video")
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    monkeypatch.setattr(cli.M, "pick_best", lambda config: Path("/models/turbo.bin"))
+    monkeypatch.setattr(cli, "_find_whisper_cli", lambda configured="": "whisper-cli")
+    monkeypatch.setattr(cli.aud, "find_ffmpeg", lambda configured="": "ffmpeg")
+    monkeypatch.setattr(cli.aud, "extract_audio", lambda src, ffmpeg, dest_dir=None, dry_run=False: src.with_suffix(".wav"))
+    monkeypatch.setattr(cli, "_run_whisper_streaming", lambda cmd: SimpleNamespace(returncode=0))
+    _stub_setup_unavailable(monkeypatch)
+    ran = []
+    monkeypatch.setattr(cli.D, "run_diarization", lambda *a, **k: ran.append(1) or [])
+
+    rc = cli.cmd_transcribe(_transcribe_args(video, outputs="srt", speakers=None))
+
+    assert rc == 0
+    assert ran == []  # diarization never ran after the failed setup
+    err = capsys.readouterr().err
+    assert "setup incomplete" in err
+    assert "--no-speakers" in err
+
+
+def test_merge_auto_diarization_setup_success_writes_labeled_outputs(tmp_path, monkeypatch):
+    """cmd_merge's half of the wiring: explicit --speakers triggers the
+    setup, and labeled outputs land afterwards — the first `whiz merge`
+    on a fresh machine just works."""
+    events: list[str] = []
+    _fresh_machine_stubs(monkeypatch, events)
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    monkeypatch.setattr(
+        cli.D, "run_diarization",
+        lambda wav, config, num_speakers=0, threshold=0.9: [
+            DiarSegment(start=0.0, end=3.0, speaker=0),
+        ],
+    )
+
+    rc = cli.cmd_merge(_merge_args(audio, outputs="html", speakers=1))
+
+    assert rc == 0
+    assert events == ["install", "download"]
+    html = (tmp_path / "meeting.m4a.speakers.html").read_text(encoding="utf-8")
+    assert "Speaker A" in html
+    srt = (tmp_path / "meeting.m4a.speakers.srt").read_text(encoding="utf-8")
+    assert "Speaker A:" in srt
+
+
+def test_merge_zero_segments_message_is_actionable(tmp_path, monkeypatch, capsys):
+    """Zero segments is an audio-content verdict, not a defect: the warning
+    must say what to DO next, not just what happened."""
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    _stub_setup_ready(monkeypatch)
+    monkeypatch.setattr(
+        cli.D, "run_diarization",
+        lambda wav, config, num_speakers=0, threshold=0.9: [],
+    )
+
+    rc = cli.cmd_merge(_merge_args(audio, outputs="html", speakers=1))
+
+    assert rc == 0
+    # Wrap-insensitive: the hint lines are muted lines near the console
+    # width, so any phrase may be split by rich's wrapping.
+    err = " ".join(capsys.readouterr().err.split())
+    assert "Diarization produced no segments" in err
+    assert "--speakers N" in err           # the biggest accuracy lever first
+    assert "--cluster-threshold" in err     # loosen the clustering
+    assert "silence" in err                # silence is content, not a defect
+
+
+def test_speakers_match_setup_failure_exits_with_hint(tmp_path, monkeypatch):
+    """`whiz speakers match` needs diarization by definition: when the
+    setup cannot make it work, exit loudly with the manual command —
+    there is no degraded path to fall back to here."""
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    _stub_setup_unavailable(monkeypatch)
+
+    args = SimpleNamespace(file=str(audio), speakers=1, cluster_threshold=None,
+                           no_auto_diarization_setup=False)
+    with pytest.raises(SystemExit, match="pipx inject whiz 'whiz\\[diarize\\]'"):
+        cli.cmd_speakers_match(args)
+
+
+def test_speakers_match_runs_after_setup_success(tmp_path, monkeypatch, capsys):
+    """Setup made diarization work → the match command proceeds (and
+    reports honestly when there are no profiles yet)."""
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    _stub_setup_ready(monkeypatch)
+    monkeypatch.setattr(
+        cli.D, "run_diarization",
+        lambda wav, config, num_speakers=0, threshold=0.9: [
+            DiarSegment(start=0.0, end=3.0, speaker=0),
+        ],
+    )
+    monkeypatch.setattr(cli.P, "load_profiles", lambda: [])
+
+    args = SimpleNamespace(file=str(audio), speakers=1, cluster_threshold=None,
+                           no_auto_diarization_setup=False)
+    rc = cli.cmd_speakers_match(args)
+
+    assert rc == 0
+    assert "No stored voice profiles" in capsys.readouterr().err
