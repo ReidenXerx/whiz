@@ -144,6 +144,25 @@ struct SpeakerProfilesTests {
         #expect(abs(profiles[0].embedding[1] - 8.0 / 3.0) < 1e-12)
     }
 
+    @Test("names with control characters stay valid JSON for Python readers")
+    func controlCharactersRoundTrip() throws {
+        // The store is shared with Python's json module — a raw control byte
+        // would fail its parse and silently drop the profile.
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try SpeakerProfiles.saveProfile(name: "A\nB\tC", embedding: [1.0], samples: 1, in: dir)
+        let profiles = SpeakerProfiles.loadProfiles(in: dir)
+        #expect(profiles.count == 1)
+        #expect(profiles[0].name == "A\nB\tC")
+        #expect(profiles[0].embedding == [1.0])
+
+        // And the raw file parses with Foundation's reader too.
+        let path = SpeakerProfiles.profilePath(name: "A\nB\tC", in: dir)
+        let object = try JSONSerialization.jsonObject(with: Data(contentsOf: path)) as? [String: Any]
+        #expect((object?["name"] as? String) == "A\nB\tC")
+    }
+
     @Test("a profile without a name falls back to the file stem")
     func loadFallsBackToStemName() throws {
         let dir = tempDir()

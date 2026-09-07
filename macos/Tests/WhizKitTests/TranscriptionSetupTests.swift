@@ -41,6 +41,12 @@ struct TranscriptionSetupTests {
         let defaults = TranscriptionSetupModel(settings: makeSettings())
         #expect(defaults.speakersAuto)          // numSpeakers 0 => auto
         #expect(!defaults.analyzeEnabled)       // no ai_model => off
+
+        // An explicit single speaker is legitimate (Python accepts 1) and
+        // must survive seeding, not be coerced to 2.
+        let single = TranscriptionSetupModel(settings: makeSettings(numSpeakers: 1))
+        #expect(!single.speakersAuto)
+        #expect(single.speakerCount == 1)
     }
 
     // MARK: - The resolved overlay
@@ -170,6 +176,56 @@ struct TranscriptionSetupTests {
         #expect(flow.hasActiveRun)
     }
 
+    @Test("restart seeds a fresh setup and fetches its model list")
+    @MainActor
+    func restartFiresLoader() async throws {
+        let flow = TranscriptionFlowModel()
+        var loaded: [TranscriptionSetupModel] = []
+        flow.setupLoader = { loaded.append($0) }
+
+        let oldSetup = flow.setup
+        flow.restart()
+
+        #expect(flow.setup !== oldSetup)   // a fresh config snapshot
+        #expect(flow.setup.pathText.isEmpty)
+        // The model list fetch rides restart, NOT view appearance — the
+        // hosting view persists across sessions, so an appearance-driven
+        // .task would only fire on the first one.
+        for _ in 0..<50 where loaded.isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(loaded.count == 1)
+        #expect(loaded[0] === flow.setup)
+    }
+
+    @Test("finish reveals the output folder; failure does not")
+    @MainActor
+    func finishRevealsOutput() async throws {
+        let file = try makeStubFile()
+        let out = FileManager.default.temporaryDirectory
+            .appendingPathComponent("whiz-vm-\(UUID().uuidString)")
+
+        let finished = TranscriptionViewModel(input: file, output: out, backend: InstantBackend())
+        var revealed: [URL] = []
+        finished.reveal = { revealed.append($0) }
+        finished.start()
+        for _ in 0..<50 where finished.stage == .running {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(finished.stage == .finished)
+        #expect(revealed == [out])
+
+        let failed = TranscriptionViewModel(input: file, output: out, backend: FailingBackend())
+        var failedReveals = 0
+        failed.reveal = { _ in failedReveals += 1 }
+        failed.start()
+        for _ in 0..<50 where failed.stage == .running {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(failed.stage != .finished)
+        #expect(failedReveals == 0)
+    }
+
     private func makeStubFile() throws -> URL {
         let file = FileManager.default.temporaryDirectory
             .appendingPathComponent("whiz-flow-\(UUID().uuidString).mp4")
@@ -190,6 +246,18 @@ private struct SleepingBackend: TranscriptionBackend {
             try await Task.sleep(for: .milliseconds(50))
         }
         throw CancellationError()
+    }
+}
+
+/// Test backend that completes immediately — a successful run stand-in.
+private struct InstantBackend: TranscriptionBackend {
+    func transcribe(
+        input: URL,
+        outputDirectory: URL,
+        onEvent: @escaping @Sendable (TranscriptionEvent) -> Void
+    ) async throws -> URL {
+        onEvent(.phase("done"))
+        return outputDirectory
     }
 }
 

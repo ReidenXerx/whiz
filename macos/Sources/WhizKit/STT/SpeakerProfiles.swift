@@ -356,13 +356,30 @@ enum SpeakerProfiles {
         return accumulator.map { $0 / count }
     }
 
-    /// Minimal JSON string escaping for the two characters a name or
-    /// timestamp can realistically contain.
+    /// JSON string escaping for the profile payload. The manifest-writer's
+    /// rule — quotes, backslashes, and the whitespace/control characters
+    /// that must not appear raw inside a JSON string — because this file is
+    /// read by Python's json module, where a raw control byte would fail the
+    /// parse and silently drop the profile (load_profiles skips what it
+    /// can't decode).
     private static func jsonString(_ text: String) -> String {
-        let escaped = text
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        return "\"\(escaped)\""
+        var out = "\""
+        for character in text.unicodeScalars {
+            switch character {
+            case "\"": out += "\\\""
+            case "\\": out += "\\\\"
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            default:
+                if character.value < 0x20 {
+                    out += String(format: "\\u%04x", character.value)
+                } else {
+                    out.unicodeScalars.append(character)
+                }
+            }
+        }
+        return out + "\""
     }
 }
 

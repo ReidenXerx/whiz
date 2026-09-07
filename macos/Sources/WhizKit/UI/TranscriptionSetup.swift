@@ -29,7 +29,7 @@ final class TranscriptionSetupModel: ObservableObject {
     init(settings: BatchSettings = .load()) {
         self.settings = settings
         self.speakersAuto = settings.numSpeakers == 0
-        self.speakerCount = max(2, settings.numSpeakers)
+        self.speakerCount = max(1, settings.numSpeakers)
         self.ocrEnabled = settings.ocr
         self.analyzeEnabled = !settings.aiModel.isEmpty
         self.aiModel = settings.aiModel
@@ -93,8 +93,15 @@ final class TranscriptionFlowModel: ObservableObject {
     /// The setup form's state, re-seeded from the config on every restart.
     @Published private(set) var setup: TranscriptionSetupModel
 
+    /// Loads the setup model's model list. Injectable so tests can observe
+    /// the trigger without a server; the default is the real fetch.
+    var setupLoader: (TranscriptionSetupModel) async -> Void = { await $0.loadModels() }
+
     init() {
         self.setup = TranscriptionSetupModel()
+        // Note: the first start() runs restart(), which loads models for the
+        // session — loading here instead would fire a network call at app
+        // launch, long before the Transcribe window is ever opened.
     }
 
     /// A run is in flight — a mid-run menu click must NOT restart the flow
@@ -120,11 +127,19 @@ final class TranscriptionFlowModel: ObservableObject {
     }
 
     /// Menu entry (when nothing is active): cancel anything lingering, fresh
-    /// setup snapshot — picks up config edits made since the last open.
+    /// setup snapshot — picks up config edits made since the last open — and a
+    /// model-list fetch for the new setup. The fetch lives here rather than in
+    /// the view's `.task`: the hosting view persists across window close and
+    /// setup replacements (same structural identity), so an appearance-driven
+    /// `.task` fires only on the very first session and every later session's
+    /// analyze dropdown would sit at "Loading models…" forever.
     func restart() {
         run?.cancel()
         run = nil
         setup = TranscriptionSetupModel()
+        let loader = setupLoader
+        let newSetup = setup
+        Task { await loader(newSetup) }
     }
 
     /// Window close: stop a live run, not just the UI.
@@ -177,7 +192,6 @@ struct TranscriptionSetupView: View {
         }
         .padding(16)
         .frame(width: 460, height: 360)
-        .task { await model.loadModels() }
     }
 
     private var pathRow: some View {
@@ -197,7 +211,7 @@ struct TranscriptionSetupView: View {
                 Stepper(
                     "Speakers: \(model.speakerCount)",
                     value: $model.speakerCount,
-                    in: 2...32)
+                    in: 1...32)
                     .fixedSize()
             }
         }
