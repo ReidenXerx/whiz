@@ -196,9 +196,10 @@ struct NativeTranscriptionBackend: TranscriptionBackend {
             }
         }
 
-        // 3. Model — the batch pipeline's own preference order, mirroring
-        // `models.py:PREFERENCE` (q5_0 turbo first), NOT dictation's.
-        guard let modelURL = WhisperModel.resolveBatch(configured: settings.model) else {
+        // 3. Model — one order for dictation and batch alike: NS-15 settled
+        // "unquantized everywhere" and retired the old split, so the unified
+        // `preference` list (pinned in WhisperModelTests) serves the whole app.
+        guard let modelURL = WhisperModel.resolve(configured: settings.model) else {
             throw WhisperError.noModelFound
         }
         onEvent(.phase("Loading model"))
@@ -380,23 +381,39 @@ struct NativeTranscriptionBackend: TranscriptionBackend {
         // SRT. Python writes these on the diarized path (_write_labeled_outputs:
         // .speakers.srt/.speakers.txt/.speakers.html); the HTML and TXT are a
         // documented divergence when diarization is absent — generic "Speaker"
-        // labels keep the readable artifact available — while the labeled SRT
-        // needs real labels to mean anything and is only written when it has
-        // them (with one generic speaker it would only duplicate the plain
-        // SRT).
+        // labels keep the readable artifact available, the page carries the
+        // provenance note (d8ab1b9) so a degraded transcript can't be mistaken
+        // for a one-speaker diarized one, and the no-clobber guard (a02a70a)
+        // keeps an existing artifact that carries REAL labels — re-running
+        // the same input without diarization may only overwrite another
+        // degraded run's output. The labeled SRT needs real labels to mean
+        // anything and is only written when it has them (with one generic
+        // speaker it would only duplicate the plain SRT).
         if !segments.isEmpty {
             onEvent(.phase("Writing HTML transcript"))
+            let degraded = diarSegments.isEmpty
             let htmlURL = outputDirectory.appendingPathComponent("\(stem).speakers.html")
-            try SpeakersHTML.format(
-                labeled, framesDir: framesDir, entries: frameEntries,
-                title: input.lastPathComponent)
-                .write(to: htmlURL, atomically: true, encoding: .utf8)
-            log("output: \(htmlURL.path)")
+            if degraded, !DegradedArtifacts.mayOverwriteHTML(at: htmlURL) {
+                log("speakers: kept existing \(htmlURL.lastPathComponent) — "
+                    + "it carries real speaker labels this run cannot produce")
+            } else {
+                try SpeakersHTML.format(
+                    labeled, framesDir: framesDir, entries: frameEntries,
+                    title: input.lastPathComponent,
+                    note: degraded ? DegradedArtifacts.genericLabelNote : "")
+                    .write(to: htmlURL, atomically: true, encoding: .utf8)
+                log("output: \(htmlURL.path)")
+            }
 
             let txtURL = outputDirectory.appendingPathComponent("\(stem).speakers.txt")
-            try LabeledTranscript.formatDialogueTXT(labeled)
-                .write(to: txtURL, atomically: true, encoding: .utf8)
-            log("output: \(txtURL.path)")
+            if degraded, !DegradedArtifacts.mayOverwriteTXT(at: txtURL) {
+                log("speakers: kept existing \(txtURL.lastPathComponent) — "
+                    + "it carries real speaker labels this run cannot produce")
+            } else {
+                try LabeledTranscript.formatDialogueTXT(labeled)
+                    .write(to: txtURL, atomically: true, encoding: .utf8)
+                log("output: \(txtURL.path)")
+            }
 
             if !diarSegments.isEmpty {
                 let labeledSRTURL = outputDirectory.appendingPathComponent("\(stem).speakers.srt")
@@ -477,5 +494,71 @@ struct NativeTranscriptionBackend: TranscriptionBackend {
             if FileManager.default.fileExists(atPath: url.path) { return url }
         }
         return WhisperModel.resolveVAD()
+    }
+}
+
+/// The degraded-run contract from PR #4 (cli.py `_GENERIC_LABEL_NOTE`,
+/// `_looks_degraded_html`, `_looks_degraded_txt`, commits d8ab1b9/a02a70a):
+/// a run without diarization labels its artifacts "degraded" — they carry
+/// the provenance note and bare `Speaker` labels — and may overwrite only
+/// another degraded run's output, never an artifact with real speaker
+/// labels. The note contains no HTML-escapable characters, so it appears
+/// verbatim in the written page; the idempotence tests write a real degraded
+/// page and re-run, which guards that invariant against future note edits.
+enum DegradedArtifacts {
+
+    static let genericLabelNote =
+        "No speaker diarization — every cue carries a generic 'Speaker' label."
+
+    /// True when an existing .speakers.html is itself a degraded page —
+    /// it embeds the provenance note. A diarized page never carries it.
+    /// Unreadable files read as named (when in doubt, keep).
+    static func looksDegradedHTML(_ content: String) -> Bool {
+        content.contains(genericLabelNote)
+    }
+
+    /// True when an existing .speakers.txt carries only generic labels —
+    /// every content line matches the bare `Speaker (HH:MM:SS): ` form.
+    /// A diarized txt has letterized or real-name labels on at least one
+    /// line. An empty file has no speaker names to destroy and reads as
+    /// degraded.
+    static func looksDegradedTXT(_ content: String) -> Bool {
+        let lines = content
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        if lines.isEmpty { return true }
+        return lines.allSatisfy(isGenericDialogueLine)
+    }
+
+    /// Python's `_DEGRADED_TXT_LINE` regex, `^Speaker \(\d\d:\d\d:\d\d\): ` —
+    /// matched structurally so no regex engine is pulled in.
+    static func isGenericDialogueLine(_ line: String) -> Bool {
+        guard line.hasPrefix("Speaker (") else { return false }
+        let rest = Array(line.dropFirst("Speaker (".count))
+        guard rest.count >= 11 else { return false }
+        let digits = [rest[0], rest[1], rest[3], rest[4], rest[6], rest[7]]
+        guard digits.allSatisfy(\.isNumber),
+              rest[2] == ":", rest[5] == ":",
+              rest[8] == ")", rest[9] == ":", rest[10] == " "
+        else { return false }
+        return true
+    }
+
+    /// The no-clobber guard for the HTML artifact: may a degraded run write
+    /// here? Missing files may always be written; existing degraded pages are
+    /// overwritten (idempotent re-runs); anything else — real labels, or an
+    /// unreadable file — is kept ("when in doubt, keep", cli.py parity).
+    static func mayOverwriteHTML(at url: URL) -> Bool {
+        guard FileManager.default.fileExists(atPath: url.path) else { return true }
+        guard let existing = try? String(contentsOf: url, encoding: .utf8) else { return false }
+        return looksDegradedHTML(existing)
+    }
+
+    /// The no-clobber guard for the TXT artifact, same rules.
+    static func mayOverwriteTXT(at url: URL) -> Bool {
+        guard FileManager.default.fileExists(atPath: url.path) else { return true }
+        guard let existing = try? String(contentsOf: url, encoding: .utf8) else { return false }
+        return looksDegradedTXT(existing)
     }
 }

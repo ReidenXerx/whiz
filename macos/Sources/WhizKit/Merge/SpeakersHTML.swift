@@ -38,12 +38,15 @@ enum SpeakersHTML {
     /// manifest; rows carrying OCR text render a collapsed "screen" block
     /// per cue, and because the search filters on the cue's full text
     /// content, on-screen text becomes searchable too (merge.py on the OCR
-    /// branch).
+    /// branch). `note` renders as a muted provenance line at the top of the
+    /// transcript — degraded (unlabeled) pages carry the generic-label note
+    /// so the durable file self-identifies (d8ab1b9).
     static func format(
         _ merged: [LabeledSegment],
         framesDir: URL? = nil,
         entries: [FrameExtractor.Entry]? = nil,
-        title: String = "whiz transcript"
+        title: String = "whiz transcript",
+        note: String = ""
     ) -> String {
         let legend = LabeledTranscript.speakersInOrder(merged).map {
             (label: $0, color: speakerColor($0))
@@ -81,6 +84,9 @@ enum SpeakersHTML {
         parts.append("</header>")
 
         parts.append("<main>")
+        if !note.isEmpty {
+            parts.append("<p class=\"note\">\(htmlEscape(note))</p>")
+        }
         var cueCount = 0
         var hasFrame = false
         for (index, entry) in merged.enumerated() {
@@ -181,6 +187,7 @@ enum SpeakersHTML {
       width: 16em; max-width: 40vw; background: var(--card) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%236e7781' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><circle cx='11' cy='11' r='7'/><line x1='21' y1='21' x2='16.65' y2='16.65'/></svg>") .55em .5em no-repeat; outline: none;
     }
     header.bar input.search:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(47,129,247,.18); }
+    .note { color: var(--muted); font-size: .85em; margin: .5em 0 1.2em; }
     .legend { display: flex; gap: .4em; flex-wrap: wrap; align-items: center; }
     .legend .chip { font-size: .72em; padding: .15em .55em; border-radius: 999px; color: #fff; font-weight: 600; white-space: nowrap; }
     main { max-width: 920px; margin: 0 auto; padding: 1em; }

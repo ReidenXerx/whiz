@@ -43,24 +43,6 @@ enum WhisperModel {
         "ggml-base-q5_0.bin",
     ]
 
-    /// The batch pipeline's own order — mirrors `models.py:PREFERENCE` exactly
-    /// (q5_0 turbo first) rather than the dictation list above. NS-15 in the
-    /// north-stars leaves "q5_0 batch vs unquantized turbo" open, so parity
-    /// with the Python pipeline is the only defensible default: diverging
-    /// here is a decision that belongs in `.bearing/northstars.md`, not in
-    /// this code. Pinned in `TranscriptionFlowTests`.
-    static let batchPreference = [
-        "ggml-large-v3-turbo-q5_0.bin",
-        "ggml-large-v3-turbo.bin",
-        "ggml-large-v3-turbo-q8_0.bin",
-        "ggml-large-v3-q5_0.bin",
-        "ggml-large-v3.bin",
-        "ggml-medium-q5_0.bin",
-        "ggml-medium.bin",
-        "ggml-small-q5_0.bin",
-        "ggml-small.bin",
-    ]
-
     /// Mirrors `DEFAULT_MODEL_SEARCH_DIRS` in `whiz/config.py`.
     static var searchDirectories: [URL] {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -75,10 +57,11 @@ enum WhisperModel {
         ]
     }
 
-    /// Resolve the model to load. `searchDirs` lets the tests point
-    /// resolution at a temp directory instead of mutating static state (which
-    /// would race under swift-testing's parallel runs); production callers
-    /// use the default.
+    /// Resolve the model to load — dictation and batch alike, per NS-15's
+    /// "unquantized everywhere" settlement, which retired the old split
+    /// order. `searchDirs` lets the tests point resolution at a temp directory
+    /// instead of mutating static state (which would race under
+    /// swift-testing's parallel runs); production callers use the default.
     ///
     /// An explicit `configured` value wins in this order:
     ///
@@ -93,6 +76,9 @@ enum WhisperModel {
     ///        - prefix      `large-v3`, picking the best on-disk variant by
     ///      preference order
     ///
+    /// With nothing configured, the single preference list is walked across
+    /// every search directory.
+    ///
     /// Before the alias stage existed, anything but a literal path or
     /// filename returned nil: `dictate_model = "turbo"` (a name the Python
     /// CLI happily resolves) failed with "no model found" here, and
@@ -103,12 +89,6 @@ enum WhisperModel {
     /// exact form and a user may copy one back into the config.
     static func resolve(configured: String, searchDirs: [URL] = searchDirectories) -> URL? {
         resolve(configured: configured, preference: preference, searchDirs: searchDirs)
-    }
-
-    /// Batch-pipeline variant of `resolve` — same lookup rules, the
-    /// `models.py:PREFERENCE` order instead of dictation's.
-    static func resolveBatch(configured: String, searchDirs: [URL] = searchDirectories) -> URL? {
-        resolve(configured: configured, preference: batchPreference, searchDirs: searchDirs)
     }
 
     private static func resolve(

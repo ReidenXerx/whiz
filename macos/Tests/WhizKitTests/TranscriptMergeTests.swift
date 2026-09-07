@@ -195,6 +195,23 @@ struct TranscriptMergeTests {
         #expect(html.contains("data:image/jpeg;base64,"))
     }
 
+    @Test("the provenance note renders as a muted line inside the transcript")
+    func htmlNoteRenders() {
+        let merged = [LabeledSegment(
+            segment: WhisperBatchTranscriber.Segment(start: 0, end: 1, text: "hello"),
+            speaker: "Speaker")]
+        let note = "No speaker diarization — every cue carries a generic 'Speaker' label."
+        let html = SpeakersHTML.format(merged, note: note)
+        #expect(html.contains("<p class=\"note\">" + note + "</p>"))
+        // The note lands inside <main>, before the first cue.
+        #expect(html.contains("<main>\n<p class=\"note\">"))
+        // No note, no line — diarized pages never carry it.
+        #expect(!SpeakersHTML.format(merged).contains("class=\"note\""))
+        // The note is escaped like any other text.
+        let escaped = SpeakersHTML.format(merged, note: "A & B: <test>")
+        #expect(escaped.contains("A &amp; B: &lt;test&gt;"))
+    }
+
     @Test("no frames means no lightbox — but the search script still ships")
     func htmlNoLightboxWithoutFrames() throws {
         let merged = [LabeledSegment(segment: seg(0.0, 1.0, "hi"), speaker: "Speaker A")]

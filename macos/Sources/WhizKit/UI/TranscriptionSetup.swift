@@ -97,6 +97,22 @@ final class TranscriptionFlowModel: ObservableObject {
     /// the trigger without a server; the default is the real fetch.
     var setupLoader: (TranscriptionSetupModel) async -> Void = { await $0.loadModels() }
 
+    /// True once the user has said "not now" to the diarization download.
+    /// Read from `auto_diarization_setup`, so declining in the app also
+    /// silences the CLI's prompt — one decision, both tools.
+    @Published private(set) var declinedDiarizationSetup: Bool = {
+        WhizConfig.load().autoDiarizationSetup == false
+    }()
+
+    /// Persist the decline. Deliberately writes `false` rather than leaving it
+    /// nil: nil means "not yet asked", and the user has now been asked.
+    func declineDiarizationSetup() {
+        declinedDiarizationSetup = true
+        var config = WhizConfig.load()
+        config.autoDiarizationSetup = false
+        try? config.save()
+    }
+
     init() {
         self.setup = TranscriptionSetupModel()
         // Note: the first start() runs restart(), which loads models for the
@@ -165,7 +181,9 @@ struct TranscriptionFlowView: View {
                     model: model.setup,
                     onBrowse: { browse(model.setup) },
                     onCancel: onCancel,
-                    onRun: { model.startRun() })
+                    onRun: { model.startRun() },
+                    declinedSetup: model.declinedDiarizationSetup,
+                    onDeclineSetup: { model.declineDiarizationSetup() })
             }
         }
         .frame(width: 460, height: 360)
@@ -179,6 +197,17 @@ struct TranscriptionSetupView: View {
     var onBrowse: () -> Void
     var onCancel: () -> Void
     var onRun: () -> Void
+    /// nil = never asked, true = declined. Mirrors the tri-state config key.
+    var declinedSetup: Bool = false
+    var onDeclineSetup: () -> Void = {}
+
+    @StateObject private var setup = DiarizationSetup()
+    @State private var refresh = 0
+
+    private var diarizationInstalled: Bool {
+        _ = refresh
+        return DiarizationSetup.isInstalled
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -204,15 +233,58 @@ struct TranscriptionSetupView: View {
     /// Auto-detect hides the number input entirely, per the flow's design:
     /// the count only means anything when the user explicitly knows it.
     private var speakersRow: some View {
-        HStack(spacing: 8) {
-            Toggle("Auto-detect speakers", isOn: $model.speakersAuto)
-            Spacer()
-            if !model.speakersAuto {
-                Stepper(
-                    "Speakers: \(model.speakerCount)",
-                    value: $model.speakerCount,
-                    in: 1...32)
-                    .fixedSize()
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Toggle("Auto-detect speakers", isOn: $model.speakersAuto)
+                Spacer()
+                if !model.speakersAuto {
+                    Stepper(
+                        "Speakers: \(model.speakerCount)",
+                        value: $model.speakerCount,
+                        in: 1...32)
+                        .fixedSize()
+                }
+            }
+            diarizationSetupPrompt
+                .onChange(of: setup.state) { state in
+                    if state == .finished { refresh += 1 }
+                }
+        }
+    }
+
+    /// Offered at the point it matters — the user is about to transcribe and
+    /// the models are missing, so the run would silently produce unlabelled
+    /// output. `cli.py:_auto_setup_consent` asks here too; the CLI can prompt on
+    /// a TTY, but a GUI has no equivalent, so without this the only symptom is a
+    /// transcript where everyone is "Speaker".
+    ///
+    /// Suppressed once the user has declined (`auto_diarization_setup = false`),
+    /// which Settings can undo.
+    @ViewBuilder
+    private var diarizationSetupPrompt: some View {
+        if !diarizationInstalled && declinedSetup == false {
+            switch setup.state {
+            case .downloading(let phase, let progress):
+                VStack(alignment: .leading, spacing: 4) {
+                    ProgressView(value: progress)
+                    HStack {
+                        Text(phase).font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Cancel") { setup.cancel() }.controlSize(.small)
+                    }
+                }
+            case .failed(let message):
+                Text(message).font(.caption).foregroundStyle(.red)
+            default:
+                HStack(spacing: 8) {
+                    Text("Speaker models not installed — this run would not label "
+                         + "speakers. One-time 44 MB download.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    Spacer()
+                    Button("Not Now") { onDeclineSetup() }.controlSize(.small)
+                    Button("Install") { setup.install() }.controlSize(.small)
+                }
             }
         }
     }
