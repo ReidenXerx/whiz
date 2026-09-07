@@ -578,8 +578,9 @@ def test_merge_zero_segments_falls_back_to_unlabeled_html(tmp_path, monkeypatch,
 
 
 def test_merge_returns_1_when_nothing_written(tmp_path, monkeypatch, capsys):
-    """No html/screenshots requested + no segments -> nothing written; a
-    silent rc=0 would read as success."""
+    """No html/screenshots requested + no segments -> nothing written, AND
+    nothing was kept either -> rc=1: a silent rc=0 would read as success.
+    (The kept-only case is now rc=0 — see the no-clobber test above.)"""
     audio = tmp_path / "meeting.m4a"
     audio.write_bytes(b"fake audio")
     (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
@@ -663,9 +664,10 @@ def test_transcribe_fallback_never_clobbers_existing_named_outputs(tmp_path, mon
 
 def test_merge_fallback_never_clobbers_existing_named_outputs(tmp_path, monkeypatch, capsys):
     """Same no-clobber contract on the merge path. The run writes nothing
-    (both artifacts were kept), so merge exits 1 per the approved
-    nothing-written-is-not-success semantics — with warnings explaining
-    the keeps."""
+    (both artifacts were kept) — which is a no-op SUCCESS, not a failure:
+    the named outputs were correctly preserved, and an rc=1 here would
+    false-alarm `whiz merge ... || alert` wrappers on identical re-runs
+    (review follow-up). Warnings explain the keeps."""
     audio = tmp_path / "meeting.m4a"
     audio.write_bytes(b"fake audio")
     (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
@@ -679,12 +681,95 @@ def test_merge_fallback_never_clobbers_existing_named_outputs(tmp_path, monkeypa
 
     rc = cli.cmd_merge(_merge_args(audio, outputs="html", speakers=1))
 
-    assert rc == 1  # this run wrote nothing: the named outputs were kept
+    assert rc == 0  # kept-only is a no-op success (review follow-up)
     assert named_txt.read_text(encoding="utf-8") == "Vadim (00:00:00): real named content\n"
     assert named_html.read_text(encoding="utf-8") == "\u003chtml\u003enamed run\u003c/html\u003e"
     err = capsys.readouterr().err
     assert "kept" in err and "meeting.m4a.speakers.txt" in err
     assert "kept" in err and "meeting.m4a.speakers.html" in err
+
+
+def test_transcribe_fallback_rerun_overwrites_existing_degraded_outputs(tmp_path, monkeypatch, capsys):
+    """Review follow-up (idempotence): the second identical degraded run
+    must NOT say "kept" for its own degraded output — that file has no
+    speaker names to destroy, and keeping it would leave a stale transcript
+    forever whenever --model/--language/the audio change. The degraded
+    file is cheaply detectable (provenance note in the HTML, all-generic
+    label lines in the txt), so the run rewrites both files with rc=0."""
+    audio = _setup_transcribe(monkeypatch, tmp_path, diarize_enabled=True)
+    monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
+
+    # Run 1: writes the degraded outputs.
+    rc1 = cli.cmd_transcribe(_transcribe_args(audio, outputs="srt,html", speakers=1))
+    assert rc1 == 0
+    degraded_html = tmp_path / "meeting.speakers.html"
+    degraded_txt = tmp_path / "meeting.speakers.txt"
+    assert degraded_html.exists() and degraded_txt.exists()
+    assert cli._GENERIC_LABEL_NOTE in degraded_html.read_text(encoding="utf-8")
+
+    # Run 2: identical command. A naive .exists() guard keeps the stale
+    # degraded files and (on merge) exits 1; the fix rewrites them.
+    rc2 = cli.cmd_transcribe(_transcribe_args(audio, outputs="srt,html", speakers=1))
+
+    assert rc2 == 0
+    html2 = degraded_html.read_text(encoding="utf-8")
+    txt2 = degraded_txt.read_text(encoding="utf-8")
+    assert "hello world" in html2  # fresh content, not the stale run-1 file
+    assert cli._GENERIC_LABEL_NOTE in html2
+    assert "Speaker (00:00:00):" in txt2
+    err = capsys.readouterr().err
+    assert "overwriting" in err  # says what it did to the degraded files
+    assert "kept" not in err      # ...and does NOT claim to keep them
+
+
+def test_merge_fallback_rerun_overwrites_existing_degraded_outputs(tmp_path, monkeypatch, capsys):
+    """Merge half of the idempotence fix: the second identical degraded
+    merge rewrites its own degraded outputs (rc=0, "overwriting" note),
+    instead of keeping them and exiting 1 on a no-op run."""
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    _stub_setup_unavailable(monkeypatch)
+    monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
+
+    rc1 = cli.cmd_merge(_merge_args(audio, outputs="html", speakers=1))
+    assert rc1 == 0
+    degraded_html = tmp_path / "meeting.m4a.speakers.html"
+    degraded_txt = tmp_path / "meeting.m4a.speakers.txt"
+    assert degraded_html.exists() and degraded_txt.exists()
+
+    rc2 = cli.cmd_merge(_merge_args(audio, outputs="html", speakers=1))
+
+    assert rc2 == 0
+    assert "hello world" in degraded_html.read_text(encoding="utf-8")
+    assert "Speaker (00:00:00):" in degraded_txt.read_text(encoding="utf-8")
+    err = capsys.readouterr().err
+    assert "overwriting" in err
+    assert "kept" not in err
+
+
+def test_transcribe_fallback_mixed_named_html_kept_degraded_txt_overwritten(tmp_path, monkeypatch, capsys):
+    """Per-file decision (review follow-up): an earlier diarized run left a
+    NAMED html but a degraded txt on disk; the fallback must keep the
+    named file and still refresh the degraded one — the guard protects
+    speaker names, not whiz's own fallback output."""
+    audio = _setup_transcribe(monkeypatch, tmp_path, diarize_enabled=True)
+    monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
+    named_html = tmp_path / "meeting.speakers.html"
+    degraded_txt = tmp_path / "meeting.speakers.txt"
+    named_html.write_text("<html>named run</html>", encoding="utf-8")
+    degraded_txt.write_text("Speaker (00:00:00): stale degraded content\n", encoding="utf-8")
+
+    rc = cli.cmd_transcribe(_transcribe_args(audio, outputs="srt,html", speakers=1))
+
+    assert rc == 0
+    assert named_html.read_text(encoding="utf-8") == "<html>named run</html>"  # kept
+    assert "stale degraded content" not in degraded_txt.read_text(encoding="utf-8")  # refreshed
+    assert "Speaker (00:00:00):" in degraded_txt.read_text(encoding="utf-8")
+    err = capsys.readouterr().err
+    assert "kept" in err and "meeting.speakers.html" in err
+    assert "overwriting" in err
 
 
 def test_transcribe_config_html_is_not_degraded(tmp_path, monkeypatch, capsys):

@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -721,6 +722,48 @@ def _write_labeled_outputs(
     return srt_out, txt_out, html_out, name_map
 
 
+# A degraded (unlabeled) .speakers.txt line: "Speaker (00:01:23): text" —
+# every cue carries the bare generic label. A diarized txt always has
+# letterized ("Speaker A (") or real-name ("Vadim (") labels on at least one
+# line, so all-lines-match cleanly separates the two.
+_DEGRADED_TXT_LINE = re.compile(r"^Speaker \(\d{2}:\d{2}:\d{2}\): ")
+
+
+def _looks_degraded_html(path: Path) -> bool:
+    """True if an existing .speakers.html is itself a degraded page.
+
+    Degraded pages embed the ``_GENERIC_LABEL_NOTE`` provenance line — the
+    note contains no HTML-escapable characters, so it appears verbatim in
+    the file (the idempotence tests write a real degraded page and re-run,
+    which guards this invariant against future note edits). A diarized
+    page never carries the note. Unreadable files read as named — when in
+    doubt, keep.
+    """
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    return _GENERIC_LABEL_NOTE in content
+
+
+def _looks_degraded_txt(path: Path) -> bool:
+    """True if an existing .speakers.txt carries only generic labels.
+
+    Every content line matches the bare ``Speaker (HH:MM:SS): `` form; a
+    diarized txt has letterized or real-name labels on at least one line.
+    An empty file has no speaker names to destroy and reads as degraded.
+    Unreadable files read as named — when in doubt, keep.
+    """
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    lines = [ln for ln in content.splitlines() if ln.strip()]
+    if not lines:
+        return True
+    return all(_DEGRADED_TXT_LINE.match(ln) for ln in lines)
+
+
 # Provenance line rendered inside degraded (unlabeled) HTML transcripts: a
 # generic-label page is otherwise indistinguishable from a one-speaker
 # diarized transcript when the file is opened later without the run's
@@ -735,7 +778,7 @@ def _write_html_transcript(
     title: str,
     note: str = "",
     transcript_txt: bool = False,
-) -> list[Path]:
+) -> tuple[list[Path], list[Path]]:
     """Write the unlabeled (degraded) HTML transcript shared by both fallbacks.
 
     Used when diarization produced no labels but HTML was explicitly
@@ -743,16 +786,20 @@ def _write_html_transcript(
     rendered as a muted provenance line in the page. When ``transcript_txt``
     is set (audio runs — no frames manifest exists there), also writes a
     generic-label ``.speakers.txt`` so ``whiz analyze``, which needs a frames
-    manifest or a ``.speakers.txt``, still finds a transcript. Returns the
-    paths written.
+    manifest or a ``.speakers.txt``, still finds a transcript.
 
-    Never overwrites an existing speaker output: an earlier diarized run
-    (possibly with named speakers) may have left a real ``.speakers.txt``/
-    ``.speakers.html`` next to the media, and this degraded rewrite would
-    collapse every cue to one generic ``Speaker`` (``format_dialogue_txt``
-    coalesces same-label lines), destroying the named data while a stale
-    ``.speakers.srt`` survived beside it. Each existing file is kept with a
-    warning; only files this run actually wrote are announced/returned.
+    Returns ``(written, kept)`` — the paths this run wrote and the existing
+    outputs it refused to touch. Per file: an existing output that carries
+    real speaker labels (an earlier diarized — possibly named — run's file)
+    is KEPT with a warning, because this degraded rewrite would collapse
+    every cue to one generic ``Speaker`` (``format_dialogue_txt`` coalesces
+    same-label lines), destroying the named data. An existing output that is
+    ITSELF degraded (provenance note in the HTML / all-generic label lines
+    in the txt) is overwritten: there are no speaker names in it to destroy,
+    and keeping it would break idempotence — a re-run with a different
+    --model/--language or audio must be able to refresh the degraded
+    transcript (the guard protects named data, not whiz's own degraded
+    output from an earlier fallback).
     """
     def _kept(existing: Path) -> None:
         ui.status(
@@ -762,26 +809,40 @@ def _write_html_transcript(
             detail=str(existing),
         )
 
+    def _write(out: Path, text: str, label: str) -> Path:
+        if out.exists():
+            ui.muted(
+                f"{out.name}: existing file is also degraded (no speaker "
+                "labels to protect) — overwriting."
+            )
+        out.write_text(text, encoding="utf-8")
+        ui.wrote(label, out)
+        return out
+
     written: list[Path] = []
+    kept: list[Path] = []
     html_out = Path(str(of_base) + ".speakers.html")
-    if html_out.exists():
+    if html_out.exists() and not _looks_degraded_html(html_out):
         _kept(html_out)
+        kept.append(html_out)
     else:
-        html_out.write_text(
+        written.append(_write(
+            html_out,
             MR.format_speakers_html(merged, frames_dir=frames_dir, title=title, note=note),
-            encoding="utf-8",
-        )
-        ui.wrote("Wrote HTML transcript", html_out)
-        written.append(html_out)
+            "Wrote HTML transcript",
+        ))
     if transcript_txt:
         txt_out = Path(str(of_base) + ".speakers.txt")
-        if txt_out.exists():
+        if txt_out.exists() and not _looks_degraded_txt(txt_out):
             _kept(txt_out)
+            kept.append(txt_out)
         else:
-            txt_out.write_text(MR.format_dialogue_txt(merged) + "\n", encoding="utf-8")
-            ui.wrote("Wrote dialogue TXT", txt_out)
-            written.append(txt_out)
-    return written
+            written.append(_write(
+                txt_out,
+                MR.format_dialogue_txt(merged) + "\n",
+                "Wrote dialogue TXT",
+            ))
+    return written, kept
 
 
 def _run_diarize_or_fallback(wav: Path, config: cfg.Config, args: argparse.Namespace) -> list[D.DiarSegment]:
@@ -1012,11 +1073,12 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                     written.append(str(result[1]))
             if explicit_html:
                 ui.phase("writing HTML transcript")
-                written.extend(str(p) for p in _write_html_transcript(
+                fallback_written, _fallback_kept = _write_html_transcript(
                     unlabeled, of_base, frames_dir, in_path.name,
                     note=_GENERIC_LABEL_NOTE,
                     transcript_txt=not want_frames,
-                ))
+                )
+                written.extend(str(p) for p in fallback_written)
 
     # Clean up the intermediate WAV unless asked to keep it.
     if wav != in_path and not keep_wav and wav.exists():
@@ -1597,6 +1659,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
             ui.status(f"Warning: voice-profile matching skipped: {e}", kind="warn")
 
     written: list[str] = []
+    kept_outputs: list[Path] = []
     if merged:
         ui.phase("merging speakers")
         srt_out, txt_out, html_out, name_map = _write_labeled_outputs(
@@ -1667,13 +1730,21 @@ def cmd_merge(args: argparse.Namespace) -> int:
     # outputs from an earlier diarized run are never overwritten.
     if explicit_html and not merged and whisper_segs:
         ui.phase("writing HTML transcript")
-        written.extend(str(p) for p in _write_html_transcript(
+        fallback_written, fallback_kept = _write_html_transcript(
             shot_list, of_base, frames_dir, in_path.name,
             note=_GENERIC_LABEL_NOTE,
             transcript_txt=not want_frames,
-        ))
+        )
+        written.extend(str(p) for p in fallback_written)
+        kept_outputs.extend(fallback_kept)
     ui.summary(written)
     if not written:
+        if kept_outputs:
+            # Everything this run would have written already existed and was
+            # correctly KEPT (named outputs from an earlier diarized run) — a
+            # no-op success, not a failure. rc=1 here would false-alarm
+            # `whiz merge ... || alert` wrappers on identical re-runs.
+            return 0
         # E.g. diarization produced no segments and no html/screenshots
         # fallback was requested: a silent rc=0 would read as success.
         return 1
