@@ -297,6 +297,9 @@ num_speakers = 0
 cluster_threshold = 0.9
 diarization_segmentation_model = ""
 diarization_embedding_model = ""
+# Remembered answer to the one-time diarization setup prompt
+# (unset = ask once on a TTY / auto-allow when scripted)
+auto_diarization_setup = true
 # --- AI analysis (Ollama / OpenAI-compatible) ---
 ai_base_url = "http://localhost:11434/v1"
 ai_model = ""
@@ -351,7 +354,7 @@ whiz can label who spoke when on mono recordings (meetings, screen recordings) v
 
 ### One-time setup
 
-Nothing to remember: the first run that needs diarization performs the setup itself. When diarization is about to run — auto-enabled for a video, or an explicit `--speakers` — and sherpa-onnx or its models are missing, whiz installs the package into the environment it's running in and downloads the diarization models (~90 MB, one time), with live progress in the terminal. `whiz transcribe recording.mov` on a fresh machine just works.
+Almost nothing to remember: the first run that needs diarization performs the setup itself — after asking. When diarization is about to run — auto-enabled for a video, or an explicit `--speakers` — and sherpa-onnx or its models are missing, whiz asks on an interactive terminal before touching anything: `Proceed? [y/N]`. Answering `y` installs `sherpa-onnx>=1.10` — the exact spec the `diarize` extra declares — into the environment whiz is running in, then downloads the diarization models (~90 MB, one time), with live progress in the terminal. `whiz transcribe recording.mov` on a fresh machine just works. The answer is remembered in the `auto_diarization_setup` config key, so the question is asked once, ever. Non-interactive sessions (piped stdin/stderr — scripts, cron, launchd) proceed without asking so a scripted fresh machine also just works; `whiz config set auto_diarization_setup=false` (or `=true`) answers permanently there too.
 
 Prefer to do it yourself (e.g. before an offline session)? The manual equivalent:
 
@@ -363,7 +366,7 @@ pipx inject whiz 'whiz[diarize]'
 whiz models download-diarization
 ```
 
-Opt out with `--no-auto-diarization-setup` on `transcribe`/`merge`: whiz then skips or degrades speaker labeling (see below) instead of installing anything. `whiz upgrade` re-injects the diarize extra automatically, so an auto-installed sherpa-onnx survives upgrades.
+Opt out with `--no-auto-diarization-setup` on `transcribe`/`merge`/`speakers match`: whiz then skips or degrades speaker labeling (see below) instead of installing anything — and the flag bypasses the prompt entirely. Answer permanently with `whiz config set auto_diarization_setup=false` (decline every future run) or `=true` (never ask, just install). `whiz upgrade` re-injects the diarize extra automatically, so an auto-installed sherpa-onnx survives upgrades.
 
 ### Usage
 
@@ -477,7 +480,8 @@ whiz transcribe --speakers 4 meeting2.mov
 # See what's stored
 whiz speakers list
 
-# Check how a recording matches before committing (dry run)
+# Check how a recording matches before committing (relabels/saves nothing —
+# may still run the one-time diarization setup; opt out with --no-auto-diarization-setup)
 whiz speakers match meeting2.mov --speakers 4
 
 # Remove a profile (e.g. someone left the team)

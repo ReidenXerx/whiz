@@ -51,6 +51,14 @@ OUTPUT_FLAGS = {
     "html": "__whiz_html__",  # sentinel; filtered out before whisper-cli
 }
 
+# The diarize extra's requirement string. The auto-setup installs the SAME
+# spec pyproject declares — a bare `pip install sherpa-onnx` could land a
+# version older than the project's declared minimum, making the auto path and
+# the documented manual path (`pipx inject whiz 'whiz[diarize]'`) install
+# different things. Keep in sync with [project.optional-dependencies] diarize
+# in pyproject.toml.
+_DIARIZE_REQUIREMENT = "sherpa-onnx>=1.10"
+
 
 def _find_whisper_cli(configured: str = "") -> str:
     if configured:
@@ -190,10 +198,10 @@ def _diarization_available(config: cfg.Config) -> bool:
 def _install_sherpa_onnx() -> bool:
     """Install the ``diarize`` extra (sherpa-onnx) into the running venv.
 
-    Runs ``{sys.executable} -m pip install sherpa-onnx`` streaming output live,
-    then refreshes Python's import caches so the very next ``import
-    sherpa_onnx`` in THIS process sees the fresh wheel without a restart
-    (pip puts it in site-packages; importlib.invalidate_caches + a
+    Runs ``{sys.executable} -m pip install {_DIARIZE_REQUIREMENT}`` streaming
+    output live, then refreshes Python's import caches so the very next
+    ``import sherpa_onnx`` in THIS process sees the fresh wheel without a
+    restart (pip puts it in site-packages; importlib.invalidate_caches + a
     find_spec probe is enough — sherpa_onnx is a normal top-level module,
     not a lazy stub). Returns True on success.
 
@@ -207,7 +215,7 @@ def _install_sherpa_onnx() -> bool:
     ui.status("Speakers: sherpa-onnx missing — installing the diarize extra now", kind="info")
     ui.muted("One-time setup (a ~90 MB wheel + model download on first run). Opt out with: --no-auto-diarization-setup")
     rc = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "sherpa-onnx"],
+        [sys.executable, "-m", "pip", "install", _DIARIZE_REQUIREMENT],
         check=False,
     ).returncode
     if rc != 0:
@@ -226,16 +234,82 @@ def _install_sherpa_onnx() -> bool:
     return True
 
 
+def _auto_setup_consent(config: cfg.Config) -> bool:
+    """Resolve user consent for the one-time diarization auto-setup.
+
+    Order of authority (review decision, 2026-09-07):
+
+    1. ``auto_diarization_setup`` in config (bool) answers permanently —
+       written by this prompt's y/N, or set by hand with
+       ``whiz config set auto_diarization_setup=false``.
+    2. Interactive terminal: ask ONCE (y/N, default No — writing into
+       site-packages deserves a prompt, unlike the VAD model's cache-file
+       download), then persist the answer so the question never recurs.
+       KeyboardInterrupt at the prompt is a plain decline that persists
+       nothing; EOF (piped stdin under a tty stderr) declines and persists.
+    3. Non-interactive (piped stdin or stderr: scripts, cron, launchd):
+       allow — prompt-out would break scripted fresh machines; the
+       ``--no-auto-diarization-setup`` flag remains the per-run opt-out.
+    """
+    answered = getattr(config, "auto_diarization_setup", None)
+    if answered is not None:
+        return answered
+    if not (sys.stdin.isatty() and sys.stderr.isatty()):
+        return True
+    ui.status(
+        "Speakers: diarization needs a one-time setup — install "
+        f"'{_DIARIZE_REQUIREMENT}' into this Python environment and "
+        "download the diarization models (~90 MB).",
+        kind="info",
+    )
+    # input() writes its prompt to stdout without a trailing newline — the
+    # answer lands on the same line. Matches _prompt_speaker_names' idiom.
+    try:
+        answer = input("Proceed? [y/N] ").strip().lower()
+    except KeyboardInterrupt:
+        print(file=sys.stderr)
+        return False
+    except EOFError:
+        answer = ""
+    allowed = answer in {"y", "yes"}
+    if not allowed:
+        ui.status(
+            "Skipping the one-time diarization setup (declined). Install "
+            "manually with: pipx inject whiz 'whiz[diarize]' && whiz models "
+            "download-diarization — or allow it later with: whiz config set "
+            "auto_diarization_setup=true",
+            kind="hint",
+        )
+    # Remember the answer either way — the question is once-ever. A failed
+    # save must not turn a user's choice into a crash.
+    try:
+        config.auto_diarization_setup = allowed
+        path = cfg.save(config)
+        ui.muted(f"Remembered this choice (auto_diarization_setup={str(allowed).lower()}) in {path}")
+    except OSError as e:
+        ui.status(f"Warning: could not persist the choice to config: {e}", kind="warn")
+    return allowed
+
+
 def _ensure_diarization_ready(config: cfg.Config, *, dry_run: bool = False, setup_allowed: bool = True) -> bool:
     """Make diarization possible before a run: install package + download models.
 
     Proactive-first policy (user decision, 2026-09-05): when diarization is
     about to run — auto-enabled for video or explicitly requested — and the
     one-time setup is missing, whiz performs it on the spot instead of
-    degrading: ``_install_sherpa_onnx`` (pip install into the running venv),
-    then ``D.download_diarization_models`` (~90 MB one-time download). The
-    degraded fallbacks stay as the safety net for when setup fails (offline,
-    disk full, ...) or is opted out via ``--no-auto-diarization-setup``.
+    degrading: ``_install_sherpa_onnx`` (pip install of the diarize extra's
+    declared spec into the running venv), then ``D.download_diarization_models``
+    (~90 MB one-time download). The degraded fallbacks stay as the safety net
+    for when setup fails (offline, disk full, ...), is opted out via
+    ``--no-auto-diarization-setup``, or is declined at the consent prompt.
+
+    Review decision (2026-09-07): unlike the VAD model download (a cache
+    file), this writes into site-packages, so an interactive terminal is
+    ASKED first (y/N, once — the answer persists in the
+    ``auto_diarization_setup`` config key). Non-interactive sessions
+    (piped stdin/stderr: scripts, cron, launchd) proceed automatically so a
+    fresh machine still just works; ``auto_diarization_setup`` answers
+    permanently either way.
 
     Returns True when diarization is ready (either it already was, or setup
     succeeded). DRY-RUN reports what would be installed/downloaded and never
@@ -245,10 +319,13 @@ def _ensure_diarization_ready(config: cfg.Config, *, dry_run: bool = False, setu
     if _diarization_available(config):
         return True
     if dry_run:
-        ui.muted("DRY-RUN: diarization setup would run — pip install sherpa-onnx + "
-                 "download diarization models (~90 MB one-time).")
+        ui.muted("DRY-RUN: diarization setup would run — pip install "
+                 f"'{_DIARIZE_REQUIREMENT}' + download diarization models "
+                 "(~90 MB one-time).")
         return False
     if not setup_allowed:
+        return False
+    if not _auto_setup_consent(config):
         return False
     # Package first: the model finders are filesystem-only, but installing
     # models without the package that runs them would leave half a setup.
@@ -328,7 +405,21 @@ def _discarded_naming_detail(args: argparse.Namespace) -> str | None:
 
 
 def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list[str]:
-    """Assemble the whisper-cli argv."""
+    """Assemble the whisper-cli argv (name kept for history).
+
+    NOTE: this helper has outgrown its docstring's original scope — beyond
+    argv assembly it performs run preparation with side effects:
+    video auto-flag resolution, the proactive diarization one-time setup
+    (``_ensure_diarization_ready`` — with consent this can pip-install the
+    diarize extra and download models), VAD model resolution with its own
+    auto-download, and output/flag assembly. The name stays for history
+    (and the many tests that stub it).
+
+    TEST HAZARD (review): calling the REAL helper with diarization enabled
+    and no stub can run a REAL ``pip install`` on the test machine. Stub
+    ``cli._ensure_diarization_ready`` (see ``_setup_transcribe``) or pass
+    ``no_auto_diarization_setup=True`` in every test that reaches it.
+    """
     # Resolve input file first so video auto-enable can inform diarize_enabled.
     in_path = Path(args.file).expanduser()
     if not in_path.exists():
@@ -2042,7 +2133,10 @@ def cmd_speakers_match(args: argparse.Namespace) -> int:
 
     Runs diarization on the given file and prints the cosine-similarity scores
     of each cluster against every stored profile, plus the auto-assignment
-    decision at the configured threshold. Does not relabel or save anything.
+    decision at the configured threshold. "Dry run" means nothing is
+    relabeled or saved — it does NOT mean the machine stays untouched: this
+    command needs diarization by definition, so the one-time setup may run
+    first (consent prompt on a TTY; opt out with --no-auto-diarization-setup).
     """
     config = cfg.load()
     in_path = Path(args.file).expanduser()
@@ -2118,7 +2212,11 @@ def cmd_config_show(args: argparse.Namespace) -> int:
         if isinstance(v, list):
             print(f"{k} = {v}")
         elif isinstance(v, str) and v == "":
-            print(f"{k} = \"\"")
+            print(f'{k} = ""')
+        elif v is None:
+            # Tri-state fields (auto_diarization_setup) print as unset —
+            # a raw {v!r} would show the Python None repr.
+            print(f"{k} = <unset>")
         else:
             print(f"{k} = {v!r}")
     print()
@@ -2141,7 +2239,11 @@ def _coerce(value: str, field_type: type):
     # With `from __future__ import annotations`, dataclass field types are
     # strings (e.g. "bool") not the type objects. Normalize to a string name.
     ft = field_type if isinstance(field_type, str) else getattr(field_type, "__name__", str(field_type))
-    if ft == "bool":
+    if ft in ("bool", "bool | None", "Optional[bool]"):
+        # "bool | None" arrives for tri-state fields (auto_diarization_setup):
+        # the string must NOT fall through to the raw-string branch below —
+        # `whiz config set auto_diarization_setup=false` would otherwise
+        # store the STRING "false", which is truthy on every later load.
         return value.lower() in {"1", "true", "yes", "on"}
     if ft == "int":
         return int(value)
@@ -2153,8 +2255,8 @@ def _coerce(value: str, field_type: type):
 
 
 # Enum-like config fields with a fixed set of allowed values. Shared by both
-# `whiz config set` and `whiz dictate set` so the two entry points enforce the
-# same constraints — a typo via either path can't silently degrade.
+# `whiz config set` and `whiz dictate set` so the two entry points enforce
+# the same constraints — a typo via either path can't silently degrade.
 _CONFIG_ENUM_VALUES: dict[str, set[str]] = {
     "dictate_trigger": {"toggle", "ptt"},
 }
@@ -2443,10 +2545,11 @@ def build_parser() -> argparse.ArgumentParser:
     sf = spsub.add_parser("forget", aliases=["rm"], help="Delete a stored speaker voice profile by name")
     sf.add_argument("name", help="Speaker name to forget")
     sf.set_defaults(func=cmd_speakers_forget)
-    sm = spsub.add_parser("match", help="Show how a recording's clusters match stored profiles (dry run)")
+    sm = spsub.add_parser("match", help="Show how a recording's clusters match stored profiles (relabels/saves nothing — may still run the one-time diarization setup if missing)")
     sm.add_argument("file", help="Input audio/video file")
     sm.add_argument("--speakers", type=int, default=None, nargs="?", const=0, help="Known speaker count; omit = auto-detect")
     sm.add_argument("--cluster-threshold", type=float, default=None, help="Clustering threshold when auto-detecting (default 0.9)")
+    sm.add_argument("--no-auto-diarization-setup", dest="no_auto_diarization_setup", action="store_true", help="Don't auto-install sherpa-onnx / auto-download diarization models when diarization is enabled and missing (one-time setup, ~90 MB)")
     sm.set_defaults(func=cmd_speakers_match)
 
     # dictate

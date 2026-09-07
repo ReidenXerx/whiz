@@ -53,6 +53,11 @@ class Config:
     # Explicit paths to diarization models (empty => auto-discover).
     diarization_segmentation_model: str = ""
     diarization_embedding_model: str = ""
+    # Remembered answer to the one-time diarization auto-setup prompt.
+    # None (unset) => ask on a TTY / proceed automatically when scripted;
+    # true/false answers permanently for both. Written by the prompt and
+    # settable by hand: whiz config set auto_diarization_setup=false
+    auto_diarization_setup: bool | None = None
     # --- AI analysis (Ollama / OpenAI-compatible) ---
     # Base URL of the chat completions endpoint (without /chat/completions).
     ai_base_url: str = "http://localhost:11434/v1"
@@ -148,6 +153,11 @@ def _emit_toml(data: dict[str, Any]) -> str:
     """Minimal TOML writer for our flat config schema."""
     lines: list[str] = []
     for key, value in data.items():
+        if value is None:
+            # Tri-state fields (e.g. auto_diarization_setup) are "unset" by
+            # None — an emitted `= None` would be invalid TOML and break the
+            # NEXT load() for every command, not just the one that saved.
+            continue
         if isinstance(value, bool):
             lines.append(f"{key} = {str(value).lower()}")
         elif isinstance(value, int):
@@ -208,7 +218,11 @@ def save(cfg: Config) -> Path:
             # An unreadable file should not block saving; fall back to a
             # clean write rather than refusing to persist the change.
             merged = {}
-    merged.update(cfg.to_dict())
+    # Skip fields the in-memory config never answered (None): they must not
+    # clobber a value a previous session persisted (a fresh Config() has
+    # auto_diarization_setup=None even when the file says true).
+    updates = {k: v for k, v in cfg.to_dict().items() if v is not None}
+    merged.update(updates)
 
     CONFIG_PATH.write_text(_emit_toml(merged), encoding="utf-8")
     return CONFIG_PATH

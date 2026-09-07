@@ -7,6 +7,7 @@ Run with: pytest tests/test_cli.py
 
 from __future__ import annotations
 
+import builtins
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -866,9 +867,11 @@ def test_merge_sherpa_missing_does_not_double_warn(tmp_path, monkeypatch, capsys
 
 
 def test_no_auto_diarization_setup_flags_registered():
-    """--no-auto-diarization-setup exists on transcribe AND merge (mirrors
-    --no-auto-vad-download) and defaults to False: setup-on-first-use is
-    on by default."""
+    """--no-auto-diarization-setup exists on transcribe, merge AND speakers
+    match (review round 3: cmd_speakers_match read the flag via getattr but
+    the subparser never registered it, so the default always won and setup
+    was unconditionally allowed on a command whose help calls itself a dry
+    run). Defaults to False everywhere: setup-on-first-use is on by default."""
     parser = cli.build_parser()
     args = parser.parse_args(["transcribe", "x.wav", "--no-auto-diarization-setup"])
     assert args.no_auto_diarization_setup is True
@@ -877,6 +880,10 @@ def test_no_auto_diarization_setup_flags_registered():
     args = parser.parse_args(["merge", "x.wav", "--no-auto-diarization-setup"])
     assert args.no_auto_diarization_setup is True
     args = parser.parse_args(["merge", "x.wav"])
+    assert args.no_auto_diarization_setup is False
+    args = parser.parse_args(["speakers", "match", "x.wav", "--no-auto-diarization-setup"])
+    assert args.no_auto_diarization_setup is True
+    args = parser.parse_args(["speakers", "match", "x.wav"])
     assert args.no_auto_diarization_setup is False
 
 
@@ -911,6 +918,9 @@ def test_ensure_diarization_ready_happy_path_installs_then_downloads(monkeypatch
     monkeypatch.setattr(cli.D, "download_diarization_models", lambda: events.append("download"))
     monkeypatch.setattr(cli.D, "find_segmentation_model", lambda config: None)
     monkeypatch.setattr(cli.D, "find_embedding_model", lambda config: None)
+    # Consent auto-allows on non-tty stdin; pin it so `pytest -s` (a real
+    # terminal stdin) can't turn this wiring test into a live y/N prompt.
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
 
     assert cli._ensure_diarization_ready(cli.cfg.Config()) is True
     assert events == ["install", "download"]
@@ -929,6 +939,9 @@ def test_ensure_diarization_ready_opt_out_skips_setup(monkeypatch, capsys):
 
     monkeypatch.setattr(cli, "_install_sherpa_onnx", _boom)
     monkeypatch.setattr(cli.D, "download_diarization_models", _boom)
+    # --no-auto-diarization-setup short-circuits BEFORE any prompt (consent
+    # ordering): an opted-out run must never sit at a y/N question.
+    monkeypatch.setattr(builtins, "input", _boom_input)
 
     assert cli._ensure_diarization_ready(cli.cfg.Config(), setup_allowed=False) is False
     assert capsys.readouterr().err == ""
@@ -944,6 +957,9 @@ def test_ensure_diarization_ready_dry_run_never_sets_up(monkeypatch, capsys):
 
     monkeypatch.setattr(cli, "_install_sherpa_onnx", _boom)
     monkeypatch.setattr(cli.D, "download_diarization_models", _boom)
+    # dry_run reports and returns BEFORE consent too: a dry-run must never
+    # sit at a prompt (or pip-install) anything.
+    monkeypatch.setattr(builtins, "input", _boom_input)
 
     assert cli._ensure_diarization_ready(cli.cfg.Config(), dry_run=True) is False
     err = capsys.readouterr().err
@@ -966,7 +982,11 @@ def test_install_sherpa_onnx_targets_running_venv_and_reports_progress(monkeypat
     monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
 
     assert cli._install_sherpa_onnx() is True
-    assert seen["cmd"] == [sys.executable, "-m", "pip", "install", "sherpa-onnx"]
+    # The spec the diarize extra declares, not a bare package name (review
+    # round 3): a bare `pip install sherpa-onnx` could land an older version
+    # than the documented manual path (`pipx inject whiz 'whiz[diarize]'`).
+    assert seen["cmd"] == [sys.executable, "-m", "pip", "install", cli._DIARIZE_REQUIREMENT]
+    assert ">=" in cli._DIARIZE_REQUIREMENT
     err = capsys.readouterr().err
     assert "installing the diarize extra" in err    # status line up front
     assert "--no-auto-diarization-setup" in err      # the opt-out is surfaced
@@ -985,6 +1005,9 @@ def test_ensure_diarization_ready_install_failure_returns_false(monkeypatch, cap
         raise AssertionError("models must not download when the install failed")
 
     monkeypatch.setattr(cli.D, "download_diarization_models", _boom)
+    # Pin non-tty stdin: consent must auto-allow (plain pytest already is
+    # non-tty; `-s` on a terminal would otherwise hit the live prompt).
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
 
     assert cli._ensure_diarization_ready(cli.cfg.Config()) is False
     err = capsys.readouterr().err
@@ -1008,6 +1031,10 @@ def _fresh_machine_stubs(monkeypatch, events):
     monkeypatch.setattr(cli.aud, "find_ffmpeg", lambda configured="": "ffmpeg")
     monkeypatch.setattr(cli.aud, "extract_audio", lambda src, ffmpeg, dest_dir=None, dry_run=False: src.with_suffix(".wav"))
     monkeypatch.setattr(cli, "_run_whisper_streaming", lambda cmd: SimpleNamespace(returncode=0))
+    # The real _ensure_diarization_ready now consults _auto_setup_consent,
+    # which auto-allows on non-tty stdin. Pin it so the wiring tests behave
+    # identically under `pytest -s` (real terminal stdin) as under capture.
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
 
 
 def test_transcribe_auto_diarization_setup_success_writes_speakers_html(tmp_path, monkeypatch, capsys):
@@ -1157,3 +1184,253 @@ def test_speakers_match_runs_after_setup_success(tmp_path, monkeypatch, capsys):
 
     assert rc == 0
     assert "No stored voice profiles" in capsys.readouterr().err
+
+
+# ---------- auto-setup consent (review round 3, 2026-09-07) ----------
+#
+# The auto-setup writes into site-packages (unlike the VAD model's cache-file
+# download), so an interactive terminal is ASKED first (y/N) and the answer
+# persists in auto_diarization_setup. Non-interactive sessions auto-allow so
+# a scripted fresh machine still just works; --no-auto-diarization-setup
+# short-circuits before any prompt.
+
+
+class _FakeTtyErr:
+    """A stderr stand-in that claims to be a terminal.
+
+    _auto_setup_consent prompts only when BOTH stdin and stderr are ttys,
+    and capsys's stderr is always non-tty, so the TTY branch is unreachable
+    in tests without faking the stream. Output is collected (not asserted on
+    unless a message matters) so rich can render into it freely.
+    """
+
+    encoding = "utf-8"
+
+    def __init__(self):
+        self.buf: list[str] = []
+
+    def isatty(self) -> bool:
+        return True
+
+    def write(self, s: str) -> int:
+        self.buf.append(s)
+        return len(s)
+
+    def flush(self) -> None:
+        pass
+
+
+def _pin_ttys(monkeypatch, *, stdin_tty: bool, stderr: _FakeTtyErr | None = None):
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: stdin_tty))
+    if stderr is not None:
+        monkeypatch.setattr(sys, "stderr", stderr)
+
+
+def _boom_input(prompt=""):
+    raise AssertionError("the consent prompt must not run here")
+
+
+def test_consent_answered_true_allows_without_prompting(monkeypatch):
+    """auto_diarization_setup=true in config answers permanently — a TTY or
+    not, no prompt, setup proceeds."""
+    monkeypatch.setattr(builtins, "input", _boom_input)
+    config = cli.cfg.Config()
+    config.auto_diarization_setup = True
+    assert cli._auto_setup_consent(config) is True
+
+
+def test_consent_answered_false_declines_without_prompting(monkeypatch):
+    """auto_diarization_setup=false answers permanently the other way."""
+    monkeypatch.setattr(builtins, "input", _boom_input)
+    config = cli.cfg.Config()
+    config.auto_diarization_setup = False
+    assert cli._auto_setup_consent(config) is False
+
+
+def test_consent_tty_yes_persists_true(tmp_path, monkeypatch):
+    """Interactive y: allow, and remember the answer so the question is
+    once-ever (config object AND on-disk file)."""
+    monkeypatch.setattr(cli.cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cli.cfg, "CONFIG_PATH", tmp_path / "config.toml")
+    _pin_ttys(monkeypatch, stdin_tty=True, stderr=_FakeTtyErr())
+    monkeypatch.setattr(builtins, "input", lambda prompt="": "y")
+    config = cli.cfg.Config()
+
+    assert cli._auto_setup_consent(config) is True
+    assert config.auto_diarization_setup is True
+    saved = (tmp_path / "config.toml").read_text(encoding="utf-8")
+    assert "auto_diarization_setup = true" in saved
+
+
+def test_consent_tty_no_persists_false_with_way_back_hint(tmp_path, monkeypatch):
+    """A decline must say how to change the answer later — a one-shot 'no'
+    can't strand the user with no path back to auto-setup."""
+    monkeypatch.setattr(cli.cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cli.cfg, "CONFIG_PATH", tmp_path / "config.toml")
+    err = _FakeTtyErr()
+    _pin_ttys(monkeypatch, stdin_tty=True, stderr=err)
+    monkeypatch.setattr(builtins, "input", lambda prompt="": "n")
+    config = cli.cfg.Config()
+
+    assert cli._auto_setup_consent(config) is False
+    saved = (tmp_path / "config.toml").read_text(encoding="utf-8")
+    assert "auto_diarization_setup = false" in saved
+    # Wrap-insensitive: rich wraps the long hint lines at console width.
+    flat = " ".join("".join(err.buf).split())
+    assert "pipx inject whiz 'whiz[diarize]'" in flat  # the manual path
+    assert "whiz config set auto_diarization_setup=true" in flat  # the way back
+
+
+def test_consent_tty_eof_declines_and_persists_false(tmp_path, monkeypatch):
+    """Piped stdin under a tty stderr (whiz t rec.mov < /dev/null): EOF is a
+    decline, not a crash — and it persists like any other answer."""
+    monkeypatch.setattr(cli.cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cli.cfg, "CONFIG_PATH", tmp_path / "config.toml")
+    _pin_ttys(monkeypatch, stdin_tty=True, stderr=_FakeTtyErr())
+
+    def _eof(prompt=""):
+        raise EOFError
+
+    monkeypatch.setattr(builtins, "input", _eof)
+    config = cli.cfg.Config()
+
+    assert cli._auto_setup_consent(config) is False
+    saved = (tmp_path / "config.toml").read_text(encoding="utf-8")
+    assert "auto_diarization_setup = false" in saved
+
+
+def test_consent_tty_ctrl_c_declines_without_persisting(tmp_path, monkeypatch):
+    """^C at the prompt is a plain decline: the question stays UNANSWERED so
+    a reflexive interrupt doesn't permanently disable auto-setup."""
+    monkeypatch.setattr(cli.cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cli.cfg, "CONFIG_PATH", tmp_path / "config.toml")
+    _pin_ttys(monkeypatch, stdin_tty=True, stderr=_FakeTtyErr())
+
+    def _interrupt(prompt=""):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(builtins, "input", _interrupt)
+    config = cli.cfg.Config()
+
+    assert cli._auto_setup_consent(config) is False
+    assert config.auto_diarization_setup is None
+    assert not (tmp_path / "config.toml").exists()
+
+
+def test_consent_non_tty_allows_without_persisting(tmp_path, monkeypatch):
+    """Scripts/cron (piped stdin): proceed automatically — a prompt would
+    hang a headless run — but persist NOTHING (nobody answered)."""
+    monkeypatch.setattr(cli.cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cli.cfg, "CONFIG_PATH", tmp_path / "config.toml")
+    _pin_ttys(monkeypatch, stdin_tty=False)  # capsys stderr is non-tty too
+    monkeypatch.setattr(builtins, "input", _boom_input)
+    config = cli.cfg.Config()
+
+    assert cli._auto_setup_consent(config) is True
+    assert config.auto_diarization_setup is None
+    assert not (tmp_path / "config.toml").exists()
+
+
+def test_consent_persist_failure_does_not_crash(tmp_path, monkeypatch):
+    """An unwritable config must not turn a user's y/N into a crash — the
+    answer still governs this run."""
+    monkeypatch.setattr(cli.cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cli.cfg, "CONFIG_PATH", tmp_path / "config.toml")
+    monkeypatch.setattr(cli.cfg, "save", lambda _config: (_ for _ in ()).throw(OSError("disk full")))
+    _pin_ttys(monkeypatch, stdin_tty=True, stderr=_FakeTtyErr())
+    monkeypatch.setattr(builtins, "input", lambda prompt="": "y")
+    config = cli.cfg.Config()
+
+    assert cli._auto_setup_consent(config) is True
+
+
+def test_ensure_diarization_ready_tty_consent_yes_runs_setup(tmp_path, monkeypatch):
+    """End-to-end: fresh machine on a real terminal — the user answers y at
+    the prompt and the FULL setup runs (install, download), with the answer
+    remembered for every future run."""
+    monkeypatch.setattr(cli.cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cli.cfg, "CONFIG_PATH", tmp_path / "config.toml")
+    events: list[str] = []
+    monkeypatch.setattr(cli, "_diarization_available", lambda config: "download" in events)
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", None)
+    monkeypatch.setattr(cli, "_install_sherpa_onnx", lambda: events.append("install") or True)
+    monkeypatch.setattr(cli.D, "download_diarization_models", lambda: events.append("download"))
+    monkeypatch.setattr(cli.D, "find_segmentation_model", lambda config: None)
+    monkeypatch.setattr(cli.D, "find_embedding_model", lambda config: None)
+    _pin_ttys(monkeypatch, stdin_tty=True, stderr=_FakeTtyErr())
+    monkeypatch.setattr(builtins, "input", lambda prompt="": "y")
+    config = cli.cfg.Config()
+
+    assert cli._ensure_diarization_ready(config) is True
+    assert events == ["install", "download"]
+    saved = (tmp_path / "config.toml").read_text(encoding="utf-8")
+    assert "auto_diarization_setup = true" in saved
+
+
+def test_ensure_diarization_ready_tty_consent_no_skips_setup(tmp_path, monkeypatch):
+    """End-to-end: a decline at the prompt installs/downloads NOTHING and
+    lands the caller on its existing degraded/skip path (False return)."""
+    monkeypatch.setattr(cli.cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cli.cfg, "CONFIG_PATH", tmp_path / "config.toml")
+
+    def _boom(*_a, **_k):
+        raise AssertionError("declined consent must not install or download")
+
+    monkeypatch.setattr(cli, "_diarization_available", lambda config: False)
+    monkeypatch.setattr(cli, "_install_sherpa_onnx", _boom)
+    monkeypatch.setattr(cli.D, "download_diarization_models", _boom)
+    monkeypatch.setattr(cli.D, "find_segmentation_model", lambda config: None)
+    monkeypatch.setattr(cli.D, "find_embedding_model", lambda config: None)
+    _pin_ttys(monkeypatch, stdin_tty=True, stderr=_FakeTtyErr())
+    monkeypatch.setattr(builtins, "input", lambda prompt="": "n")
+    config = cli.cfg.Config()
+
+    assert cli._ensure_diarization_ready(config) is False
+    assert config.auto_diarization_setup is False  # declined and remembered
+    saved = (tmp_path / "config.toml").read_text(encoding="utf-8")
+    assert "auto_diarization_setup = false" in saved
+
+
+def test_config_set_auto_diarization_setup_roundtrip(tmp_path, monkeypatch):
+    """`whiz config set auto_diarization_setup=false` must store a real bool:
+    the tri-state 'bool | None' type string once missed _coerce's bool branch,
+    which would persist the STRING 'false' — truthy on every later load."""
+    monkeypatch.setattr(cli.cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cli.cfg, "CONFIG_PATH", tmp_path / "config.toml")
+    args = SimpleNamespace(assignment="auto_diarization_setup=false")
+
+    assert cli.cmd_config_set(args) == 0
+    assert cli.cfg.load().auto_diarization_setup is False
+
+    args = SimpleNamespace(assignment="auto_diarization_setup=true")
+    assert cli.cmd_config_set(args) == 0
+    assert cli.cfg.load().auto_diarization_setup is True
+
+
+def test_config_save_tri_state_none_semantics(tmp_path, monkeypatch):
+    """Unset (None) is omitted from the file — an emitted `= None` would be
+    invalid TOML that breaks the NEXT load for every command — and a fresh
+    never-answered session must not clobber a previously persisted answer."""
+    monkeypatch.setattr(cli.cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cli.cfg, "CONFIG_PATH", tmp_path / "config.toml")
+
+    cli.cfg.save(cli.cfg.Config())  # a session that never answered
+    assert "auto_diarization_setup" not in (tmp_path / "config.toml").read_text(encoding="utf-8")
+
+    config = cli.cfg.Config()
+    config.auto_diarization_setup = True
+    cli.cfg.save(config)
+    assert "auto_diarization_setup = true" in (tmp_path / "config.toml").read_text(encoding="utf-8")
+
+    cli.cfg.save(cli.cfg.Config())  # a later fresh session: None must not win
+    assert cli.cfg.load().auto_diarization_setup is True
+
+
+def test_config_show_renders_tri_state_unset_cleanly(tmp_path, monkeypatch, capsys):
+    """`whiz config show` renders the unset tri-state as <unset>, not the
+    Python None repr."""
+    monkeypatch.setattr(cli.cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cli.cfg, "CONFIG_PATH", tmp_path / "config.toml")
+
+    assert cli.cmd_config_show(SimpleNamespace()) == 0
+    assert "auto_diarization_setup = <unset>" in capsys.readouterr().out
