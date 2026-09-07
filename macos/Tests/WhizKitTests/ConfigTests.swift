@@ -206,3 +206,54 @@ struct HotkeySpecTests {
         #expect(HotkeySpec.parse("<cmd>+<nonsense>") == nil)
     }
 }
+
+/// `auto_diarization_setup` is tri-state and shared with the Python CLI, so
+/// "never asked" and "declined" must stay distinguishable across a round trip.
+@Suite("Diarization setup consent")
+struct DiarizationConsentTests {
+
+    @Test("absent means not-yet-asked, not declined")
+    func absentIsNil() {
+        let config = WhizConfig.from(FlatTOML.parse("dictate_language = \"ru\""))
+        #expect(config.autoDiarizationSetup == nil)
+    }
+
+    @Test("an explicit decision round-trips")
+    func decisionRoundTrips() {
+        for decision in [true, false] {
+            var values = FlatTOML.parse("ai_model = \"q\"")
+            var config = WhizConfig.from(values)
+            config.autoDiarizationSetup = decision
+            config.merged(into: &values)
+            let reloaded = WhizConfig.from(FlatTOML.parse(FlatTOML.emit(values)))
+            #expect(reloaded.autoDiarizationSetup == decision)
+        }
+    }
+
+    @Test("not-yet-asked writes no key at all")
+    func nilWritesNothing() {
+        // Emitting `false` for nil would opt the user out on the Python side
+        // without them ever having been asked.
+        var values = FlatTOML.parse("ai_model = \"q\"")
+        var config = WhizConfig.from(values)
+        config.autoDiarizationSetup = nil
+        config.merged(into: &values)
+        #expect(values["auto_diarization_setup"] == nil)
+        #expect(!FlatTOML.emit(values).contains("auto_diarization_setup"))
+    }
+
+    @Test("declining does not disturb keys the Python CLI owns")
+    func declineKeepsForeignKeys() {
+        var values = FlatTOML.parse("""
+        ai_model = "qwen3.5:9b"
+        ocr_engine = "apple"
+        cluster_threshold = 0.9
+        """)
+        var config = WhizConfig.from(values)
+        config.autoDiarizationSetup = false
+        config.merged(into: &values)
+        #expect(values["ai_model"] == .string("qwen3.5:9b"))
+        #expect(values["ocr_engine"] == .string("apple"))
+        #expect(values["cluster_threshold"] == .double(0.9))
+    }
+}

@@ -94,6 +94,8 @@ struct SettingsView: View {
 
             ModelSectionView(controller: controller)
 
+            DiarizationSetupSection(controller: controller)
+
             Section {
                 Text("Prompt")
                 PromptEditor(text: binding(\.prompt))

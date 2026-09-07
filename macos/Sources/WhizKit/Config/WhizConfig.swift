@@ -35,6 +35,15 @@ struct WhizConfig: Equatable {
     var minEnergy: Double = 0.008
     var minUtterance: Double = 0.25
 
+    /// `config.py:auto_diarization_setup` — deliberately tri-state.
+    ///
+    /// `nil` means "ask", which is the default and is NOT the same as `false`
+    /// ("never ask again"). Flattening it to `Bool` would turn a user who has
+    /// simply never been asked into one who has declined, and the distinction
+    /// has to survive a round trip through the shared config file because the
+    /// Python CLI reads the same key.
+    var autoDiarizationSetup: Bool?
+
     /// Mapping from struct property to TOML key. Single source of truth for
     /// both load and save so the two can't drift.
     private static let keys = (
@@ -51,7 +60,8 @@ struct WhizConfig: Equatable {
         menuBar: "dictate_menu_bar",
         frameEnergy: "dictate_frame_energy",
         minEnergy: "dictate_min_energy",
-        minUtterance: "dictate_min_utterance"
+        minUtterance: "dictate_min_utterance",
+        autoDiarizationSetup: "auto_diarization_setup"
     )
 
     // MARK: - Location
@@ -96,6 +106,8 @@ struct WhizConfig: Equatable {
         if let v = number(values[keys.frameEnergy]) { c.frameEnergy = v }
         if let v = number(values[keys.minEnergy]) { c.minEnergy = v }
         if let v = number(values[keys.minUtterance]) { c.minUtterance = v }
+        // Absent stays nil ("ask"); only an explicit true/false is a decision.
+        if case .bool(let v)? = values[keys.autoDiarizationSetup] { c.autoDiarizationSetup = v }
         return c
     }
 
@@ -142,5 +154,12 @@ struct WhizConfig: Equatable {
         values[k.frameEnergy] = .double(frameEnergy)
         values[k.minEnergy] = .double(minEnergy)
         values[k.minUtterance] = .double(minUtterance)
+        // Write only a real decision. Emitting `false` for "not yet asked"
+        // would silently opt the user out on the Python side too.
+        if let autoDiarizationSetup {
+            values[k.autoDiarizationSetup] = .bool(autoDiarizationSetup)
+        } else {
+            values.removeValue(forKey: k.autoDiarizationSetup)
+        }
     }
 }

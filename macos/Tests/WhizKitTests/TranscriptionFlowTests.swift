@@ -164,29 +164,62 @@ struct TranscriptionFlowTests {
         #expect(parsed.vadModel == "~/models/silero.bin")
     }
 
-    @Test("batch model preference mirrors models.py:PREFERENCE")
-    func batchPreferencePinned() {
-        // models.py:47-56, verbatim order — q5_0 turbo first. NS-15 leaves
-        // "q5_0 batch vs unquantized turbo" open, so parity with the Python
-        // pipeline is the only defensible default; drift here changes which
-        // model a fresh Mac transcribes with.
-        #expect(WhisperModel.batchPreference == [
-            "ggml-large-v3-turbo-q5_0.bin",
-            "ggml-large-v3-turbo.bin",
-            "ggml-large-v3-turbo-q8_0.bin",
-            "ggml-large-v3-q5_0.bin",
-            "ggml-large-v3.bin",
-            "ggml-medium-q5_0.bin",
-            "ggml-medium.bin",
-            "ggml-small-q5_0.bin",
-            "ggml-small.bin",
-        ])
-        // Deliberately NOT the dictation order — that divergence is documented
-        // in WhisperModel.swift and must not silently unify.
-        #expect(WhisperModel.batchPreference != WhisperModel.preference)
+    @Test("an explicit configured model path wins, but only if it exists")
+    func resolveConfigured() {
+        #expect(WhisperModel.resolve(configured: "/definitely/not/a/model.bin") == nil)
+    }
 
-        // An explicit configured path wins, but only if it exists.
-        #expect(WhisperModel.resolveBatch(configured: "/definitely/not/a/model.bin") == nil)
+    // MARK: - Degraded-run contract (PR #4: d8ab1b9 + a02a70a)
+
+    @Test("degraded detection: the note marks an HTML page; letterized lines mark a TXT")
+    func degradedDetection() {
+        // HTML: the provenance note is the marker (it appears verbatim — no
+        // escapable characters).
+        #expect(DegradedArtifacts.looksDegradedHTML(
+            "<html>\(DegradedArtifacts.genericLabelNote)</html>"))
+        #expect(!DegradedArtifacts.looksDegradedHTML(
+            "<span class=\"speaker\" style=\"color:#e74c3c\">Speaker A</span>"))
+
+        // TXT: every content line must be the bare generic form.
+        #expect(DegradedArtifacts.looksDegradedTXT(
+            "Speaker (00:00:01): one\nSpeaker (00:00:05): two\n"))
+        #expect(DegradedArtifacts.looksDegradedTXT(""))
+        #expect(!DegradedArtifacts.looksDegradedTXT(
+            "Speaker A (00:00:01): real label"))
+        #expect(!DegradedArtifacts.looksDegradedTXT(
+            "Speaker (00:00:01): one\nAlice (00:00:05): named"))
+        // The generic-line shape itself is precise.
+        #expect(DegradedArtifacts.isGenericDialogueLine("Speaker (01:23:45): hi"))
+        #expect(!DegradedArtifacts.isGenericDialogueLine("Speaker (1:23:45): hi"))
+        #expect(!DegradedArtifacts.isGenericDialogueLine("Speaker (01:23:45)hi"))
+    }
+
+    @Test("the no-clobber guard: missing/degraded may be written, labeled is kept")
+    func noClobberGuard() throws {
+        let dir = tempURL("dir")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        let missing = dir.appendingPathComponent("missing.html")
+        #expect(DegradedArtifacts.mayOverwriteHTML(at: missing))
+
+        let degradedHTML = dir.appendingPathComponent("degraded.html")
+        try "<p>\(DegradedArtifacts.genericLabelNote)</p>"
+            .write(to: degradedHTML, atomically: true, encoding: .utf8)
+        #expect(DegradedArtifacts.mayOverwriteHTML(at: degradedHTML))
+
+        let labeledHTML = dir.appendingPathComponent("labeled.html")
+        try "Speaker A everywhere".write(to: labeledHTML, atomically: true, encoding: .utf8)
+        #expect(!DegradedArtifacts.mayOverwriteHTML(at: labeledHTML))
+
+        let labeledTXT = dir.appendingPathComponent("labeled.txt")
+        try "Speaker A (00:00:01): real".write(to: labeledTXT, atomically: true, encoding: .utf8)
+        #expect(!DegradedArtifacts.mayOverwriteTXT(at: labeledTXT))
+
+        // Unreadable-but-existing: "when in doubt, keep" (cli.py parity).
+        let unreadable = dir.appendingPathComponent("unreadable.txt")
+        try Data([0xFF, 0xFE, 0x00, 0xD8]).write(to: unreadable)
+        #expect(!DegradedArtifacts.mayOverwriteTXT(at: unreadable))
     }
 
     // MARK: - Helpers
@@ -212,7 +245,7 @@ struct NativePipelineTests {
         .deletingLastPathComponent()   // macos
         .deletingLastPathComponent()   // repo root
 
-    @Test(.disabled(if: WhisperModel.resolveBatch(configured: "") == nil))
+    @Test(.disabled(if: WhisperModel.resolve(configured: "") == nil))
     func goldenFixtureThroughTheRealPipeline() async throws {
         let input = Self.repoRoot.appendingPathComponent("tuning/golden/quiet_two_utterances.wav")
         let output = FileManager.default.temporaryDirectory
@@ -239,6 +272,79 @@ struct NativePipelineTests {
         let object = try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]
         #expect((object?["transcription"] as? [[String: Any]]) != nil)
         print("E2E: \(srt.count) SRT bytes, \(String(describing: (object?["transcription"] as? [[String: Any]])?.count)) segments")
+    }
+
+    /// Real speech through the real pipeline — the degraded-run contract
+    /// (PR #4 d8ab1b9/a02a70a) exercised end to end: an unlabeled run writes
+    /// bare-Speaker artifacts with the HTML provenance note, keeps an existing
+    /// labeled page, and overwrites its own degraded one.
+    @Test(.disabled(if: WhisperModel.resolve(configured: "") == nil))
+    func degradedArtifactsThroughTheRealPipeline() async throws {
+        let speech = try Self.generateSpeechWav()
+        defer { try? FileManager.default.removeItem(at: speech) }
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("whiz-e2e-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: output) }
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+
+        let stem = speech.deletingPathExtension().lastPathComponent
+        let htmlURL = output.appendingPathComponent("\(stem).speakers.html")
+        // Pre-seed a LABELED transcript from an earlier diarized run of the
+        // same input: this run has no diarization (audio input), so the
+        // no-clobber guard must keep it.
+        let labeledHTML = "<html>Speaker A everywhere: a diarized run's real labels</html>"
+        try labeledHTML.write(to: htmlURL, atomically: true, encoding: .utf8)
+
+        let collector = EventCollector()
+        let backend = NativeTranscriptionBackend(settings: BatchSettings.from([:]))
+        _ = try await backend.transcribe(
+            input: speech, outputDirectory: output, onEvent: collector.record)
+
+        // Segments exist this time, so the TXT is written — degraded form.
+        let txt = try String(contentsOf: output.appendingPathComponent("\(stem).speakers.txt"), encoding: .utf8)
+        #expect(!txt.isEmpty)
+        #expect(DegradedArtifacts.looksDegradedTXT(txt))
+        // The labeled HTML was kept, not overwritten with generic labels.
+        #expect(try String(contentsOf: htmlURL, encoding: .utf8) == labeledHTML)
+
+        // Idempotence: seed a degraded HTML (this run's own shape) and run
+        // again — it IS overwritten, and the fresh page carries the note.
+        try DegradedArtifacts.genericLabelNote.write(to: htmlURL, atomically: true, encoding: .utf8)
+        _ = try await backend.transcribe(
+            input: speech, outputDirectory: output, onEvent: collector.record)
+        let fresh = try String(contentsOf: htmlURL, encoding: .utf8)
+        #expect(fresh != labeledHTML)
+        #expect(fresh.contains(DegradedArtifacts.genericLabelNote))
+        print("E2E degraded: \(txt.count) TXT bytes, fresh HTML carries the note")
+    }
+
+    /// A few seconds of real speech via macOS TTS — `say` + `afconvert`, the
+    /// same recipe the PR #4 analysis probe used. Both ship with macOS.
+    private static func generateSpeechWav() throws -> URL {
+        let aiff = FileManager.default.temporaryDirectory
+            .appendingPathComponent("whiz-e2e-speech-\(UUID().uuidString).aiff")
+        let wav = aiff.deletingPathExtension().appendingPathExtension("wav")
+
+        let say = Process()
+        say.executableURL = URL(fileURLWithPath: "/usr/bin/say")
+        say.arguments = ["-o", aiff.path,
+                         "Hello, this is a test of the transcription pipeline.",
+                         "The weather is nice today and the quick brown fox jumps over the lazy dog."]
+        try say.run()
+        say.waitUntilExit()
+
+        let convert = Process()
+        convert.executableURL = URL(fileURLWithPath: "/usr/bin/afconvert")
+        convert.arguments = ["-f", "WAVE", "-d", "LEI16@16000", "-c", "1",
+                             aiff.path, wav.path]
+        try convert.run()
+        convert.waitUntilExit()
+
+        try? FileManager.default.removeItem(at: aiff)
+        guard say.terminationStatus == 0, convert.terminationStatus == 0,
+              FileManager.default.fileExists(atPath: wav.path)
+        else { throw AudioDecodeError.unreadableMedia(wav.lastPathComponent) }
+        return wav
     }
 }
 
