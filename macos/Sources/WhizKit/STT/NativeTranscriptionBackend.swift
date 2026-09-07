@@ -155,10 +155,15 @@ struct NativeTranscriptionBackend: TranscriptionBackend {
         onEvent(.progress(0.10))
 
         // 2. Diarization — Python's order (cli.py runs it before whisper) and
-        // Python's auto-enable rule: on for video inputs even when `diarize`
-        // is false in config (cli.py:_video_auto_flags), skipped with a hint
-        // when the models are missing (cli.py:183). Without usable diarization
-        // everything downstream falls back to the generic "Speaker" label.
+        // Python's auto-enable rule for video inputs (cli.py:_video_auto_flags).
+        // `settings.diarize` is an APP-side extension, not Python parity: the
+        // config key exists in config.py but no Python command reads it — the
+        // CLI gates diarization on the --speakers flag or video-auto only.
+        // Without it, the app would have no way to diarize an audio-only
+        // input, which the setup dialog can't express either. Skipped with
+        // the Python hint when the models are missing (cli.py:183); without
+        // usable diarization everything downstream falls back to the generic
+        // "Speaker" label.
         let hasVideo = await FrameExtractor.hasVideoTrack(input)
         var diarSegments: [DiarSegment] = []
         if settings.diarize || hasVideo {

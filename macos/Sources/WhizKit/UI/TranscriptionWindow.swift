@@ -206,6 +206,9 @@ final class TranscriptionViewModel: ObservableObject {
     private let backend: any TranscriptionBackend
     private var run: Task<Void, Never>?
 
+    /// Injectable so tests can observe the reveal without opening Finder.
+    var reveal: (URL) -> Void = { NSWorkspace.shared.open($0) }
+
     init(input: URL, output: URL, backend: any TranscriptionBackend) {
         self.inputURL = input
         self.outputDirectory = output
@@ -220,6 +223,10 @@ final class TranscriptionViewModel: ObservableObject {
                     Task { @MainActor in self?.handle(event) }
                 }
                 stage = .finished
+                // The flow's contract from the start: on finish, the output
+                // folder opens. The finished state also keeps the button for
+                // re-opening.
+                reveal(outputDirectory)
             } catch is CancellationError {
                 stage = .cancelled
             } catch {
