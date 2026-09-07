@@ -223,6 +223,7 @@ def format_speakers_html(
     merged: list[tuple[WhisperSeg, str]],
     frames_dir: Path | None = None,
     title: str = "whiz transcript",
+    note: str = "",
 ) -> str:
     """Emit a self-contained HTML transcript.
 
@@ -230,6 +231,10 @@ def format_speakers_html(
     given and contains ``segNNNN.jpg`` files (from a prior --screenshots run),
     frames are inlined as ``data:image/jpeg;base64`` URIs so the single HTML
     file is portable with every screenshot embedded — no external files needed.
+
+    ``note`` (used by the unlabeled diarization fallback) renders as one
+    muted provenance line at the top of the page, so a degraded transcript
+    self-identifies even when opened long after the run's stderr is gone.
 
     The page has a sticky header with the title, a speaker legend, and a
     live search box that filters cues by text or speaker. Clicking any frame
@@ -286,6 +291,7 @@ header.bar input.search:focus { border-color: var(--accent); box-shadow: 0 0 0 3
 .legend { display: flex; gap: .4em; flex-wrap: wrap; align-items: center; }
 .legend .chip { font-size: .72em; padding: .15em .55em; border-radius: 999px; color: #fff; font-weight: 600; white-space: nowrap; }
 main { max-width: 920px; margin: 0 auto; padding: 1em; }
+.note { color: var(--muted); font-size: .85em; margin: .5em 0 1.2em; }
 .cue {
   display: flex; gap: .9em; align-items: flex-start;
   margin: .35em 0; padding: .7em .8em;
@@ -376,6 +382,10 @@ footer.foot { text-align: center; color: var(--muted); font-size: .8em; padding:
     parts.append('</header>')
 
     parts.append('<main>')
+    # Degraded-run provenance: one muted line so an unlabeled fallback page
+    # self-identifies even when opened long after the run's stderr is gone.
+    if note:
+        parts.append(f'<p class="note">{_html_escape(note)}</p>')
     cue_count = 0
     has_frame = False
     for i, (seg, label) in enumerate(merged, start=1):

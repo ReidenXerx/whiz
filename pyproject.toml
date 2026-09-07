@@ -28,6 +28,9 @@ dependencies = ["rich>=13"]
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
+# Keep in sync with _DIARIZE_REQUIREMENT in whiz/cli.py (the auto-setup
+# installs the same spec, so the auto and manual paths agree).
+diarize = ["sherpa-onnx>=1.10"]
 dictate = [
     "mlx-whisper>=0.1",
     "sounddevice>=0.4",

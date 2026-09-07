@@ -104,7 +104,7 @@ pipx install .
 Then make sure a model is available — download one from the official whisper.cpp HuggingFace repo:
 
 ```bash
-whiz models download turbo      # ggml-large-v3-turbo-q5_0.bin — fast & accurate
+whiz models download turbo      # ggml-large-v3-turbo.bin — unquantized (NS-15)
 ```
 
 ## What it does
@@ -224,7 +224,7 @@ Manage whisper, VAD, and diarization models.
 
 ```bash
 whiz models list                       # show discovered ggml models
-whiz models download turbo             # ggml-large-v3-turbo-q5_0.bin — fast & accurate
+whiz models download turbo             # ggml-large-v3-turbo.bin — unquantized (NS-15)
 whiz models download large-v3 --dest ~/models
 whiz models known                      # canonical whisper.cpp model filenames
 whiz models download-vad               # Silero VAD model (default: v5.1.2)
@@ -297,6 +297,9 @@ num_speakers = 0
 cluster_threshold = 0.9
 diarization_segmentation_model = ""
 diarization_embedding_model = ""
+# Remembered answer to the one-time diarization setup prompt
+# (unset = ask once on a TTY / auto-allow when scripted)
+auto_diarization_setup = true
 # --- AI analysis (Ollama / OpenAI-compatible) ---
 ai_base_url = "http://localhost:11434/v1"
 ai_model = ""
@@ -321,14 +324,19 @@ dictate_show_indicator = true
 dictate_idle_visible = true
 ```
 
-If `model` is empty, whiz auto-picks the best available model by this preference:
+If `model` is empty, whiz auto-picks the best available model by this preference
+(NS-15: quantization corrupts transcription quality, so within each class the
+unquantized model ranks first and every quantized variant is a last resort —
+a quantized file resolves only when its own unquantized class is absent):
 
-1. `large-v3-turbo-q5_0`
-2. `large-v3-turbo`
-3. `large-v3-turbo-q8_0`
-4. `large-v3-q5_0`
-5. `large-v3`
-6. `medium-q5_0` → `medium` → `small-q5_0` → `small`
+1. `large-v3-turbo` → `large-v3-turbo-q8_0` → `large-v3-turbo-q5_0`
+2. `large-v3` → `large-v3-q5_0`
+3. `medium` → `medium-q5_0`
+4. `small` → `small-q5_0`
+5. `base` → `base-q5_0`
+
+`tiny` is excluded entirely (useless quality) — never listed, recommended, or
+auto-picked, though `whiz models download tiny` still works if you insist.
 
 ### Model search directories
 
@@ -346,13 +354,19 @@ whiz can label who spoke when on mono recordings (meetings, screen recordings) v
 
 ### One-time setup
 
+Almost nothing to remember: the first run that needs diarization performs the setup itself — after asking. When diarization is about to run — auto-enabled for a video, or an explicit `--speakers` — and sherpa-onnx or its models are missing, whiz asks on an interactive terminal before touching anything: `Proceed? [y/N]`. Answering `y` installs `sherpa-onnx>=1.10` — the exact spec the `diarize` extra declares — into the environment whiz is running in, then downloads the diarization models (~90 MB, one time), with live progress in the terminal. `whiz transcribe recording.mov` on a fresh machine just works. The answer is remembered in the `auto_diarization_setup` config key, so the question is asked once, ever. Non-interactive sessions (piped stdin/stderr — scripts, cron, launchd) proceed without asking so a scripted fresh machine also just works; `whiz config set auto_diarization_setup=false` (or `=true`) answers permanently there too.
+
+Prefer to do it yourself (e.g. before an offline session)? The manual equivalent:
+
 ```bash
 # 1. Install the optional dependency into whiz's environment
-pipx inject whiz sherpa-onnx
+pipx inject whiz 'whiz[diarize]'
 
 # 2. Download the diarization models (~90 MB total)
 whiz models download-diarization
 ```
+
+Opt out with `--no-auto-diarization-setup` on `transcribe`/`merge`/`speakers match`: whiz then skips or degrades speaker labeling (see below) instead of installing anything — and the flag bypasses the prompt entirely. Answer permanently with `whiz config set auto_diarization_setup=false` (decline every future run) or `=true` (never ask, just install). `whiz upgrade` re-injects the diarize extra automatically, so an auto-installed sherpa-onnx survives upgrades.
 
 ### Usage
 
@@ -378,7 +392,7 @@ whiz transcribe --speakers 4 --name-speakers meeting.mov
 whiz transcribe recording.mov --speakers-names Alice,Bob,Carol,Dave
 ```
 
-If diarization is auto-enabled but sherpa-onnx or its models aren't installed yet, whiz skips speaker labeling with a one-line hint (and still transcribes + captures screenshots) instead of crashing — run the one-time setup above to turn it on.
+When diarization is about to run but sherpa-onnx or its models aren't set up yet, whiz performs the one-time setup on the spot (see above) — that is the normal path on a fresh machine. The degraded behavior below applies only when the setup **fails** (offline, disk full, ...) or you opted out with `--no-auto-diarization-setup`: an auto-enabled video run then skips speaker labeling with a one-line hint (and still transcribes + captures screenshots) instead of crashing. An explicitly requested `--speakers` degrades with a louder warning. An `--outputs html` **passed on that invocation** is never dropped: when speaker labels are unavailable the HTML transcript is still written, with every cue carrying a generic `Speaker` label and a warning explaining why. (`html` supplied only via config.toml describes the diarized happy path and is not treated as explicit — a degraded run keeps skipping it.) `--speakers-names` / `--name-speakers` are discarded in that case, and the warning says so — the names are never silently dropped. The degraded artifacts never overwrite speaker files an earlier diarized run left next to the media: each existing `.speakers.txt` / `.speakers.html` that carries real speaker labels is kept with a warning instead of being collapsed to generic labels — an earlier run's own degraded (generic-label) files are refreshed in place, so re-running with a different `--model`, `--language`, or audio updates them. A `whiz merge` whose only outcome is keeping existing outputs is a no-op success (exit 0), not a failure.
 
 This produces the normal whisper-cli outputs (SRT, JSON) plus two labeled files alongside the input:
 
@@ -396,6 +410,10 @@ For video inputs `--screenshots` is on by default; pass `--no-screenshots` to sk
 ### HTML transcript
 
 Add `html` to `--outputs` (or pass `--outputs html` to `whiz merge`) to write a self-contained `<stem>.speakers.html` alongside the input. Each segment is rendered as a color-coded cue with a timestamp link, the speaker label, and (when `--screenshots` was set) the on-screen frame inlined as a base64 `data:` URI — so the file is fully portable with no external image dependencies.
+
+Because the HTML is built from the parsed whisper JSON, `--outputs html` also forces JSON output (`-oj`): an extra `<stem>.json` file remains alongside the input even when you only asked for `html`.
+
+If diarization is unavailable (sherpa-onnx not installed or it produced no segments), an `--outputs html` passed on that invocation is still honored instead of being silently skipped — every cue gets a bare generic `Speaker` label (not the letterized `Speaker A` used for real diarization), and a muted note line at the top of the page records that no diarization ran, so a degraded page is never mistaken for a one-speaker transcript. The labeled `.speakers.srt` is not produced in that case; it requires real diarization. On audio runs a generic-label `.speakers.txt` is still written so `whiz analyze` can find a transcript. Existing speaker outputs from an earlier diarized run are never overwritten — files carrying real speaker labels are kept with a warning rather than collapsed to generic labels, while existing degraded (generic-label) files are refreshed so identical re-runs stay correct.
 
 The transcript page has a sticky header with the title, a color-coded speaker legend, and a live search box that filters cues by text or speaker. Each cue is a card with a left color border matching its speaker and a hover lift. Clicking any frame thumbnail opens a fullscreen lightbox overlay (close with the × button, the backdrop, or the Escape key). The layout is responsive down to mobile widths.
 
@@ -462,7 +480,8 @@ whiz transcribe --speakers 4 meeting2.mov
 # See what's stored
 whiz speakers list
 
-# Check how a recording matches before committing (dry run)
+# Check how a recording matches before committing (relabels/saves nothing —
+# may still run the one-time diarization setup; opt out with --no-auto-diarization-setup)
 whiz speakers match meeting2.mov --speakers 4
 
 # Remove a profile (e.g. someone left the team)

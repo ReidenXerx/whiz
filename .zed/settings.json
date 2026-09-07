@@ -1,11 +1,7 @@
 {
   "context_servers": {
     "gitnexus": {
-      "command": "gitnexus",
-      "args": [
-        "mcp"
-      ],
-      "env": {}
+      "url": "http://127.0.0.1:39100/mcp"
     }
   },
   "agent": {
