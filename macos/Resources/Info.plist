@@ -10,6 +10,8 @@
   <string>WhizApp</string>
   <!-- The stable identity TCC keys Accessibility and Microphone grants to.
        Changing this invalidates every user's granted permission. -->
+  <key>CFBundleIconFile</key>
+  <string>Whiz</string>
   <key>CFBundleIdentifier</key>
   <string>com.reidenxerx.whiz</string>
   <key>CFBundlePackageType</key>

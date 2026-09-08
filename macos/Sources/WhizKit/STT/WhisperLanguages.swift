@@ -21,9 +21,31 @@ enum WhisperLanguages {
     /// numeric table and has to be added by hand.
     static let autoCode = "auto"
 
-    /// Auto-detect first, then every language whisper knows, alphabetically.
+    /// Languages the UI offers.
+    ///
+    /// whisper knows 100 (see `allSupported`), but only these three have been
+    /// tested against real speech here, and an untested language is not a
+    /// neutral choice: picking one whisper handles poorly produces confident
+    /// nonsense rather than an error. Offering the full list implies a
+    /// guarantee that does not exist.
+    ///
+    /// Widen it as languages get verified — the codes are validated against
+    /// whisper's own table below, so a typo here fails a test rather than
+    /// shipping.
+    static let offeredCodes = ["en", "ru", "uk"]
+
+    /// Auto-detect first, then the vetted languages, alphabetically.
     static let all: [Language] = {
         var out = [Language(code: autoCode, name: "Auto-detect")]
+        out.append(contentsOf: allSupported
+            .filter { offeredCodes.contains($0.code) }
+            .sorted { $0.name < $1.name })
+        return out
+    }()
+
+    /// Every language this whisper build knows, read from the library so it
+    /// cannot drift when the pinned submodule moves.
+    static let allSupported: [Language] = {
         let maxID = Int(whisper_lang_max_id())
         var known: [Language] = []
         for id in 0...maxID {
@@ -33,8 +55,7 @@ enum WhisperLanguages {
                 code: String(cString: code),
                 name: String(cString: full).capitalized))
         }
-        out.append(contentsOf: known.sorted { $0.name < $1.name })
-        return out
+        return known
     }()
 
     /// Whether whisper recognises `code`. Used to decide if a value carried
@@ -48,6 +69,10 @@ enum WhisperLanguages {
     /// hand-edited config is displayed rather than reset behind the user's back.
     static func language(for code: String) -> Language {
         if let match = all.first(where: { $0.code == code }) { return match }
+        // A code outside the offered set but known to whisper — e.g. set by the
+        // Python CLI, which has no such restriction. Name it properly rather
+        // than calling it "Unknown".
+        if let match = allSupported.first(where: { $0.code == code }) { return match }
         return Language(code: code, name: code.isEmpty ? "(unset)" : "Unknown")
     }
 }
