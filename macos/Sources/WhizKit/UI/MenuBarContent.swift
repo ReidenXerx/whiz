@@ -14,8 +14,24 @@ struct MenuBarContent: View {
 
     @State private var launchesAtLogin = LoginItem.isEnabled
 
+    /// Friendly names for the two independent language settings, so the menu
+    /// shows what each action will actually do.
+    private var dictationLanguageName: String {
+        WhisperLanguages.language(for: controller.config.language).name
+    }
+
+    private var transcriptionLanguageName: String {
+        WhisperLanguages.language(for: controller.config.transcriptionLanguage).name
+    }
+
     var body: some View {
-        Button(controller.isEngaged ? "Stop Dictation" : "Start Dictation") {
+        // Each action names the language it will use. Dictation and
+        // transcription read different config keys, and a menu that just said
+        // "Start Dictation" gave no clue which language was about to be used —
+        // the failure mode is silent, wrong-language output rather than an
+        // error.
+        Button(controller.isEngaged
+               ? "Stop Dictation" : "Start Dictation — \(dictationLanguageName)") {
             controller.toggleSession()
         }
         .keyboardShortcut("d")
@@ -34,7 +50,7 @@ struct MenuBarContent: View {
 
         // Batch transcription is a separate concern from dictation, so it gets
         // its own section rather than living among the dictation controls.
-        Button("Transcribe…") {
+        Button("Transcribe… — \(transcriptionLanguageName)") {
             onTranscribe()
         }
         .keyboardShortcut("t")

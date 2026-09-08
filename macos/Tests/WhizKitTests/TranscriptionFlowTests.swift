@@ -377,3 +377,49 @@ private final class EventCollector: @unchecked Sendable {
         }
     }
 }
+/// Does a language chosen in the dialog actually reach the transcriber?
+///
+/// Written because the observable symptom — "English comes out Russian
+/// whatever I pick" — has two very different causes: the picker not being
+/// wired, or a stale `language` value being forced. These pin the wiring, so
+/// the next occurrence points at the value rather than the plumbing.
+@Suite("Language selection reaches the run")
+@MainActor
+struct LanguageSelectionTests {
+
+    @Test("the dialog's language overrides the config default")
+    func dialogOverridesConfig() {
+        var base = BatchSettings.from(["language": .string("ru")])
+        base.aiModel = ""
+        let model = TranscriptionSetupModel(settings: base)
+        #expect(model.language == "ru", "seeded from config")
+
+        model.language = "en"
+        #expect(model.resolvedSettings().language == "en",
+                "picker choice must win over the config value")
+    }
+
+    @Test("each of the offered languages survives to the settings")
+    func everyOfferedLanguageSurvives() {
+        let model = TranscriptionSetupModel(settings: BatchSettings.from([:]))
+        for code in ["auto"] + WhisperLanguages.offeredCodes {
+            model.language = code
+            #expect(model.resolvedSettings().language == code)
+        }
+    }
+
+    @Test("a fresh dialog re-reads the config rather than caching")
+    func restartRereadsConfig() {
+        // The window is reused across runs, so a stale setup model would pin
+        // whatever language was chosen the first time it was ever opened.
+        let flow = TranscriptionFlowModel()
+        flow.setupLoader = { _ in }
+        flow.restart()
+        let first = flow.setup
+        first.language = "uk"
+        flow.restart()
+        #expect(flow.setup !== first, "restart must build a new setup model")
+        #expect(flow.setup.language != "uk" || BatchSettings.load().language == "uk",
+                "a new dialog must not inherit the previous run's choice")
+    }
+}

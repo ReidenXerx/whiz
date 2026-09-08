@@ -118,29 +118,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             .store(in: &cancellables)
     }
 
-    /// Double-clicking whiz while it is already running opens Settings.
-    ///
-    /// An LSUIElement app has no Dock icon to bounce and no window to raise, so
-    /// launching it a second time produced no feedback whatsoever — the user
-    /// cannot tell whether it started, and the natural response is to launch it
-    /// again. Settings is the conventional answer for a menu bar app: it proves
-    /// whiz is alive and puts the controls in front of them.
-    func applicationShouldHandleReopen(
-        _ sender: NSApplication,
-        hasVisibleWindows: Bool
-    ) -> Bool {
-        if !hasVisibleWindows { showSettings() }
-        return true
-    }
-
-    func applicationWillTerminate(_ notification: Notification) {
-        controller.endSession()
-        hotkeys.unregister()
-        permissionTimer?.invalidate()
-        // Must come last: ggml aborts at exit if a model is still loaded.
-        controller.shutdownBlocking()
-    }
-
     func showSettings() {
         settings.show()
     }
