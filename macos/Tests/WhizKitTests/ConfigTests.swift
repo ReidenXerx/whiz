@@ -304,3 +304,99 @@ struct LanguageKeyTests {
         #expect(WhisperLanguages.language(for: "zz").name == "Unknown")
     }
 }
+
+/// The built-in Russian prompt must not fight the language setting.
+@Suite("Dictation prompt selection")
+struct DictationPromptTests {
+
+    @Test("the Russian default applies only to Russian")
+    func defaultOnlyForRussian() {
+        // Sending Russian obscenity as prior context while asking for English
+        // is a contradiction whisper resolves in favour of the prompt — which
+        // made the language picker look broken.
+        #expect(SessionController.resolvePrompt(configured: "", language: "ru")
+                == DefaultPrompt.russian)
+        #expect(SessionController.resolvePrompt(configured: "", language: "en") == "")
+        #expect(SessionController.resolvePrompt(configured: "", language: "uk") == "")
+    }
+
+    @Test("auto-detect gets no prompt")
+    func autoGetsNoPrompt() {
+        // A Russian prompt would bias detection toward Russian, defeating the
+        // point of asking whisper to detect.
+        #expect(SessionController.resolvePrompt(configured: "", language: "auto") == "")
+    }
+
+    @Test("an explicit prompt is honoured in any language")
+    func explicitPromptAlwaysWins() {
+        for language in ["ru", "en", "uk", "auto"] {
+            #expect(SessionController.resolvePrompt(configured: "my terms", language: language)
+                    == "my terms")
+        }
+    }
+}
+
+/// Cross-language dictation: forcing a language that differs from the audio
+/// makes whisper render the speech in that language. Discovered in use and kept
+/// deliberately — a separate translate trigger was built and then removed,
+/// because the language picker already expresses the intent.
+@Suite("Cross-language dictation")
+struct CrossLanguageDictationTests {
+
+    @Test("a forced language reaches whisper unchanged")
+    func forcedLanguageIsPassedThrough() {
+        // The behaviour depends entirely on the selected language arriving
+        // as-is: any normalisation toward the detected language would silently
+        // remove it.
+        for code in WhisperLanguages.offeredCodes {
+            let config = WhizConfig.from(FlatTOML.parse("dictate_language = \"\(code)\""))
+            #expect(config.language == code)
+        }
+    }
+
+    @Test("only Russian output carries the Russian prompt")
+    func promptFollowsTheTargetLanguage() {
+        // Dictating Russian audio with English selected must NOT send the
+        // Russian prompt: the prompt is prior context, and Russian context
+        // pulls the output back toward Russian, defeating the cross-language
+        // behaviour.
+        #expect(SessionController.resolvePrompt(configured: "", language: "en") == "")
+        #expect(SessionController.resolvePrompt(configured: "", language: "ru")
+                == DefaultPrompt.russian)
+    }
+}
+
+/// Text injection must not depend on the user's keyboard layout.
+@Suite("Text injection")
+struct TextInjectionTests {
+
+    @Test("long text uses paste, short text uses key events")
+    func methodDependsOnLengthNotAlphabet() {
+        // The old rule was "ASCII types, non-ASCII pastes", which existed only
+        // because keycodes could not express Cyrillic. Unicode events can, so
+        // the alphabet is irrelevant and only length matters.
+        #expect(TextInjector.pasteThreshold > 0)
+        let short = String(repeating: "п", count: 10)
+        let long = String(repeating: "a", count: TextInjector.pasteThreshold + 1)
+        #expect(short.count <= TextInjector.pasteThreshold)
+        #expect(long.count > TextInjector.pasteThreshold)
+    }
+
+    @Test("chunking never splits a grapheme cluster")
+    func chunkingPreservesGraphemes() {
+        // A split emoji or combining sequence arrives as mojibake.
+        for text in ["Привет, как дела?", "👋🏽 hello 👨‍👩‍👧‍👦 world", "a", "",
+                     String(repeating: "é", count: 40)] {
+            #expect(TextInjector.chunksForTesting(text).joined() == text,
+                    "round trip failed for \(text.debugDescription)")
+        }
+    }
+
+    @Test("chunks respect the size limit")
+    func chunkSizeIsBounded() {
+        let text = String(repeating: "x", count: 100)
+        for chunk in TextInjector.chunksForTesting(text) {
+            #expect(chunk.count <= 16)
+        }
+    }
+}

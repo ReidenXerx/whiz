@@ -85,6 +85,10 @@ actor WhisperEngine {
         params.print_realtime = false
         params.print_timestamps = false
         params.print_special = false
+        // Always the transcribe task. whisper's translate task only ever
+        // outputs English, and cross-language output is instead obtained by
+        // *forcing* a language that differs from the audio — see the note on
+        // language in SessionController.
         params.translate = false
         // Utterances are segmented before they get here, so each call is one
         // self-contained chunk; carrying decoder context across them lets a

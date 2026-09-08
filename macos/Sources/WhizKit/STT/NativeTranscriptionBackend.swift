@@ -137,8 +137,14 @@ struct NativeTranscriptionBackend: TranscriptionBackend {
         outputDirectory: URL,
         onEvent: @escaping @Sendable (TranscriptionEvent) -> Void
     ) async throws -> URL {
+        // Mirrored to os_log as well as the window pane. The pane is gone the
+        // moment the window closes, which made "what language did that run
+        // actually use?" unanswerable after the fact — exactly the question
+        // that matters when output comes back in the wrong language.
+        //   log stream --predicate 'subsystem == "com.reidenxerx.whiz"'
         @Sendable func log(_ text: String) {
             onEvent(.log(text))
+            Log.stt.notice("\(text, privacy: .public)")
         }
 
         // 1. Decode. Progress within the decode is reported against the
@@ -210,7 +216,9 @@ struct NativeTranscriptionBackend: TranscriptionBackend {
 
         // 3. Transcribe, streaming segments into the log as they land.
         onEvent(.phase("Transcribing"))
-        log("language: \(settings.language), VAD: \(settings.vad ? "on" : "off")")
+        log("language: \(settings.language)"
+            + (settings.language == "auto" ? " (whisper detects; can mis-fire on short audio)" : " (forced)")
+            + ", VAD: \(settings.vad ? "on" : "off")")
         var vadModel: URL?
         if settings.vad {
             vadModel = resolveVAD()

@@ -145,7 +145,15 @@ final class SessionController: ObservableObject {
                 // Audio thread. Hop to the main actor before touching state.
                 Task { @MainActor in self?.ingest(samples, level: level) }
             }
-            Log.session.notice("session started")
+            // Language and prompt are the two settings that silently change
+            // what comes out, so state them once per session rather than
+            // leaving "why is my English coming out Russian?" unanswerable.
+            let language = config.language
+            let promptState = Self.resolvePrompt(
+                configured: config.prompt, language: language).isEmpty
+                ? "none" : (config.prompt.isEmpty ? "russian-default" : "custom")
+            Log.session.notice(
+                "session started — language: \(language, privacy: .public), prompt: \(promptState, privacy: .public)")
         } catch {
             Log.audio.error("capture failed: \(error.localizedDescription, privacy: .public)")
             lastError = error.localizedDescription
@@ -191,6 +199,27 @@ final class SessionController: ObservableObject {
             sampleRate: WhisperEngine.sampleRate,
             frameFloor: config.frameEnergy,
             utteranceFloor: config.minEnergy)
+    }
+
+    /// Which `initial_prompt` to send for a given language.
+    ///
+    /// The built-in Russian prompt is deliberately obscene: it exists to stop
+    /// Whisper sanitising Russian slang. But whisper treats `initial_prompt` as
+    /// preceding context, so sending Russian text while asking for English is a
+    /// contradiction — and the prompt wins. Dictating English produced Russian
+    /// and half-transliterated output no matter what the language picker said,
+    /// which looked like the picker being ignored.
+    ///
+    /// So the default is applied only when the language is actually Russian. An
+    /// explicit `dictate_prompt` is always honoured: the user asked for it, and
+    /// they may want a domain vocabulary in any language.
+    ///
+    /// "auto" gets no default prompt either — a Russian prompt would bias
+    /// detection toward Russian, defeating the point of asking whisper to
+    /// detect.
+    nonisolated static func resolvePrompt(configured: String, language: String) -> String {
+        if !configured.isEmpty { return configured }
+        return language == "ru" ? DefaultPrompt.russian : ""
     }
 
     /// Surface a failure raised outside the controller (e.g. hotkey registration).
@@ -254,7 +283,7 @@ final class SessionController: ObservableObject {
             return
         }
         let language = config.language
-        let prompt = config.prompt.isEmpty ? DefaultPrompt.russian : config.prompt
+        let prompt = Self.resolvePrompt(configured: config.prompt, language: language)
 
         state = .transcribing
         let samples = utterance.samples
