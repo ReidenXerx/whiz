@@ -105,6 +105,15 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/WhizApp" "$APP/Contents/MacOS/WhizApp"
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 
+# The app icon. LSUIElement keeps whiz out of the Dock and the app switcher, but
+# it still appears in Finder, Launchpad, Spotlight and — the one that matters
+# most — the Accessibility permission list, where a generic placeholder is
+# genuinely hard to identify when granting access.
+# Regenerate with: swift scripts/make-icon.swift
+if [ -f "$ROOT/Resources/Whiz.icns" ]; then
+  cp "$ROOT/Resources/Whiz.icns" "$APP/Contents/Resources/Whiz.icns"
+fi
+
 # sherpa-onnx ships as dylibs rather than static archives (its cmake wants
 # onnxruntime, so the wheel's prebuilt binaries are vendored instead), which
 # means unlike whisper.cpp they have to travel inside the bundle. Both already

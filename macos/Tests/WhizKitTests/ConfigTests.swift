@@ -257,3 +257,50 @@ struct DiarizationConsentTests {
         #expect(values["cluster_threshold"] == .double(0.9))
     }
 }
+
+/// Dictation and transcription have separate language keys, and conflating them
+/// is what made a picker set to English leave transcription on auto-detect.
+@Suite("Language keys")
+struct LanguageKeyTests {
+
+    @Test("dictation and transcription languages are independent")
+    func keysAreDistinct() {
+        let config = WhizConfig.from(FlatTOML.parse("""
+        dictate_language = "en"
+        language = "ru"
+        """))
+        #expect(config.language == "en")            // dictate_language
+        #expect(config.transcriptionLanguage == "ru")  // language
+    }
+
+    @Test("both round-trip without disturbing each other")
+    func bothRoundTrip() {
+        var values = FlatTOML.parse("dictate_language = \"ru\"\nlanguage = \"auto\"")
+        var config = WhizConfig.from(values)
+        config.transcriptionLanguage = "uk"
+        config.merged(into: &values)
+        let reloaded = WhizConfig.from(FlatTOML.parse(FlatTOML.emit(values)))
+        #expect(reloaded.language == "ru")
+        #expect(reloaded.transcriptionLanguage == "uk")
+    }
+
+    @Test("only vetted languages are offered")
+    func offeredSetIsRestricted() {
+        // whisper knows 100; the UI vouches for three plus auto-detect.
+        #expect(WhisperLanguages.all.count == 4)
+        let codes = Set(WhisperLanguages.all.map(\.code))
+        #expect(codes == ["auto", "en", "ru", "uk"])
+        // Every offered code must be one whisper actually knows.
+        for code in WhisperLanguages.offeredCodes {
+            #expect(WhisperLanguages.isKnown(code), "whisper does not know '\(code)'")
+        }
+    }
+
+    @Test("a code outside the offered set is still named properly")
+    func unofferedCodeIsNamed() {
+        // The Python CLI has no such restriction, so a config can legitimately
+        // carry any of whisper's 100.
+        #expect(WhisperLanguages.language(for: "de").name == "German")
+        #expect(WhisperLanguages.language(for: "zz").name == "Unknown")
+    }
+}

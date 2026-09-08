@@ -77,7 +77,7 @@ struct SettingsView: View {
     private var recognition: some View {
         Form {
             Section {
-                Picker("Language", selection: binding(\.language)) {
+                Picker("Dictation language", selection: binding(\.language)) {
                     // An unrecognised value from a hand-edited config still needs
                     // an entry, or the Picker would silently show the first item
                     // and overwrite it on the next save.
@@ -90,6 +90,21 @@ struct SettingsView: View {
                     }
                 }
                 AppliesNote(.nextSession)
+
+                Picker("Transcription language", selection: binding(\.transcriptionLanguage)) {
+                    if !WhisperLanguages.isKnown(controller.config.transcriptionLanguage) {
+                        Text(WhisperLanguages
+                            .language(for: controller.config.transcriptionLanguage).label)
+                            .tag(controller.config.transcriptionLanguage)
+                    }
+                    ForEach(WhisperLanguages.all) { language in
+                        Text(language.label).tag(language.code)
+                    }
+                }
+                Text("Used by Transcribe… for files. Auto-detect can mis-fire on "
+                     + "short or noisy audio — set it explicitly when you know.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             ModelSectionView(controller: controller)

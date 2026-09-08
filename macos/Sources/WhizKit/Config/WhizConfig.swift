@@ -18,7 +18,21 @@ struct WhizConfig: Equatable {
     // MARK: - Dictation keys (Swift-owned)
 
     var model: String = ""
+    /// `config.py:dictate_language` — the language spoken *while dictating*.
+    /// Distinct from `transcriptionLanguage`; you might dictate in Russian and
+    /// transcribe English video.
     var language: String = "ru"
+
+    /// `config.py:language` — the language of files run through Transcribe…,
+    /// or "auto" to let whisper detect it.
+    ///
+    /// This is a separate key from `dictate_language` in Python too. The
+    /// Settings window used to offer one "Language" picker wired to the
+    /// dictation key, so choosing English there left transcription on
+    /// auto-detect — and auto-detect mis-firing on English produced Cyrillic
+    /// transliteration ("ЦУДСЩЬУ ЕЩ ЕРУ ДУФПГУ" is WELCOME TO THE LEAGUE typed
+    /// on a ЙЦУКЕН layout). Both are now shown, labelled by what they affect.
+    var transcriptionLanguage: String = "auto"
     var prompt: String = ""
     var idleTimeout: Double = 45.0
     var hotkey: String = "<cmd>+<shift>+."
@@ -49,6 +63,7 @@ struct WhizConfig: Equatable {
     private static let keys = (
         model: "dictate_model",
         language: "dictate_language",
+        transcriptionLanguage: "language",
         prompt: "dictate_prompt",
         idleTimeout: "dictate_idle_timeout",
         hotkey: "dictate_hotkey",
@@ -94,6 +109,9 @@ struct WhizConfig: Equatable {
         var c = WhizConfig()
         if case .string(let v)? = values[keys.model] { c.model = v }
         if case .string(let v)? = values[keys.language] { c.language = v }
+        if case .string(let v)? = values[keys.transcriptionLanguage] {
+            c.transcriptionLanguage = v
+        }
         if case .string(let v)? = values[keys.prompt] { c.prompt = v }
         if let v = number(values[keys.idleTimeout]) { c.idleTimeout = v }
         if case .string(let v)? = values[keys.hotkey] { c.hotkey = v }
@@ -142,6 +160,7 @@ struct WhizConfig: Equatable {
         let k = Self.keys
         values[k.model] = .string(model)
         values[k.language] = .string(language)
+        values[k.transcriptionLanguage] = .string(transcriptionLanguage)
         values[k.prompt] = .string(prompt)
         values[k.idleTimeout] = .double(idleTimeout)
         values[k.hotkey] = .string(hotkey)

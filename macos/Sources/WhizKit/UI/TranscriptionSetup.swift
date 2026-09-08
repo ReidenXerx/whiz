@@ -18,6 +18,11 @@ final class TranscriptionSetupModel: ObservableObject {
     private let settings: BatchSettings
 
     @Published var pathText = ""
+    /// Per-run override of `config.language`. Language is a property of the
+    /// file, not of the app, so a Russian meeting and an English screencast in
+    /// the same session should not need a trip to Settings between them.
+    @Published var language: String
+
     @Published var speakersAuto: Bool
     @Published var speakerCount: Int
     @Published var ocrEnabled: Bool
@@ -28,6 +33,7 @@ final class TranscriptionSetupModel: ObservableObject {
 
     init(settings: BatchSettings = .load()) {
         self.settings = settings
+        self.language = settings.language
         self.speakersAuto = settings.numSpeakers == 0
         self.speakerCount = max(1, settings.numSpeakers)
         self.ocrEnabled = settings.ocr
@@ -68,6 +74,7 @@ final class TranscriptionSetupModel: ObservableObject {
     /// speaker count falls back to auto (0).
     func resolvedSettings() -> BatchSettings {
         var s = settings
+        s.language = language
         s.numSpeakers = speakersAuto ? 0 : max(0, speakerCount)
         s.ocr = ocrEnabled
         if analyzeEnabled, !aiModel.isEmpty {
@@ -213,6 +220,7 @@ struct TranscriptionSetupView: View {
         VStack(alignment: .leading, spacing: 14) {
             pathRow
             Divider()
+            languageRow
             speakersRow
             ocrRow
             analyzeRow
@@ -232,6 +240,18 @@ struct TranscriptionSetupView: View {
 
     /// Auto-detect hides the number input entirely, per the flow's design:
     /// the count only means anything when the user explicitly knows it.
+    private var languageRow: some View {
+        Picker("Language", selection: $model.language) {
+            if !WhisperLanguages.isKnown(model.language) {
+                Text(WhisperLanguages.language(for: model.language).label)
+                    .tag(model.language)
+            }
+            ForEach(WhisperLanguages.all) { language in
+                Text(language.label).tag(language.code)
+            }
+        }
+    }
+
     private var speakersRow: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
