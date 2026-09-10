@@ -127,3 +127,54 @@ def test_load_profiles_round_trips_merged(tmp_path, monkeypatch):
     assert p.samples == 3
     assert abs(p.embedding[0] - 5/3) < 1e-9
     assert abs(p.embedding[1] - 8/3) < 1e-9
+
+
+# ---------- wave-1 M3: auto-match provenance ----------
+
+
+def test_save_profile_marks_auto_match_source(tmp_path, monkeypatch):
+    """M3: an auto-match creating a NEW profile records its provenance as
+    'auto' — no more silently-merged auto-matches with no provenance."""
+    monkeypatch.setattr(P, "profiles_dir", lambda: tmp_path)
+    path = P.save_profile("Alice", [0.1, 0.2], samples=1, auto_match=True)
+    data = json.loads(path.read_text())
+    assert data["source"] == "auto"
+    assert P.load_profiles()[0].source == "auto"
+
+
+def test_save_profile_auto_match_never_touches_existing(tmp_path, monkeypatch):
+    """M3: an auto-match must not merge into or replace an existing profile
+    — that is how a chain of self-confirming matches silently drifted the
+    stored centroid. The existing file is returned untouched."""
+    monkeypatch.setattr(P, "profiles_dir", lambda: tmp_path)
+    P.save_profile("Alice", [1.0, 1.0], samples=3)  # user-confirmed base
+    before = P._profile_path("Alice").read_text()
+    # Same name, different dim — would REPLACE under old rules; must not.
+    P.save_profile("Alice", [9.0, 9.0, 9.0], samples=1, auto_match=True)
+    # Same name, same dim — would MERGE under old rules; must not either.
+    P.save_profile("Alice", [0.0, 0.0], samples=1, auto_match=True)
+    assert P._profile_path("Alice").read_text() == before
+
+
+def test_save_profile_user_confirmation_merges_and_upgrades_source(tmp_path, monkeypatch):
+    """M3: a later human confirmation still merges normally and upgrades
+    provenance from 'auto' back to 'user'."""
+    monkeypatch.setattr(P, "profiles_dir", lambda: tmp_path)
+    P.save_profile("Alice", [0.0, 0.0], samples=1, auto_match=True)
+    # User confirms: same dim -> merged mean = (0*1 + 2*1)/2 = 1.0
+    P.save_profile("Alice", [2.0, 2.0], samples=1)
+    data = json.loads(P._profile_path("Alice").read_text())
+    assert data["source"] == "user"
+    assert data["samples"] == 2
+    assert data["embedding"] == [1.0, 1.0]
+
+
+def test_save_profile_default_is_user_source(tmp_path, monkeypatch):
+    """M3: existing call-sites (cli's _save_named_profiles) keep the old
+    behavior — default source is 'user' and merging still works."""
+    monkeypatch.setattr(P, "profiles_dir", lambda: tmp_path)
+    P.save_profile("Bob", [1.0], samples=1)
+    P.save_profile("Bob", [3.0], samples=1)
+    data = json.loads(P._profile_path("Bob").read_text())
+    assert data["source"] == "user"
+    assert data["samples"] == 2

@@ -81,7 +81,7 @@ def test_load_manifest_missing_returns_none(tmp_path):
     assert SC.load_manifest(tmp_path / "nope.json") is None
 
 
-def test_load_manifest_skips_malformed_rows(tmp_path):
+def test_load_manifest_skips_malformed_rows(tmp_path, capsys):
     manifest = tmp_path / "bad.json"
     manifest.write_text(
         '{"segments": ['
@@ -93,3 +93,20 @@ def test_load_manifest_skips_malformed_rows(tmp_path):
     loaded = SC.load_manifest(manifest)
     assert loaded is not None
     assert len(loaded) == 1  # malformed row skipped, valid one kept
+    # L-low (wave-1): the skip is counted and warned, not silent.
+    err = capsys.readouterr().err
+    assert "skipped 1 malformed row" in err
+
+
+def test_load_manifest_clean_no_warning(tmp_path, capsys):
+    """L-low: no malformed rows -> no warning."""
+    manifest = tmp_path / "good.json"
+    manifest.write_text(
+        '{"segments": ['
+        '{"index":1,"start":0.0,"end":1.0,"speaker":"A","text":"ok","frame":"seg0001.jpg"}'
+        ']}',
+        encoding="utf-8",
+    )
+    loaded = SC.load_manifest(manifest)
+    assert loaded is not None and len(loaded) == 1
+    assert capsys.readouterr().err == ""

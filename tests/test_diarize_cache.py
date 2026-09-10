@@ -182,11 +182,36 @@ def test_cosine_similarity_empty_returns_zero():
     assert P.cosine_similarity([1.0], []) == 0.0
 
 
-def test_cosine_similarity_different_lengths_uses_min():
+def test_cosine_similarity_different_lengths_returns_none():
+    """M3: mismatched dims are incomparable (a swapped embedding model
+    changes every dimension's meaning) — reject with None, never a
+    truncated projection that reads like a confident score."""
     a = [1.0, 0.0, 0.0]
     b = [1.0, 0.0]  # shorter
-    # Only first 2 dims compared -> cosine = 1.0
-    assert abs(P.cosine_similarity(a, b) - 1.0) < 1e-9
+    assert P.cosine_similarity(a, b) is None
+    assert P.cosine_similarity(b, a) is None
+
+
+def test_match_speakers_skips_dim_mismatched_profile(capsys):
+    """M3: a mismatched-dim profile is skipped with a warning (no match),
+    not silently truncated into a bogus score."""
+    profiles = [
+        P.Profile(name="Alice", embedding=[1.0, 0.0, 0.0], dim=3, created=""),
+    ]
+    clusters = {0: [1.0, 0.0]}  # 2-dim vs 3-dim profile
+    matches = P.match_speakers(clusters, profiles, threshold=0.5)
+    assert matches[0] is None
+    err = capsys.readouterr().err
+    assert "dimension mismatch" in err
+
+
+def test_match_speakers_clean_pairs_no_warning(capsys):
+    """M3: the dim-mismatch warning only fires when a pair was skipped."""
+    profiles = [P.Profile(name="Alice", embedding=[1.0, 0.0], dim=2, created="")]
+    clusters = {0: [1.0, 0.0]}
+    matches = P.match_speakers(clusters, profiles, threshold=0.8)
+    assert matches[0] is not None and matches[0][0] == "Alice"
+    assert capsys.readouterr().err == ""
 
 
 def test_match_speakers_assigns_above_threshold():

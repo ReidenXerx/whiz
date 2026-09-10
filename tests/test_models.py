@@ -5,8 +5,10 @@ Run with: pytest tests/test_models.py
 
 from __future__ import annotations
 
+import io
 import re
 import sys
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -294,3 +296,58 @@ def test_download_filename_passthrough_for_unknown_names():
     assert M._resolve_download_filename("tiny-q5_0") == "ggml-tiny-q5_0.bin"
     assert M._resolve_download_filename("ggml-large-v3-turbo-q4_0") == "ggml-large-v3-turbo-q4_0.bin"
     assert M._resolve_download_filename("my-custom-model") == "ggml-my-custom-model.bin"
+
+
+# ---------- atomic downloads (wave-1, L-low) ----------
+
+
+def _fake_model_resp(body: bytes = b"model-bytes"):
+    """Fake urllib response object with .read() / context-manager support."""
+    resp = io.BytesIO(body)
+    resp.status = 200
+    resp.__enter__ = lambda: resp
+    resp.__exit__ = lambda *a: None
+    return resp
+
+
+def test_download_writes_atomically_and_leaves_no_part(tmp_path, monkeypatch):
+    """L-low: a successful download writes the .bin via a .part rename —
+    the .part file is gone afterwards and no partial state is visible."""
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req: _fake_model_resp(b"abc"))
+    config = cfg.Config()
+    out = M.download("tiny", config, dest_dir=tmp_path)  # tiny: no expansion
+    assert out.read_bytes() == b"abc"
+    assert not (tmp_path / "ggml-tiny.bin.part").exists()
+
+
+def test_download_failure_leaves_no_target_and_no_part(tmp_path, monkeypatch):
+    """L-low: an interrupted download must not leave a truncated .bin (which
+    later feeds a misleading model-load failure) — the .part is cleaned up
+    and the target never appears."""
+    class _BrokenBody(io.BytesIO):
+        def read(self, n=-1):
+            raise RuntimeError("connection reset mid-download")
+
+    resp = _BrokenBody(b"")
+    resp.status = 200
+    resp.__enter__ = lambda: resp
+    resp.__exit__ = lambda *a: None
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req: resp)
+    config = cfg.Config()
+    try:
+        M.download("tiny", config, dest_dir=tmp_path)
+        assert False, "expected RuntimeError"
+    except RuntimeError as e:
+        assert "connection reset" in str(e)
+    assert not (tmp_path / "ggml-tiny.bin").exists()
+    assert not (tmp_path / "ggml-tiny.bin.part").exists()
+
+
+def test_download_vad_writes_atomically(tmp_path, monkeypatch):
+    """L-low: the VAD download uses the same .part + rename machinery."""
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req: _fake_model_resp(b"vad"))
+    config = cfg.Config()
+    out = M.download_vad(config, dest_dir=tmp_path)
+    assert out.name == M.VAD_DEFAULT
+    assert out.read_bytes() == b"vad"
+    assert not (tmp_path / (M.VAD_DEFAULT + ".part")).exists()

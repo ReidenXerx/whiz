@@ -7,6 +7,7 @@ and can download new ones from the HuggingFace whisper.cpp repo.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import sys
@@ -220,6 +221,12 @@ def download(model: str, config: cfg.Config, dest_dir: Path | None = None) -> Pa
     a short alias like 'turbo' (expanded via PREFERENCE to the unquantized
     ggml-large-v3-turbo.bin), or a full filename like
     'ggml-large-v3-turbo-q5_0.bin'.
+
+    The write is ATOMIC (wave-1 audit, L-low): the body streams into a
+    ``.part`` file and is renamed into place only when complete, so an
+    interrupted download (Ctrl-C, network drop) can never leave a truncated
+    ``.bin`` on disk that a later run discovers via a misleading whisper-cli
+    load failure instead of "the download never finished".
     """
     filename = _resolve_download_filename(model)
 
@@ -237,8 +244,7 @@ def download(model: str, config: cfg.Config, dest_dir: Path | None = None) -> Pa
     with urllib.request.urlopen(req) as resp:  # noqa: S310 - trusted HF URL
         if resp.status >= 400:
             raise RuntimeError(f"Download failed: HTTP {resp.status} for {url}")
-        with target.open("wb") as fh:
-            shutil.copyfileobj(resp, fh, length=1024 * 1024)
+        _stream_to_atomic(resp, target)
     print(f"Saved to {target} ({round(target.stat().st_size / (1024*1024), 1)} MB)", flush=True)
     return target
 
@@ -271,11 +277,30 @@ def find_vad_model(config: cfg.Config) -> Path | None:
     return None
 
 
+def _stream_to_atomic(resp, target: Path) -> None:
+    """Stream ``resp`` into ``<target>.part`` then rename into place.
+
+    ``os.replace`` is atomic within a filesystem: readers see either the
+    old (absent) state or the complete new file, never a partial one. The
+    ``.part`` file is removed on any failure, so retries start clean.
+    """
+    part = target.with_name(target.name + ".part")
+    try:
+        with part.open("wb") as fh:
+            shutil.copyfileobj(resp, fh, length=1024 * 1024)
+        os.replace(part, target)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
+
+
 def download_vad(config: cfg.Config, dest_dir: Path | None = None, version: str = "") -> Path:
     """Download a Silero VAD model from the ggml-org/whisper-vad repo.
 
     `version` may be empty (picks default v5.1.2), 'v5.1.2', 'v6.2.0',
     or a full filename like 'ggml-silero-v6.2.0.bin'.
+
+    The write is ATOMIC via ``<target>.part`` + rename, like ``download``.
     """
     if version and version.startswith("ggml-"):
         filename = version
@@ -297,8 +322,7 @@ def download_vad(config: cfg.Config, dest_dir: Path | None = None, version: str 
     with urllib.request.urlopen(req) as resp:  # noqa: S310 - trusted HF URL
         if resp.status >= 400:
             raise RuntimeError(f"Download failed: HTTP {resp.status} for {url}")
-        with target.open("wb") as fh:
-            shutil.copyfileobj(resp, fh, length=1024 * 1024)
+        _stream_to_atomic(resp, target)
     print(f"Saved to {target} ({round(target.stat().st_size / (1024*1024), 1)} MB)", flush=True)
     return target
 
