@@ -5,6 +5,8 @@ Run with: pytest tests/test_diarize_cache.py
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 from pathlib import Path
 
@@ -64,6 +66,102 @@ def test_diar_cache_threshold_epsilon_tolerance(tmp_path):
     # 0.95 vs 0.9500000001 is within epsilon -> hit.
     loaded = load_diarization_cache(wav, num_speakers=0, threshold=0.9500000001)
     assert loaded is not None
+
+
+def test_diar_cache_records_and_matches_model_paths(tmp_path):
+    """H1 (wave-1): the cache is keyed on the resolved model files too —
+    same WAV + same params + same models hit, and the payload records the
+    input identity for later verification."""
+    wav = tmp_path / "rec.wav"
+    wav.write_bytes(b"x" * 1000)
+    seg = tmp_path / "seg.onnx"
+    emb = tmp_path / "emb.onnx"
+    segs = [DiarSegment(start=0.0, end=1.0, speaker=0)]
+    _write_diarization_cache(wav, segs, num_speakers=2, threshold=0.9,
+                             seg_model=seg, emb_model=emb)
+    loaded = load_diarization_cache(wav, num_speakers=2, threshold=0.9,
+                                    seg_model=seg, emb_model=emb)
+    assert loaded is not None
+    # The payload records the input identity.
+    payload = json.loads(diar_cache_path(wav).read_text())
+    assert payload["seg_model"] == str(seg)
+    assert payload["emb_model"] == str(emb)
+    assert payload["wav_size"] == 1000
+
+
+def test_diar_cache_miss_on_model_swap(tmp_path):
+    """H1: a different resolved model must never serve the old cache — a
+    model upgrade would silently re-serve stale speaker labels."""
+    wav = tmp_path / "rec.wav"
+    wav.write_bytes(b"x" * 1000)
+    segs = [DiarSegment(start=0.0, end=1.0, speaker=0)]
+    _write_diarization_cache(wav, segs, num_speakers=2, threshold=0.9,
+                             seg_model=tmp_path / "seg.onnx",
+                             emb_model=tmp_path / "emb.onnx")
+    # Same WAV, same params, different segmentation model -> miss.
+    assert load_diarization_cache(
+        wav, num_speakers=2, threshold=0.9,
+        seg_model=tmp_path / "model.onnx", emb_model=tmp_path / "emb.onnx",
+    ) is None
+    # Different embedding model -> miss too.
+    assert load_diarization_cache(
+        wav, num_speakers=2, threshold=0.9,
+        seg_model=tmp_path / "seg.onnx", emb_model=tmp_path / "emb2.onnx",
+    ) is None
+
+
+def test_diar_cache_miss_on_stale_wav_bytes(tmp_path):
+    """H1: a re-exported video under the same filename must be a MISS —
+    different size, or same size with a bumped mtime, both mean the cached
+    speaker labels belong to different audio."""
+    wav = tmp_path / "rec.wav"
+    wav.write_bytes(b"x" * 1000)
+    segs = [DiarSegment(start=0.0, end=1.0, speaker=0)]
+    _write_diarization_cache(wav, segs, num_speakers=2, threshold=0.9,
+                             seg_model=tmp_path / "seg.onnx",
+                             emb_model=tmp_path / "emb.onnx")
+
+    # Re-export with different content -> different size -> miss.
+    wav.write_bytes(b"y" * 2000)
+    assert load_diarization_cache(
+        wav, num_speakers=2, threshold=0.9,
+        seg_model=tmp_path / "seg.onnx", emb_model=tmp_path / "emb.onnx",
+    ) is None
+
+    # Same size, newer mtime -> miss as well.
+    wav.write_bytes(b"x" * 1000)
+    st = wav.stat()
+    os.utime(wav, (st.st_atime, st.st_mtime + 10))
+    assert load_diarization_cache(
+        wav, num_speakers=2, threshold=0.9,
+        seg_model=tmp_path / "seg.onnx", emb_model=tmp_path / "emb.onnx",
+    ) is None
+
+
+def test_diar_cache_miss_when_models_unverifiable(tmp_path):
+    """H1: a cache recorded WITH models must not hit a load that cannot
+    verify them (None) — unverified is never a hit."""
+    wav = tmp_path / "rec.wav"
+    wav.write_bytes(b"x")
+    segs = [DiarSegment(start=0.0, end=1.0, speaker=0)]
+    _write_diarization_cache(wav, segs, num_speakers=2, threshold=0.9,
+                             seg_model=tmp_path / "seg.onnx",
+                             emb_model=tmp_path / "emb.onnx")
+    assert load_diarization_cache(wav, num_speakers=2, threshold=0.9) is None
+
+
+def test_diar_cache_version_bump_invalidates(tmp_path):
+    """A cache written by an older payload version is a MISS, not a parse
+    error or a silent hit."""
+    wav = tmp_path / "rec.wav"
+    wav.write_bytes(b"x")
+    segs = [DiarSegment(start=0.0, end=1.0, speaker=0)]
+    _write_diarization_cache(wav, segs, num_speakers=2, threshold=0.9)
+    path = diar_cache_path(wav)
+    payload = json.loads(path.read_text())
+    payload["version"] = payload["version"] - 1
+    path.write_text(json.dumps(payload))
+    assert load_diarization_cache(wav, num_speakers=2, threshold=0.9) is None
 
 
 # ---------- profiles: cosine similarity + matching ----------

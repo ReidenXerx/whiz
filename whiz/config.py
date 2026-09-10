@@ -149,6 +149,25 @@ DEFAULT_MODEL_SEARCH_DIRS: list[Path] = [
 ]
 
 
+def _escape_toml_string(value: str) -> str:
+    """Escape a string for a basic TOML double-quoted literal.
+
+    Order matters: backslash first (or its own output would be re-escaped
+    by later steps), then the quote, then control characters — a raw
+    ``\n`` inside a quoted string makes the file invalid TOML for the
+    NEXT ``load()`` of every command (C1, wave-1 audit; the Swift reader
+    drops the line outright). Multi-line prompts saved from the settings
+    window are the known trigger.
+    """
+    return (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
+
+
 def _emit_toml(data: dict[str, Any]) -> str:
     """Minimal TOML writer for our flat config schema."""
     lines: list[str] = []
@@ -165,14 +184,13 @@ def _emit_toml(data: dict[str, Any]) -> str:
         elif isinstance(value, float):
             lines.append(f"{key} = {value}")
         elif isinstance(value, str):
-            escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-            lines.append(f'{key} = "{escaped}"')
+            lines.append(f'{key} = "{_escape_toml_string(value)}"')
         elif isinstance(value, list):
             if not value:
                 lines.append(f"{key} = []")
             elif all(isinstance(v, str) for v in value):
                 items = ", ".join(
-                    '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"' for v in value
+                    '"' + _escape_toml_string(v) + '"' for v in value
                 )
                 lines.append(f"{key} = [{items}]")
             else:
@@ -184,10 +202,26 @@ def _emit_toml(data: dict[str, Any]) -> str:
 
 
 def load() -> Config:
-    """Load config from disk, falling back to defaults."""
+    """Load config from disk, falling back to defaults (missing file only).
+
+    A MISSING file means defaults — fine. A CORRUPT file must not be
+    silently swallowed into defaults either: that would make every
+    ``whiz config set`` read-modify-write from an empty table and rewrite
+    the file, permanently deleting every key the user had (C1, wave-1
+    audit). Raise a RuntimeError naming the file with the fix instead;
+    ``main()`` catches RuntimeError and prints it as a clean error.
+    """
     if CONFIG_PATH.exists():
-        with CONFIG_PATH.open("rb") as fh:
-            data = tomllib.load(fh)
+        try:
+            with CONFIG_PATH.open("rb") as fh:
+                data = tomllib.load(fh)
+        except tomllib.TOMLDecodeError as e:
+            raise RuntimeError(
+                f"config.toml is corrupt and could not be read: {e}\n"
+                f"Fix or delete the file by hand: {CONFIG_PATH}\n"
+                "(a deleted file regenerates from defaults; a corrupted one "
+                "left in place breaks every command until fixed)"
+            ) from e
         # Only keep known keys so older configs don't break dataclass init.
         known = {k: v for k, v in data.items() if k in Config.__dataclass_fields__}
         return Config(**known)

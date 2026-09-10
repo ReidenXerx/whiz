@@ -40,10 +40,13 @@ at runtime.** Each implementation hardcodes the values in its own language;
 tests in every implementation pin the compiled constants against the file:
 
 - Python: `tests/test_tuning.py` (engine constants, `Config` defaults,
-  `DictateSettings` defaults, hallucination set equality, file shape).
+  `DictateSettings` defaults, hallucination set equality — both arrays,
+  file shape).
 - Swift: `macos/Tests/WhizAppTests/TuningTests.swift` (TranscriptFilter,
   WhizConfig defaults, `UtteranceDetector.trailingPadding`, hallucination
-  set equality, full-key parse).
+  set equality — both arrays — full-key parse), and
+  `macos/Tests/WhizAppTests/TranscriptFilterTests.swift` (the two match
+  modes' behavior, mirror of the engine.py tests).
 - Rust (when it exists): the same pins against `whiz-core`'s constants.
 
 A value changed here must be changed in every implementation or the tests
@@ -119,8 +122,10 @@ VAD (webrtcvad in Python, Silero in Swift) and the hallucination
 filter, though the ownership is only as strong as those layers:
 webrtcvad's documented failure mode is steady noise misclassified as
 speech (the reason the energy pre-filter runs in front of it), it fails
-open when uninstalled, and the hallucination filter is exact-phrase —
-it catches the known artifacts, not novel ones. Swift's post-gate
+open when uninstalled, and the hallucination filter is a known-phrase
+blocklist with two match modes (NS-6: distinctive artifacts by substring,
+ordinary vocabulary only as the whole utterance) — it catches the known
+artifacts, not novel ones. Swift's post-gate
 Silero VAD rejecting whole utterances is the stronger half of that
 story. Real fan/cooler levels (~0.02 RMS, measured on a MacBook under
 load) sit well below the 0.03 floor and keep the adaptive path.
