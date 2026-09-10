@@ -227,8 +227,20 @@ def _install_sherpa_onnx() -> bool:
         import importlib.util
 
         if importlib.util.find_spec("sherpa_onnx") is None:
+            # L (wave-1 audit): pip exited 0 but the module is still not
+            # importable (partial install, wrong venv, shadowed module).
+            # Silently returning False made the NEXT diarization attempt
+            # look like a fresh install loop with nothing explaining why.
+            ui.status(
+                "Warning: pip reported success but sherpa_onnx is still not importable.",
+                kind="warn",
+                detail="Install manually: pipx inject whiz 'whiz[diarize]' "
+                       "&& whiz models download-diarization",
+            )
             return False
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        ui.status(f"Warning: could not verify the sherpa-onnx install: {e}", kind="warn",
+                  detail="Install manually: pipx inject whiz 'whiz[diarize]'")
         return False
     ui.status("sherpa-onnx installed.", kind="ok")
     return True
@@ -252,7 +264,11 @@ def _auto_setup_consent(config: cfg.Config) -> bool:
        ``--no-auto-diarization-setup`` flag remains the per-run opt-out.
     """
     answered = getattr(config, "auto_diarization_setup", None)
-    if answered is not None:
+    if isinstance(answered, bool):
+        # L (wave-1 audit): only a REAL bool answers permanently. A
+        # hand-edited `auto_diarization_setup = "false"` string is truthy
+        # in Python and counted as consent — non-bool values fall through
+        # to the prompt / non-interactive rules instead.
         return answered
     if not (sys.stdin.isatty() and sys.stderr.isatty()):
         return True
@@ -665,6 +681,27 @@ def _prompt_speaker_names(
     return name_map
 
 
+def _manifest_is_named(manifest_path: Path) -> bool:
+    """True if an existing frames manifest carries real speaker labels.
+
+    H5 (wave-1 audit): the degraded shot lists (every cue labeled the bare
+    generic ``Speaker``) used to overwrite a NAMED manifest from an earlier
+    diarized run — the manifest write was unconditional, so re-running a
+    video without speakers destroyed the named per-segment labels (and the
+    names any later HTML pass would inline). Mirrors ``_looks_degraded_*``:
+    a manifest is "named" when any entry's speaker differs from the bare
+    ``Speaker`` label (a letterized ``Speaker A`` or a real name counts);
+    an UNREADABLE manifest reads as named — when in doubt, keep.
+    """
+    entries = SC.load_manifest(manifest_path)
+    if entries is None:
+        # load_manifest returns None for missing AND unreadable files: a
+        # missing one is fine to write, an unreadable one must not be
+        # clobbered by a degraded run.
+        return manifest_path.exists()
+    return any(e.speaker != "Speaker" for e in entries)
+
+
 def _extract_and_manifest_screenshots(
     video: Path,
     merged: list[tuple[MR.WhisperSeg, str]],
@@ -672,18 +709,38 @@ def _extract_and_manifest_screenshots(
     ffmpeg: str,
     width: int,
     dry_run: bool = False,
-) -> tuple[Path, Path] | None:
+) -> tuple[Path, Path, bool] | None:
     """Extract one frame per segment and write the .frames.json manifest.
 
     Frames go into ``<of_base>.frames/``; the manifest at ``<of_base>.frames.json``
     references frames by path only (never bytes) so it stays small and
-    re-runnable. Returns (frames_dir, manifest_path) or None if there are no
-    segments. Only valid for video inputs (the caller checks).
+    re-runnable. Returns ``(frames_dir, manifest_path, manifest_kept)`` or
+    None if there are no segments. Only valid for video inputs (the caller
+    checks).
+
+    H5 (wave-1 audit): the manifest write is under the kept-outputs guard —
+    same contract as ``_write_html_transcript``. When THIS run's list is
+    degraded (every label the bare generic ``Speaker``) but an existing
+    manifest is NAMED (an earlier diarized run's), the existing file is
+    KEPT with a warning and ``manifest_kept`` is True — callers must not
+    announce it as written. An existing degraded manifest (or none) is
+    refreshed so re-runs with a different --model/--language stay
+    idempotent.
     """
     if not merged:
         return None
     frames_dir = SC.frames_dir_for(of_base)
     manifest_path = SC.frames_manifest_path(of_base)
+    incoming_degraded = all(label == "Speaker" for _seg, label in merged)
+    if incoming_degraded and _manifest_is_named(manifest_path):
+        ui.status(
+            f"{manifest_path.name} already exists with named speakers — kept "
+            "(this run has no speaker labels; a generic-label rewrite would "
+            "destroy its speaker names).",
+            kind="warn",
+            detail=str(manifest_path),
+        )
+        return frames_dir, manifest_path, True
     entries = SC.extract_segment_frames(
         video, merged, frames_dir,
         ffmpeg=ffmpeg,
@@ -693,7 +750,7 @@ def _extract_and_manifest_screenshots(
     SC.write_manifest(entries, frames_dir, manifest_path)
     ok = sum(1 for e in entries if e.frame)
     ui.muted(f"Extracted {ok}/{len(entries)} frames -> {frames_dir}")
-    return frames_dir, manifest_path
+    return frames_dir, manifest_path, False
 
 
 def _save_named_profiles(
@@ -937,38 +994,45 @@ def _write_html_transcript(
 
 
 def _run_diarize_or_fallback(wav: Path, config: cfg.Config, args: argparse.Namespace) -> list[D.DiarSegment]:
-    """Run diarization, returning [] and a hint if sherpa-onnx/models are missing.
+    """Run diarization, returning [] and a hint if it is unavailable.
 
-    An explicitly-requested diarization (``--speakers``) that fails because the
-    runtime/models aren't installed surfaces a clear hint but still returns []
+    Unavailability is the TYPED ``D.DiarizationUnavailable`` (missing
+    package / models / failed config validation): an explicitly-requested
+    diarization (``--speakers``) surfaces a clear hint but still returns []
     so the caller can fall back to the unlabeled (or screenshots-only) path
-    instead of crashing. A truly transient failure is re-raised.
+    instead of crashing. A truly transient failure (plain RuntimeError)
+    is re-raised.
     """
     num_sp = args.speakers if args.speakers else 0
     thr = args.cluster_threshold if args.cluster_threshold is not None else config.cluster_threshold
     try:
         diar_segments = D.run_diarization(wav, config, num_speakers=num_sp, threshold=thr)
-    except RuntimeError as e:
+    except D.DiarizationUnavailable as e:
+        # M2 (wave-1 audit): setup/unavailability problems arrive as the
+        # TYPED DiarizationUnavailable (missing package / models / failed
+        # config validation) — the old string matcher over RuntimeError
+        # text ('sherpa_onnx'/'models not found'/'download-diarization')
+        # missed the validate-failure path entirely and tied degradation
+        # to message wording. Transient RuntimeErrors are NOT caught here
+        # and stay loud, exactly as before.
         msg = str(e)
-        if "sherpa_onnx" in msg or "models not found" in msg or "download-diarization" in msg:
-            # Explicitly requested --speakers degrades loudly (warn); merely
-            # auto-enabled diarization stays a quiet hint (mirrors cmd_merge).
-            kind = "warn" if args.speakers is not None else "hint"
-            # The detail must describe what happens NEXT, not just what
-            # failed: generic-label artifacts when the fallback will write
-            # them (mirrors cmd_merge's wording), a plain skip otherwise.
-            lead = ("Falling back to generic 'Speaker' labels. Enable with: "
-                    if _will_write_generic_labels(args) else
-                    "Skipping speaker labels for this run. Enable with: ")
-            detail = lead + "pipx inject whiz 'whiz[diarize]' && whiz models download-diarization"
-            extra = _discarded_naming_detail(args)
-            if extra:
-                detail += f" {extra}"
-            ui.status(f"Speakers: diarization unavailable — {msg.splitlines()[0]}",
-                      kind=kind,
-                      detail=detail)
-            return []
-        raise
+        # Explicitly requested --speakers degrades loudly (warn); merely
+        # auto-enabled diarization stays a quiet hint (mirrors cmd_merge).
+        kind = "warn" if args.speakers is not None else "hint"
+        # The detail must describe what happens NEXT, not just what
+        # failed: generic-label artifacts when the fallback will write
+        # them (mirrors cmd_merge's wording), a plain skip otherwise.
+        lead = ("Falling back to generic 'Speaker' labels. Enable with: "
+                if _will_write_generic_labels(args) else
+                "Skipping speaker labels for this run. Enable with: ")
+        detail = lead + "pipx inject whiz 'whiz[diarize]' && whiz models download-diarization"
+        extra = _discarded_naming_detail(args)
+        if extra:
+            detail += f" {extra}"
+        ui.status(f"Speakers: diarization unavailable — {msg.splitlines()[0]}",
+                  kind=kind,
+                  detail=detail)
+        return []
     if not diar_segments:
         # Same what-happens-next rule as the except branch above: the
         # fallback writes generic-label artifacts on video/explicit-html
@@ -1038,6 +1102,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
 
     # --- Merge diarization with whisper output ---
     written: list[str] = []
+    kept_outputs: list[Path] = []
     want_html = _outputs_include(args, config, "html")
     # The degraded (unlabeled) fallback honors only an EXPLICIT --outputs
     # html; config-supplied html keeps master's skip when diarization
@@ -1107,6 +1172,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             # Video screenshots: one frame per segment, using the relabeled
             # merged list so the manifest carries final speaker names.
             frames_dir = None
+            manifest_kept = False
             if want_frames:
                 ui.phase("capturing frames")
                 width = args.screenshot_width if args.screenshot_width is not None else 1280
@@ -1117,9 +1183,16 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                     dry_run=args.dry_run,
                 )
                 if result is not None:
-                    frames_dir = result[0]
-                    ui.wrote("Wrote frames manifest", result[1])
-                    written.append(str(result[1]))
+                    frames_dir, manifest_path, manifest_kept = result
+                    if not manifest_kept:
+                        ui.wrote("Wrote frames manifest", manifest_path)
+                        written.append(str(manifest_path))
+                    else:
+                        # H5: a named manifest from an earlier diarized run
+                        # was KEPT, not overwritten — count it so a kept-only
+                        # run reads as a no-op success (rc=0), mirroring
+                        # `_write_html_transcript`'s kept contract.
+                        kept_outputs.append(manifest_path)
             # Write HTML after frames exist so they can be inlined.
             if want_html and want_frames and frames_dir is not None:
                 ui.phase("writing HTML transcript")
@@ -1149,6 +1222,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             # writes a generic-label .speakers.txt so analyze still works.
             unlabeled = [(seg, "Speaker") for seg in whisper_segs]
             frames_dir = None
+            manifest_kept = False
             if want_frames:
                 ui.phase("capturing frames")
                 width = args.screenshot_width if args.screenshot_width is not None else 1280
@@ -1159,17 +1233,43 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                     dry_run=args.dry_run,
                 )
                 if result is not None:
-                    frames_dir = result[0]
-                    ui.wrote("Wrote frames manifest", result[1])
-                    written.append(str(result[1]))
+                    frames_dir, manifest_path, manifest_kept = result
+                    if not manifest_kept:
+                        ui.wrote("Wrote frames manifest", manifest_path)
+                        written.append(str(manifest_path))
+                    else:
+                        kept_outputs.append(manifest_path)
             if explicit_html:
                 ui.phase("writing HTML transcript")
-                fallback_written, _fallback_kept = _write_html_transcript(
+                fallback_written, fallback_kept = _write_html_transcript(
                     unlabeled, of_base, frames_dir, in_path.name,
                     note=_GENERIC_LABEL_NOTE,
                     transcript_txt=not want_frames,
                 )
                 written.extend(str(p) for p in fallback_written)
+                kept_outputs.extend(fallback_kept)
+            elif want_html and not explicit_html:
+                # L (wave-1 audit): config-supplied html was skipped on this
+                # degraded run — say so, and NAME the format (a generic
+                # "skipping outputs" would leave the user wondering which
+                # one). The explicit path above explains itself.
+                ui.status(
+                    "html output (from config, not --outputs) skipped: no "
+                    "speaker labels to write it with — pass --outputs html to "
+                    "write a generic-label transcript.",
+                    kind="hint",
+                )
+        elif whisper_segs and want_html and not explicit_html:
+            # L (wave-1 audit): config-supplied html with no speaker labels
+            # AND no frames/explicit-html fallback to enter — master's quiet
+            # skip. Still say so, and NAME the format, so the user isn't left
+            # wondering which output never appeared.
+            ui.status(
+                "html output (from config, not --outputs) skipped: no speaker "
+                "labels to write it with — pass --outputs html to write a "
+                "generic-label transcript anyway.",
+                kind="hint",
+            )
 
     # Clean up the intermediate WAV unless asked to keep it.
     if wav != in_path and not keep_wav and wav.exists():
@@ -1180,6 +1280,24 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             pass
 
     ui.summary(written)
+
+    # L (wave-1 audit): rc symmetry with `whiz merge`. An EXPLICIT --speakers
+    # that degraded to generic labels and wrote nothing speaker-related
+    # used to exit 0 here while merge exits 1 for the same outcome — a
+    # wrapper could not tell the transcribe failed to deliver the requested
+    # speaker labels. rc stays 0 whenever anything was written or kept (the
+    # transcript itself succeeded); it goes nonzero only when the explicit
+    # --speakers request produced nothing at all. A whisper failure keeps
+    # whisper's own rc (checked first below via `rc == 0`).
+    if (
+        args.speakers is not None
+        and diarize_enabled
+        and rc == 0
+        and not diar_segments
+        and not written
+        and not kept_outputs
+    ):
+        return 1
 
     # Optional: chain into AI analysis after a successful transcription.
     # Runs the same auto-detect path as `whiz analyze <file>` so the user gets
@@ -1200,13 +1318,33 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             no_vision=getattr(args, "no_vision", False) or False,
         )
         ui.phase("analyzing (chained)")
+        # H4 (wave-1 audit): the old `except SystemExit: pass` swallowed the
+        # chained analysis failure's message AND exit code — the comment
+        # claimed "the hint was already printed", but cmd_analyze raises
+        # SystemExit BEFORE printing its own hint for missing transcripts;
+        # either way the run reported rc=0 for a --analyze that did nothing.
+        # Now the message (when non-empty) is surfaced and the exit code is
+        # honored: a successful transcription stays successful (rc unchanged)
+        # unless the analysis step actually failed.
+        analyze_rc = 0
         try:
-            cmd_analyze(analyze_args)
-        except SystemExit:
-            # cmd_analyze raises SystemExit on missing transcript/model issues;
-            # the transcription itself already succeeded, so don't surface that
-            # as a hard failure — the hint was already printed.
-            pass
+            analyze_rc = cmd_analyze(analyze_args) or 0
+        except SystemExit as e:
+            message = str(e)
+            # A message-carrying SystemExit (its code IS the message string)
+            # is surfaced; a bare SystemExit(3) has no message to print —
+            # only its code propagates below.
+            if message and not isinstance(e.code, int):
+                ui.status(f"Chained analysis failed: {message.splitlines()[0]}", kind="warn")
+            analyze_rc = e.code if isinstance(e.code, int) else 1
+        if analyze_rc:
+            ui.status(
+                "The transcription itself succeeded — the artifacts above are "
+                "usable — but the chained analysis did not complete.",
+                kind="warn",
+                detail="Re-run analysis directly: whiz analyze <file>",
+            )
+            return analyze_rc
 
     return rc
 
@@ -1610,11 +1748,18 @@ def cmd_merge(args: argparse.Namespace) -> int:
     # or video auto-enable); --no-speakers merges run straight to the JSON
     # path without paying an unrelated setup.
     if speakers_requested:
-        _ensure_diarization_ready(
+        setup_ready = _ensure_diarization_ready(
             config,
             dry_run=False,
             setup_allowed=not getattr(args, "no_auto_diarization_setup", False),
         )
+    else:
+        setup_ready = True
+    # M1 (wave-1 audit): the diarization call below is gated on
+    # speakers_requested — a `whiz merge --no-speakers` (or an audio file with
+    # no --speakers) must NOT pay a model-resolution attempt inside
+    # run_diarization; it merges straight to the JSON path, exactly like the
+    # comment above (and the 1607-1611 gate) promise.
 
     # Resolve the audio (WAV) to diarize. Reuse an existing sibling WAV if the
     # transcribe run kept it; otherwise re-extract from the video.
@@ -1665,18 +1810,45 @@ def cmd_merge(args: argparse.Namespace) -> int:
     # keeps master's skip when diarization yields nothing).
     explicit_html = _outputs_explicitly_include(args, "html")
     want_frames = screenshots and aud.needs_extraction(in_path)
+    # L (wave-1 audit): config-supplied html on a run that will produce no
+    # speaker labels is skipped — say so and NAME the format, instead of
+    # leaving the user wondering why no HTML appeared.
+    if want_html and not explicit_html and not speakers_requested:
+        ui.status(
+            "html output (from config, not --outputs) will be skipped: no "
+            "speaker labels on this run — pass --outputs html to request a "
+            "generic-label transcript anyway.",
+            kind="hint",
+        )
+    # M14 (wave-1 audit): the degraded-output explanation must fire whenever
+    # degraded output is actually requested (explicit html or frames), even
+    # when diarization never runs — a --no-speakers merge still writes the
+    # unlabeled artifacts below, and the reason they carry generic labels
+    # must be stated at the point the artifacts exist, not only inside the
+    # diarization branch.
+    if (explicit_html or want_frames) and not speakers_requested:
+        ui.status(
+            "Speakers: diarization not requested (--no-speakers or audio with no --speakers); "
+            "any HTML transcript / frames manifest from this run carries generic 'Speaker' labels.",
+            kind="info",
+        )
     # Set when the diarization-unavailable status below has already said
     # what happens next (skip / fall back to generic labels): the follow-up
     # "produced no segments" block would only repeat it (review: the
     # sherpa-missing path double-warned). It stays silent for the
     # genuinely-new case — diarization RAN and returned nothing.
     degraded_note_shown = False
-    try:
-        ui.phase("diarizing")
-        diar_segments = D.run_diarization(wav, config, num_speakers=num_sp, threshold=thr)
-    except RuntimeError as e:
-        msg = str(e)
-        if "sherpa_onnx" in msg or "models not found" in msg or "download-diarization" in msg:
+    diar_segments: list[D.DiarSegment] = []
+    if speakers_requested:
+        try:
+            ui.phase("diarizing")
+            diar_segments = D.run_diarization(wav, config, num_speakers=num_sp, threshold=thr)
+        except D.DiarizationUnavailable as e:
+            # M2 (wave-1 audit): setup/unavailability problems arrive as the
+            # typed DiarizationUnavailable (missing package / models /
+            # validate failure) — not as string-matched RuntimeError text
+            # (which missed the validate-failure path entirely).
+            msg = str(e)
             # Speaker-naming flags are silently dropped on every fallback
             # below — say so instead of letting the user believe names applied.
             naming = _discarded_naming_detail(args)
@@ -1689,7 +1861,6 @@ def cmd_merge(args: argparse.Namespace) -> int:
                 ui.status(f"Speakers: diarization unavailable — {msg.splitlines()[0]}",
                           kind="hint",
                           detail=detail)
-                diar_segments = []
                 degraded_note_shown = True
             elif explicit_html or want_frames:
                 # Explicitly requested, but an HTML transcript / screenshots
@@ -1702,28 +1873,47 @@ def cmd_merge(args: argparse.Namespace) -> int:
                 ui.status(f"Speakers: diarization unavailable — {msg.splitlines()[0]}",
                           kind="warn",
                           detail=detail)
-                diar_segments = []
                 degraded_note_shown = True
             else:
                 raise SystemExit(
                     f"{msg}\nEnable diarization with: pipx inject whiz 'whiz[diarize]' && "
                     f"whiz models download-diarization"
                 )
-        else:
-            raise
-    if not diar_segments:
+    if speakers_requested and not diar_segments:
         if degraded_note_shown:
             pass  # already said what happens next — a second status is noise
-        elif want_html or want_frames:
+        elif want_frames or explicit_html:
             ui.status("Diarization produced no segments; writing unlabeled output with generic 'Speaker' labels.",
                       kind="warn",
                       detail=_discarded_naming_detail(args))
             _print_zero_segments_hints()
-        elif speakers_requested:
-            ui.status("Diarization produced no segments; nothing to merge.", kind="warn")
-            _print_zero_segments_hints()
         else:
-            raise SystemExit("Diarization produced no segments; cannot merge.")
+            detail = _discarded_naming_detail(args)
+            # L (wave-1 audit): name the skipped format — config-supplied
+            # html is NOT written on a degraded run (only an explicit
+            # --outputs html is), so the message must say html specifically,
+            # not just "nothing to merge".
+            if want_html and not explicit_html:
+                note = ("html output (from config, not --outputs) skipped: no "
+                        "speaker labels to write it with — pass --outputs html "
+                        "for a generic-label transcript.")
+                detail = f"{detail} {note}" if detail else note
+            ui.status("Diarization produced no segments; nothing to merge.", kind="warn",
+                      detail=detail)
+            _print_zero_segments_hints()
+    # L (wave-1 audit): a declined/failed one-time setup followed by a
+    # SUCCESSFUL diarization is surprising — it can only happen via the
+    # diarization cache (models on disk + a matching cached result make
+    # the missing package irrelevant). Explain it post-hoc, at the point
+    # the surprise is real; the degrade paths above already explain
+    # themselves.
+    if speakers_requested and not setup_ready and diar_segments:
+        ui.status(
+            "Speakers: diarization ran WITHOUT the one-time setup — a cached "
+            "diarization result was reused for this WAV.",
+            kind="info",
+            detail=str(D.diar_cache_path(wav)),
+        )
 
     merged = MR.assign_speakers(whisper_segs, diar_segments) if diar_segments else []
 
@@ -1782,6 +1972,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
     # When no merged list exists (diarization unavailable), frames fall back
     # to a generic 'Speaker' label so the manifest + HTML still get written.
     frames_dir = None
+    manifest_kept = False
     shot_list = merged if merged else [(seg, "Speaker") for seg in whisper_segs]
     if want_frames:
         ui.phase("capturing frames")
@@ -1793,9 +1984,15 @@ def cmd_merge(args: argparse.Namespace) -> int:
             dry_run=False,
         )
         if result is not None:
-            frames_dir = result[0]
-            ui.wrote("Wrote frames manifest", result[1])
-            written.append(str(result[1]))
+            frames_dir, manifest_path, manifest_kept = result
+            if not manifest_kept:
+                ui.wrote("Wrote frames manifest", manifest_path)
+                written.append(str(manifest_path))
+            else:
+                # H5: a NAMED manifest from an earlier diarized run was KEPT
+                # (this run is degraded) — count it so a kept-only run reads
+                # as a no-op success (rc=0), like `_write_html_transcript`.
+                kept_outputs.append(manifest_path)
     # Write HTML after frames exist so they can be inlined.
     if want_html and frames_dir is not None and merged:
         ui.phase("writing HTML transcript")
@@ -2354,8 +2551,12 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
     3. Restart the LaunchAgent IF it's installed (unload + load) so launchd
        re-execs the agent from the freshly installed code. Skipped if no
        service is installed.
-    4. Run `whiz dictate setup` to re-verify the full stack (extra, perms,
-       hotkey) and surface anything the upgrade broke.
+    4. Re-verify the full stack IF the dictate extra is installed
+       (`whiz dictate setup` in checks-only mode: extra, perms, hotkey —
+       never installing anything). When the extra is absent the checks are
+       skipped: setup()'s auto-inject would re-attempt the exact 1.6 GB
+       install step 2 chose to skip, failing the whole upgrade at the last
+       mile with a misleading "verification" message (M12, wave-1 audit).
 
     Returns 0 if everything succeeded, 1 if a step failed.
     """
@@ -2428,10 +2629,25 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
         ui.muted("dictate service not installed — skipping (install with: whiz dictate service install)")
 
     # 4. Re-verify the full stack.
+    # M12 (wave-1 audit): `setup()` defaults to install_service=True, which
+    # silently installs the LaunchAgent — an upgrade must NEVER add a new
+    # login service the user never asked for; only restart the (existing)
+    # service in step 3. And its step-0 auto-inject of the dictate extra
+    # re-fires the exact 1.6 GB install upgrade step 2 just skipped, failing
+    # the whole upgrade at the last mile with a misleading "verification"
+    # message — so when the extra is absent, skip setup entirely.
     ui.phase("verifying")
+    if not _dictate_extra_installed():
+        ui.muted(
+            "dictate extra not installed — skipping the dictate verification "
+            "checks (install with: pipx inject whiz 'whiz[dictate]', then: "
+            "whiz dictate setup)"
+        )
+        ui.status("Upgrade complete.", kind="ok")
+        return 0
     from whiz.dictate import setup as setup_mod
 
-    setup_rc = setup_mod.setup()
+    setup_rc = setup_mod.setup(install_service=False)
     if setup_rc != 0:
         ui.status("verification found issues — see the report above", kind="warn")
         return 1

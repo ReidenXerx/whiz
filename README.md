@@ -205,6 +205,8 @@ whiz transcribe --dry-run recording.mov             # see what it would run, wit
 
 Run `whiz transcribe --help` for the full flag reference.
 
+Exit codes: when an explicit `--speakers` degrades (sherpa-onnx or its models unavailable) and the run writes no speaker-labeled artifacts at all, `transcribe` exits nonzero — the same contract as `merge`, so `|| alert` wrappers can tell. A degraded run that does write generic-label outputs (or keeps existing named ones) still exits 0.
+
 ### `whiz merge <file>`
 
 Re-run only diarization + the merge against an existing whisper JSON, skipping the expensive transcription. Lets you tune speaker count / threshold / names cheaply after a first run. Diarization results are cached in `<file>.wav.diar.json`, so a second `whiz merge` with the same `--speakers`/`--cluster-threshold` reuses the cache and skips the embedding pass — only the cheap merge step runs. Changing either parameter re-runs diarization and overwrites the cache.

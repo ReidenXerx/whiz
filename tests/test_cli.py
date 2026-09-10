@@ -305,7 +305,7 @@ def test_transcribe_html_and_frames_fallback_for_video(tmp_path, monkeypatch, ca
     monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
     monkeypatch.setattr(
         cli, "_extract_and_manifest_screenshots",
-        lambda in_path, merged, of_base, ffmpeg, width, dry_run: (frames_dir, manifest),
+        lambda in_path, merged, of_base, ffmpeg, width, dry_run: (frames_dir, manifest, False),
     )
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
 
@@ -403,7 +403,10 @@ def _merge_args(file, outputs="html", speakers=1, speakers_names=None, no_speake
 
 
 def _raise_sherpa_missing(wav, config, num_speakers=0, threshold=0.9):
-    raise RuntimeError("The 'sherpa_onnx' package is required for diarization")
+    # M2 (wave-1 audit): unavailability arrives as the TYPED exception now;
+    # the "sherpa_onnx" token stays in the message for the SystemExit
+    # match assertions below.
+    raise cli.D.DiarizationUnavailable("The 'sherpa_onnx' package is required for diarization")
 
 
 def _stub_setup_unavailable(monkeypatch):
@@ -789,7 +792,10 @@ def test_transcribe_config_html_is_not_degraded(tmp_path, monkeypatch, capsys):
 
     rc = cli.cmd_transcribe(_transcribe_args(audio, outputs="", speakers=1))
 
-    assert rc == 0
+    # L (wave-1 audit): rc symmetry with merge — the explicit --speakers
+    # degraded and nothing speaker-related was written, so the run exits
+    # nonzero instead of reporting success.
+    assert rc == 1
     assert not (tmp_path / "meeting.speakers.html").exists()
     assert not (tmp_path / "meeting.speakers.txt").exists()
     # The diarization-unavailable status still fires (it is honest about the
@@ -828,7 +834,11 @@ def test_transcribe_fallback_honest_skip_when_nothing_to_write(tmp_path, monkeyp
 
     rc = cli.cmd_transcribe(_transcribe_args(audio, outputs="srt", speakers=1))
 
-    assert rc == 0
+    # L (wave-1 audit): rc symmetry with merge — nothing speaker-related was
+    # written for the explicit --speakers, so nonzero. (A degraded run that
+    # DOES write generic-label outputs still exits 0 — see the html fallback
+    # tests above.)
+    assert rc == 1
     err = capsys.readouterr().err
     assert "Skipping speaker labels" in err
     assert "Falling back to generic" not in err
@@ -1059,7 +1069,7 @@ def test_transcribe_auto_diarization_setup_success_writes_speakers_html(tmp_path
     frames_dir.mkdir()
     monkeypatch.setattr(
         cli, "_extract_and_manifest_screenshots",
-        lambda in_path, merged, of_base, ffmpeg, width, dry_run: (frames_dir, tmp_path / "recording.frames.json"),
+        lambda in_path, merged, of_base, ffmpeg, width, dry_run: (frames_dir, tmp_path / "recording.frames.json", False),
     )
 
     rc = cli.cmd_transcribe(_transcribe_args(video, outputs="html", speakers=None))
@@ -1434,3 +1444,315 @@ def test_config_show_renders_tri_state_unset_cleanly(tmp_path, monkeypatch, caps
 
     assert cli.cmd_config_show(SimpleNamespace()) == 0
     assert "auto_diarization_setup = <unset>" in capsys.readouterr().out
+
+
+# ---------- wave-1 audit fix batch (branch fix/wave1-cli, 2026-09-10) ----------
+#
+# Regression tests for the wave-1 silent-failure audit items: M1 (merge
+# diarization gate), M2 (typed DiarizationUnavailable at both call sites),
+# H4 (chained --analyze honors SystemExit), H5 (a degraded run never
+# clobbers a NAMED frames manifest), M14 (degraded-output info without
+# diarization), L-a (pip rc-0-but-not-importable), L-b (declined setup +
+# cache hit), L-c (non-bool consent value).
+
+
+def test_merge_no_speakers_gate_skips_diarization_entirely(tmp_path, monkeypatch):
+    """M1: an audio merge with no --speakers never reaches run_diarization
+    (or the one-time setup) — it goes straight to the JSON merge path and
+    writes the generic-label fallback output."""
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+
+    def _boom(*_a, **_k):
+        raise AssertionError("diarization must not run when speakers were not requested")
+
+    monkeypatch.setattr(cli.D, "run_diarization", _boom)
+    monkeypatch.setattr(cli, "_ensure_diarization_ready", _boom)
+
+    rc = cli.cmd_merge(_merge_args(audio, outputs="html", speakers=None))
+
+    assert rc == 0
+    html = (tmp_path / "meeting.m4a.speakers.html").read_text(encoding="utf-8")
+    assert ">Speaker<" in html  # explicit html degraded to generic labels
+
+
+def test_merge_degraded_info_fires_without_diarization(tmp_path, monkeypatch, capsys):
+    """M14: a merge requesting degraded output (explicit html) without
+    speakers must explain WHY the artifacts carry generic labels — the old
+    explanation only existed inside the diarization branch."""
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    monkeypatch.setattr(
+        cli.D, "run_diarization",
+        lambda wav, config, num_speakers=0, threshold=0.9: [],
+    )
+
+    rc = cli.cmd_merge(_merge_args(audio, outputs="html", speakers=None))
+
+    assert rc == 0
+    flat = " ".join(capsys.readouterr().err.split())
+    assert "diarization not requested" in flat
+
+
+def test_diarize_or_fallback_catches_typed_validate_failure(tmp_path, monkeypatch, capsys):
+    """M2 (transcribe site): the config-validation DiarizationUnavailable —
+    the path the old RuntimeError string matcher never matched — degrades
+    with a hint instead of crashing."""
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+
+    def _raise_validate(wav, config, num_speakers=0, threshold=0.9):
+        raise cli.D.DiarizationUnavailable(
+            "sherpa-onnx diarization config validation failed; check model paths."
+        )
+
+    monkeypatch.setattr(cli.D, "run_diarization", _raise_validate)
+
+    segs = cli._run_diarize_or_fallback(
+        audio, cli.cfg.Config(), _transcribe_args(audio, speakers=1))
+
+    assert segs == []
+    flat = " ".join(capsys.readouterr().err.split())
+    assert "diarization unavailable" in flat
+    assert "config validation failed" in flat
+
+
+def test_merge_validate_failure_raises_systemexit_with_hint(tmp_path, monkeypatch):
+    """M2 (merge site): with nothing else requested, the typed catch turns
+    the validate failure into the loud SystemExit + enable hint. (Under the
+    old string matcher this escaped as a raw RuntimeError.)"""
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    _stub_setup_unavailable(monkeypatch)
+
+    def _raise_validate(wav, config, num_speakers=0, threshold=0.9):
+        raise cli.D.DiarizationUnavailable(
+            "sherpa-onnx diarization config validation failed; check model paths."
+        )
+
+    monkeypatch.setattr(cli.D, "run_diarization", _raise_validate)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.cmd_merge(_merge_args(audio, outputs="", speakers=1))
+    assert "config validation failed" in str(excinfo.value)
+    assert "pipx inject whiz 'whiz[diarize]'" in str(excinfo.value)
+
+
+def test_transcribe_chained_analyze_failure_surfaces_message_and_rc(tmp_path, monkeypatch, capsys):
+    """H4: a --analyze chain that raises SystemExit is not swallowed — the
+    message is surfaced, the exit code honored, and the user told the
+    transcription itself is fine."""
+    audio = _setup_transcribe(monkeypatch, tmp_path, diarize_enabled=False)
+
+    def _no_transcript(_args):
+        raise SystemExit(
+            "No transcript found for recording.mov (need a frames manifest or .speakers.txt)."
+        )
+
+    monkeypatch.setattr(cli, "cmd_analyze", _no_transcript)
+    args = _transcribe_args(audio, outputs="srt", speakers=None)
+    args.analyze = True
+
+    rc = cli.cmd_transcribe(args)
+
+    assert rc == 1
+    flat = " ".join(capsys.readouterr().err.split())
+    assert "Chained analysis failed" in flat
+    assert "No transcript found" in flat
+    assert "transcription itself succeeded" in flat
+
+
+def test_transcribe_chained_analyze_honors_int_exit_code(tmp_path, monkeypatch, capsys):
+    """H4 (bare code): SystemExit(3) from the chained analysis propagates
+    as rc 3 — no fabricated 'Chained analysis failed: 3' message line."""
+    audio = _setup_transcribe(monkeypatch, tmp_path, diarize_enabled=False)
+
+    def _boom(_args):
+        raise SystemExit(3)
+
+    monkeypatch.setattr(cli, "cmd_analyze", _boom)
+    args = _transcribe_args(audio, outputs="srt", speakers=None)
+    args.analyze = True
+
+    rc = cli.cmd_transcribe(args)
+
+    assert rc == 3
+    flat = " ".join(capsys.readouterr().err.split())
+    assert "Chained analysis failed" not in flat
+
+
+def test_consent_non_bool_string_is_not_authoritative(tmp_path, monkeypatch):
+    """L-c: a hand-edited `auto_diarization_setup = "false"` string is not a
+    stored answer (it is truthy and used to read as consent) — it falls
+    through to the interactive prompt, where the user's 'n' declines."""
+    monkeypatch.setattr(cli.cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cli.cfg, "CONFIG_PATH", tmp_path / "config.toml")
+    _pin_ttys(monkeypatch, stdin_tty=True, stderr=_FakeTtyErr())
+    monkeypatch.setattr(builtins, "input", lambda prompt="": "n")
+    config = cli.cfg.Config()
+    config.auto_diarization_setup = "false"
+
+    assert cli._auto_setup_consent(config) is False
+    saved = (tmp_path / "config.toml").read_text(encoding="utf-8")
+    assert "auto_diarization_setup = false" in saved
+
+
+def test_install_sherpa_rc0_but_not_importable_warns(monkeypatch, capsys):
+    """L-a: pip exits 0 but sherpa_onnx still does not resolve (partial
+    install, wrong venv) — a loud warning with the manual path, not a silent
+    False that reads as a fresh-install loop on the next run."""
+    monkeypatch.setattr(
+        cli.subprocess, "run",
+        lambda cmd, check=False: SimpleNamespace(returncode=0),
+    )
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: None)
+
+    assert cli._install_sherpa_onnx() is False
+    flat = " ".join(capsys.readouterr().err.split())
+    assert "still not importable" in flat
+    assert "pipx inject whiz 'whiz[diarize]'" in flat
+
+
+def test_merge_declined_setup_then_success_explains_cache_reuse(tmp_path, monkeypatch, capsys):
+    """L-b: setup failed/declined yet diarization succeeded — only possible
+    via the diarization cache; the run says so instead of leaving the
+    surprise unexplained."""
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    _stub_setup_unavailable(monkeypatch)
+    monkeypatch.setattr(
+        cli.D, "run_diarization",
+        lambda wav, config, num_speakers=0, threshold=0.9: [
+            DiarSegment(start=0.0, end=3.0, speaker=0),
+        ],
+    )
+
+    rc = cli.cmd_merge(_merge_args(audio, outputs="html", speakers=1))
+
+    assert rc == 0
+    flat = " ".join(capsys.readouterr().err.split())
+    assert "ran WITHOUT the one-time setup" in flat
+    assert ".diar.json" in flat
+
+
+def test_manifest_is_named_detection(tmp_path):
+    """H5 unit: a NAMED manifest reads as named (keep), an all-generic one
+    as degraded (refresh), a missing one as writable."""
+    frames_dir = tmp_path / "rec.frames"
+    frames_dir.mkdir()
+    manifest = tmp_path / "rec.frames.json"
+    named = [cli.SC.FrameEntry(index=1, start=0.0, end=2.0, speaker="Alice",
+                               text="hi", frame="seg0001.jpg")]
+    cli.SC.write_manifest(named, frames_dir, manifest)
+    assert cli._manifest_is_named(manifest) is True
+
+    degraded = [cli.SC.FrameEntry(index=1, start=0.0, end=2.0, speaker="Speaker",
+                                  text="hi", frame="seg0001.jpg")]
+    cli.SC.write_manifest(degraded, frames_dir, manifest)
+    assert cli._manifest_is_named(manifest) is False
+
+    assert cli._manifest_is_named(tmp_path / "missing.frames.json") is False
+
+
+def test_extract_manifests_degraded_run_never_clobbers_named_manifest(tmp_path, monkeypatch, capsys):
+    """H5 unit: an incoming all-generic shot list KEEPS a NAMED manifest
+    (with a warning) and never runs the frame extraction."""
+    video = tmp_path / "recording.mov"
+    video.write_bytes(b"fake video")
+    frames_dir = tmp_path / "recording.frames"
+    frames_dir.mkdir()
+    manifest = tmp_path / "recording.frames.json"
+    named = [cli.SC.FrameEntry(index=1, start=0.0, end=2.0, speaker="Alice",
+                               text="hi", frame="seg0001.jpg")]
+    cli.SC.write_manifest(named, frames_dir, manifest)
+
+    def _boom(*_a, **_k):
+        raise AssertionError("extraction must not run when the named manifest is kept")
+
+    monkeypatch.setattr(cli.SC, "extract_segment_frames", _boom)
+    merged = [(cli.MR.WhisperSeg(start=0.0, end=2.0, text="hi"), "Speaker")]
+
+    result = cli._extract_and_manifest_screenshots(
+        video, merged, tmp_path / "recording", ffmpeg="ffmpeg", width=1280,
+    )
+
+    assert result == (frames_dir, manifest, True)
+    loaded = cli.SC.load_manifest(manifest)
+    assert loaded[0].speaker == "Alice"  # untouched
+    flat = " ".join(capsys.readouterr().err.split())
+    assert "already exists with named speakers" in flat
+
+
+def test_extract_manifests_refreshes_existing_degraded_manifest(tmp_path, monkeypatch):
+    """H5 flip side: an existing DEGRADED manifest has no speaker names to
+    protect — the degraded re-run refreshes it (idempotence), so re-runs
+    with a different --model/--language can update the transcript."""
+    video = tmp_path / "recording.mov"
+    video.write_bytes(b"fake video")
+    frames_dir = tmp_path / "recording.frames"
+    frames_dir.mkdir()
+    manifest = tmp_path / "recording.frames.json"
+    degraded = [cli.SC.FrameEntry(index=1, start=0.0, end=2.0, speaker="Speaker",
+                                  text="stale", frame="seg0001.jpg")]
+    cli.SC.write_manifest(degraded, frames_dir, manifest)
+    fresh = [cli.SC.FrameEntry(index=1, start=0.0, end=2.0, speaker="Speaker",
+                               text="fresh", frame="seg0001.jpg")]
+    monkeypatch.setattr(
+        cli.SC, "extract_segment_frames",
+        lambda video, merged, out_dir, ffmpeg="ffmpeg", width=1280, dry_run=False: fresh,
+    )
+    merged = [(cli.MR.WhisperSeg(start=0.0, end=2.0, text="fresh"), "Speaker")]
+
+    result = cli._extract_and_manifest_screenshots(
+        video, merged, tmp_path / "recording", ffmpeg="ffmpeg", width=1280,
+    )
+
+    assert result == (frames_dir, manifest, False)
+    loaded = cli.SC.load_manifest(manifest)
+    assert loaded[0].text == "fresh"  # refreshed, not kept
+
+
+def test_transcribe_degraded_run_keeps_named_frames_manifest_rc0(tmp_path, monkeypatch, capsys):
+    """H5 end-to-end: a degraded video re-run (explicit --speakers, sherpa
+    missing) KEEPS the named manifest an earlier diarized run wrote — and a
+    kept-only run is a no-op success (rc 0), not a failure."""
+    video = tmp_path / "recording.mov"
+    video.write_bytes(b"fake video")
+    (tmp_path / "recording.wav.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    wav = tmp_path / "recording.wav"
+    frames_dir = tmp_path / "recording.frames"
+    frames_dir.mkdir()
+    manifest = tmp_path / "recording.frames.json"
+    named = [cli.SC.FrameEntry(index=1, start=0.0, end=2.0, speaker="Alice",
+                               text="hello world", frame="seg0001.jpg")]
+    cli.SC.write_manifest(named, frames_dir, manifest)
+
+    def fake_build(args, config):
+        return (["whisper-cli"], "model.bin", wav, video, False,
+                tmp_path / "recording", True, True)
+
+    monkeypatch.setattr(cli, "_build_transcribe_args", fake_build)
+    monkeypatch.setattr(cli, "_run_whisper_streaming", lambda cmd: SimpleNamespace(returncode=0))
+    monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+
+    def _boom(*_a, **_k):
+        raise AssertionError("extraction must not run when the named manifest is kept")
+
+    monkeypatch.setattr(cli.SC, "extract_segment_frames", _boom)
+
+    rc = cli.cmd_transcribe(_transcribe_args(video, outputs="", speakers=1))
+
+    assert rc == 0  # kept-only run: no-op success
+    loaded = cli.SC.load_manifest(manifest)
+    assert loaded[0].speaker == "Alice"
+    flat = " ".join(capsys.readouterr().err.split())
+    assert "already exists with named speakers" in flat
