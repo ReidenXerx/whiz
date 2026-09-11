@@ -226,3 +226,82 @@ def test_format_speakers_html_no_note_by_default():
     merged = [(_seg(0.0, 1.0, "hi"), "Speaker A")]
     html = MR.format_speakers_html(merged)
     assert 'class="note"' not in html
+
+
+# ---------- wave-1 M4: zero-overlap fallback + malformed timestamps ----------
+
+
+def test_assign_speakers_zero_overlap_uses_nearest_not_first():
+    """M4: a whisper segment overlapping NO diarization segment must not
+    silently get the first speaker in the list — it falls back to the
+    diarization segment nearest in time."""
+    whisper = [_seg(100.0, 102.0, "far away")]
+    diar = [
+        DiarSegment(start=0.0, end=3.0, speaker=0),    # Speaker A (far)
+        DiarSegment(start=90.0, end=95.0, speaker=1),   # Speaker B (nearest)
+    ]
+    merged = MR.assign_speakers(whisper, diar)
+    assert merged[0][1] == "Speaker B"  # nearest in time, NOT first-in-list A
+
+
+def test_assign_speakers_zero_overlap_warns_on_stderr(capsys):
+    """M4: the zero-overlap fallback is logged, not silent."""
+    whisper = [_seg(100.0, 102.0, "x"), _seg(0.0, 1.0, "y")]
+    diar = [DiarSegment(start=0.0, end=1.0, speaker=0)]
+    MR.assign_speakers(whisper, diar)
+    err = capsys.readouterr().err
+    assert "overlap no diarization" in err
+    assert "1 " in err  # only the far-away segment fell back
+
+
+def test_assign_speakers_no_warning_when_all_overlap(capsys):
+    """M4: the warning fires only when the fallback was actually used."""
+    whisper = [_seg(0.5, 1.5, "x")]
+    diar = [DiarSegment(start=0.0, end=3.0, speaker=0)]
+    MR.assign_speakers(whisper, diar)
+    assert capsys.readouterr().err == ""
+
+
+def test_assign_speakers_zero_overlap_tie_breaks_earlier():
+    """M4: equidistant diarization segments tie-break toward the earlier
+    entry, so the fallback is deterministic."""
+    whisper = [_seg(5.0, 6.0, "between")]
+    diar = [
+        DiarSegment(start=0.0, end=3.0, speaker=1),   # gap 2.0
+        DiarSegment(start=8.0, end=12.0, speaker=0),  # gap 2.0
+    ]
+    merged = MR.assign_speakers(whisper, diar)
+    assert merged[0][1] == "Speaker B"  # earlier diar segment wins the tie
+
+
+def test_parse_whisper_json_skips_malformed_timestamps(tmp_path, capsys):
+    """M4: unparseable timestamps must not become t=0..0 zero-length cues —
+    the segment is skipped and the count warned on stderr."""
+    jf = tmp_path / "out.json"
+    jf.write_text(
+        '{"transcription": ['
+        '{"timestamps":{"from":"00:00:00,000","to":"00:00:02,000"},"text":"ok"},'
+        '{"timestamps":{"from":"garbage","to":"alsobad"},"text":"bad ts"}'
+        "]}",
+        encoding="utf-8",
+    )
+    segs = MR.parse_whisper_json(jf)
+    assert len(segs) == 1
+    assert segs[0].text == "ok"
+    err = capsys.readouterr().err
+    assert "skipped 1" in err
+    # No zero-length segment was emitted.
+    assert all(s.end > s.start for s in segs)
+
+
+def test_parse_whisper_json_all_malformed_returns_empty(tmp_path, capsys):
+    """M4: a fully-malformed file yields [] with a warning (the caller's
+    "No segments parsed" path handles the rest)."""
+    jf = tmp_path / "out.json"
+    jf.write_text(
+        '{"transcription": [{'
+        '"timestamps":{"from":"??","to":"??"},"text":"unparseable"}]}',
+        encoding="utf-8",
+    )
+    assert MR.parse_whisper_json(jf) == []
+    assert "skipped 1" in capsys.readouterr().err

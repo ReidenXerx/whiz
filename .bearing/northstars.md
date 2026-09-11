@@ -13,7 +13,7 @@ propose diffs, never edit silently.
 ## Semantics — exact meaning here
 - **NS-4** — `utterance end` = start time of the first closing silent frame; buffered PCM spans [start, end + frame); Swift's 0.2 s trim removes from the tail of that span. NOT "last speech frame", NOT "buffer end". — src: tuning/golden/expected.json, docs/ARCHITECTURE.md
 - **NS-5** — `rejected_by_energy_gate` = whole-buffer RMS below the calibrated (or default) utterance gate. NOT "VAD found no speech", NOT "transcription failed". — src: tuning/golden/expected.json, whiz/dictate/engine.py
-- **NS-6** — Hallucination filtering = exact, trimmed, case-sensitive membership in the 21-phrase set in `tuning.toml`. NOT fuzzy or normalized matching. — src: tuning/tuning.toml, tests/test_tuning.py
+- **NS-6** — Hallucination filtering is a hybrid match on the trimmed, lowercased transcript, per the two arrays in `tuning.toml`: `hallucination_artifact_phrases` (distinctive boilerplate) match by SUBSTRING; `hallucination_vocab_phrases` (ordinary vocabulary: "субтитры", "перевод", "корректор") match only when the whole transcript EQUALS the phrase. NOT substring matching for vocabulary (that silently dropped real speech like "Отправь перевод на карту" — wave-1 CRITICAL), NOT fuzzy matching. — src: tuning/tuning.toml, tests/test_tuning.py, whiz/dictate/engine.py, macos/Sources/WhizApp/STT/TranscriptFilter.swift
 
 ## Evidence — what counts as proof
 - **NS-7** — A segmentation-behavior claim requires a corpus run (existing case or a new committed case); reasoning about the state machine from source is NOT evidence. — src: docs/ARCHITECTURE.md

@@ -163,7 +163,14 @@ def write_manifest(entries: list[FrameEntry], out_dir: Path, manifest_path: Path
 
 
 def load_manifest(manifest_path: Path) -> list[FrameEntry] | None:
-    """Load a frames manifest. Returns None if missing or unreadable."""
+    """Load a frames manifest. Returns None if missing or unreadable.
+
+    Malformed rows are skipped (they can't be reconstructed), but never
+    silently anymore (wave-1 audit, L-low): the count of skipped rows is
+    reported in one stderr warning, so a manifest that silently lost rows
+    to partial writes / manual edits surfaces instead of quietly producing
+    a shorter transcript.
+    """
     if not manifest_path.exists():
         return None
     try:
@@ -172,6 +179,7 @@ def load_manifest(manifest_path: Path) -> list[FrameEntry] | None:
         return None
     segs = data.get("segments", [])
     out: list[FrameEntry] = []
+    skipped = 0
     for s in segs:
         try:
             out.append(FrameEntry(
@@ -183,5 +191,12 @@ def load_manifest(manifest_path: Path) -> list[FrameEntry] | None:
                 frame=str(s.get("frame", "")),
             ))
         except (KeyError, TypeError, ValueError):
+            skipped += 1
             continue
+    if skipped:
+        print(
+            f"Warning: skipped {skipped} malformed row(s) in "
+            f"{manifest_path.name}.",
+            file=sys.stderr,
+        )
     return out

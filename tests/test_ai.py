@@ -296,6 +296,60 @@ def test_chat_text_no_choices_raises(monkeypatch):
         assert "no choices" in str(e)
 
 
+def test_chat_text_non_json_response_raises_runtime_error(monkeypatch):
+    """L-low: a server replying with an HTML error page must surface as a
+    clean RuntimeError (callers only catch RuntimeError), not a raw
+    JSONDecodeError escaping the retry/error machinery."""
+    resp = io.BytesIO(b"<html>502 Bad Gateway</html>")
+    resp.status = 200
+    resp.__enter__ = lambda: resp
+    resp.__exit__ = lambda *a: None
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=600: resp)
+    try:
+        AI.chat_text("p: {transcript}", "t", base_url="http://x/v1", model="m", api_key="")
+        assert False, "expected RuntimeError"
+    except RuntimeError as e:
+        assert "unreadable response" in str(e)
+        assert "JSONDecodeError" in str(e)
+
+
+def test_chat_text_timeout_raises_runtime_error(monkeypatch):
+    """L-low: a stalled socket (timeout) must surface as RuntimeError, not
+    as a raw socket.timeout/TimeoutError escaping the machinery."""
+    import socket as _socket
+
+    def fake_urlopen(req, timeout=600):
+        raise _socket.timeout("timed out")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    try:
+        AI.chat_text("p: {transcript}", "t", base_url="http://x/v1", model="m", api_key="")
+        assert False, "expected RuntimeError"
+    except RuntimeError as e:
+        assert "unreadable response" in str(e)
+        assert "timed out" in str(e)
+
+
+def test_chat_text_null_content_returns_empty(monkeypatch):
+    """Some servers return "content": null for an empty completion — that
+    is an empty string, not an AttributeError on .strip()."""
+    def fake_urlopen(req, timeout=600):
+        return _mock_response({"choices": [{"message": {"content": None}}]})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    out = AI.chat_text("p: {transcript}", "t", base_url="http://x/v1", model="m", api_key="")
+    assert out == ""
+
+
+def test_resolve_prompt_auto_dead_plan_branch_removed():
+    """L-low: the `if token == "PLAN"` branch after `if "PLAN" in token`
+    was unreachable (any token containing PLAN already returned) — the
+    module no longer carries it."""
+    import inspect
+    src = inspect.getsource(AI.resolve_prompt_auto)
+    assert 'token == "PLAN"' not in src
+
+
 # ---------- retry on transient errors ----------
 
 def test_chat_text_retries_500_then_succeeds(monkeypatch):

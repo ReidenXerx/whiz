@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import base64
 import json
+import socket
 import sys
 import time
 import urllib.error
@@ -465,8 +466,6 @@ def resolve_prompt_auto(transcript: str, *, base_url: str, model: str, api_key: 
         return PLAN_PROMPT, "plan"
     if "MEETING" in token:
         return SUMMARY_AND_ACTIONS_PROMPT, "meeting"
-    if token == "PLAN":
-        return PLAN_PROMPT, "plan"
     # Anything else (including empty) -> safe default.
     return SUMMARY_AND_ACTIONS_PROMPT, "meeting"
 
@@ -528,8 +527,19 @@ def _post_chat(base_url: str, model: str, messages: list[dict], api_key: str, ti
         req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - local/known server
-                data = json.loads(resp.read().decode("utf-8"))
+                raw = resp.read().decode("utf-8")
+                data = json.loads(raw)
             break  # success
+        except (json.JSONDecodeError, socket.timeout, TimeoutError) as e:
+            # Wave-1 audit (L-low): these used to bypass the RuntimeError
+            # machinery entirely — a server replying with an HTML error page
+            # or a stalled socket surfaced as a raw JSONDecodeError/
+            # TimeoutError to callers that only catch RuntimeError. Wrap
+            # them so every failure from _post_chat is a clean RuntimeError.
+            raise RuntimeError(
+                f"AI server at {url} returned an unreadable response "
+                f"({type(e).__name__}: {e})."
+            ) from e
         except urllib.error.HTTPError as e:
             body_text = ""
             try:
@@ -576,6 +586,10 @@ def _post_chat(base_url: str, model: str, messages: list[dict], api_key: str, ti
     if not choices:
         raise RuntimeError(f"AI server returned no choices: {json.dumps(data)[:300]}")
     content = choices[0].get("message", {}).get("content", "")
+    # Some servers return "content": null (empty completion) — treat it as
+    # a clean empty string instead of crashing with AttributeError on strip.
+    if content is None:
+        content = ""
     return content.strip()
 
 

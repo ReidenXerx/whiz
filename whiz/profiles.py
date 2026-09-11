@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import math
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -58,6 +59,11 @@ class Profile:
     dim: int
     created: str
     samples: int = 0
+    # "user" (named interactively / via --speakers-names) or "auto"
+    # (adopted from a profile auto-match). Auto-sourced profiles are
+    # treated as derived data: a later run cannot silently merge into a
+    # profile that was never actually confirmed by a human (M3, wave-1).
+    source: str = "user"
 
 
 def load_profiles() -> list[Profile]:
@@ -81,6 +87,7 @@ def load_profiles() -> list[Profile]:
                 dim=int(data.get("dim", len(emb))),
                 created=str(data.get("created", "")),
                 samples=int(data.get("samples", 0)),
+                source=str(data.get("source", "user")),
             )
         )
     return out
@@ -128,7 +135,12 @@ def merge_embeddings(
     return out, int(old_samples + new_samples)
 
 
-def save_profile(name: str, embedding: list[float], samples: int = 1) -> Path:
+def save_profile(
+    name: str,
+    embedding: list[float],
+    samples: int = 1,
+    auto_match: bool = False,
+) -> Path:
     """Persist a voice profile for ``name``, merging with any existing one.
 
     If a profile already exists for ``name`` with the same embedding dimension,
@@ -137,12 +149,27 @@ def save_profile(name: str, embedding: list[float], samples: int = 1) -> Path:
     across recordings instead of being overwritten. If the dimension differs
     (e.g. the embedding model was swapped), the old profile is discarded and
     the new one replaces it. ``samples`` is the count this run contributes.
+
+    M3 (wave-1 audit): ``auto_match=True`` marks this save as sourced from a
+    profile auto-match rather than a user-confirmed name. An auto-match can
+    CREATE a profile (first sighting, provenance recorded as ``"auto"``) but
+    can never MERGE into or REPLACE an existing one — auto-matches used to
+    flow back into stored profiles with no provenance, so a chain of
+    self-confirming matches silently drifted the stored centroid. An
+    existing profile is returned untouched (the caller decides whether to
+    warn), and a new file is marked ``source: "auto"`` so a later human
+    confirmation (``auto_match=False``) still merges normally and upgrades
+    the provenance to ``"user"``.
     """
     d = profiles_dir()
     d.mkdir(parents=True, exist_ok=True)
     prior = _load_profile_raw(name)
+    if auto_match and prior is not None:
+        # An auto-match must not adopt an existing profile's slot.
+        return _profile_path(name)
     total_samples = int(samples)
     final_embedding = [float(x) for x in embedding]
+    source = "auto" if auto_match else "user"
     if prior is not None:
         old_emb = prior.get("embedding")
         old_dim = int(prior.get("dim", len(old_emb) if isinstance(old_emb, list) else 0))
@@ -153,6 +180,9 @@ def save_profile(name: str, embedding: list[float], samples: int = 1) -> Path:
                 final_embedding,
                 new_samples=samples,
             )
+            # A user-confirmed save upgrades any earlier auto provenance;
+            # `source` was set above and stays "user" for this branch
+            # (auto_match=True never reaches here — it returns early).
         # Dim mismatch: drop the old profile (incompatible model) and start fresh.
     payload = {
         "name": name,
@@ -160,6 +190,7 @@ def save_profile(name: str, embedding: list[float], samples: int = 1) -> Path:
         "embedding": final_embedding,
         "created": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "samples": total_samples,
+        "source": source,
     }
     path = _profile_path(name)
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -262,15 +293,25 @@ def _average_vectors(vecs: list[list[float]], dim: int) -> list[float]:
 
 # ---------- matching ----------
 
-def cosine_similarity(a: list[float], b: list[float]) -> float:
-    """Cosine similarity of two equal-length vectors (range -1..1)."""
+def cosine_similarity(a: list[float], b: list[float]) -> float | None:
+    """Cosine similarity of two equal-length vectors (range -1..1).
+
+    M3 (wave-1 audit): mismatched dimensions used to be silently truncated
+    to the shorter length, comparing a partial projection and reporting a
+    confident-looking score for two embeddings that are not comparable (a
+    swapped embedding model changes every dimension's meaning). It now
+    returns ``None`` — callers treat that as "no comparison possible"
+    (``match_speakers`` skips the pair with a warning) instead of a number
+    derived from a truncated vector.
+    """
     if not a or not b:
         return 0.0
-    n = min(len(a), len(b))
+    if len(a) != len(b):
+        return None
     dot = 0.0
     na = 0.0
     nb = 0.0
-    for i in range(n):
+    for i in range(len(a)):
         dot += a[i] * b[i]
         na += a[i] * a[i]
         nb += b[i] * b[i]
@@ -297,10 +338,21 @@ def match_speakers(
 
     # Score every (cluster, profile) pair.
     scored: list[tuple[float, int, str]] = []
+    dim_skips = 0
     for cid, cemb in cluster_embeddings.items():
         for prof in profiles:
             score = cosine_similarity(cemb, prof.embedding)
+            if score is None:
+                dim_skips += 1
+                continue
             scored.append((score, cid, prof.name))
+    if dim_skips:
+        print(
+            f"Warning: {dim_skips} cluster/profile pair(s) skipped — embedding "
+            "dimension mismatch (a profile saved with a different embedding "
+            "model is not comparable; re-create it under the current model).",
+            file=sys.stderr,
+        )
     scored.sort(reverse=True)
 
     matched: dict[int, tuple[str, float] | None] = {cid: None for cid in cluster_embeddings}

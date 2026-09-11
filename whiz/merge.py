@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -105,10 +106,20 @@ def assign_speakers(
     whisper_segs: list[WhisperSeg],
     diar_segs: list[DiarSegment],
 ) -> list[tuple[WhisperSeg, str]]:
-    """Assign a speaker label to each whisper segment by max overlap."""
+    """Assign a speaker label to each whisper segment by max overlap.
+
+    M4 (wave-1 audit): a whisper segment that overlaps NO diarization
+    segment (clock skew between the two pipelines, or a span diarization
+    dropped) used to fall through to the first speaker in the list — a
+    silent, arbitrary default that mislabeled whole stretches of dialogue.
+    It now falls back to the diarization segment nearest in time, and the
+    count of such segments is reported in one stderr warning so the
+    fallback is visible, not silent.
+    """
     if not diar_segs:
         return [(seg, speaker_label(0)) for seg in whisper_segs]
     merged: list[tuple[WhisperSeg, str]] = []
+    fallbacks = 0
     for wseg in whisper_segs:
         best_speaker = diar_segs[0].speaker
         best_overlap = 0.0
@@ -117,8 +128,43 @@ def assign_speakers(
             if ov > best_overlap:
                 best_overlap = ov
                 best_speaker = dseg.speaker
+        if best_overlap <= 0.0:
+            best_speaker = _nearest_diar_speaker(wseg, diar_segs)
+            fallbacks += 1
         merged.append((wseg, speaker_label(best_speaker)))
+    if fallbacks:
+        print(
+            f"Warning: {fallbacks} whisper segment(s) overlap no diarization "
+            "segment; labeled by nearest-in-time diarization segment.",
+            file=sys.stderr,
+        )
     return merged
+
+
+def _nearest_diar_speaker(wseg: WhisperSeg, diar_segs: list[DiarSegment]) -> int:
+    """Speaker of the diarization segment nearest in time to ``wseg``.
+
+    Distance is the temporal gap between the two intervals (0 when they
+    touch). Ties break toward the earlier entry in ``diar_segs`` (callers
+    pass them in time order), so the fallback is deterministic.
+    """
+    best = diar_segs[0]
+    best_gap = _interval_gap(wseg.start, wseg.end, best.start, best.end)
+    for dseg in diar_segs[1:]:
+        gap = _interval_gap(wseg.start, wseg.end, dseg.start, dseg.end)
+        if gap < best_gap:
+            best_gap = gap
+            best = dseg
+    return best.speaker
+
+
+def _interval_gap(a_start: float, a_end: float, b_start: float, b_end: float) -> float:
+    """Seconds between two intervals (0 if they touch or overlap)."""
+    if a_end < b_start:
+        return b_start - a_end
+    if b_end < a_start:
+        return a_start - b_end
+    return 0.0
 
 
 def _fmt_srt_time(t: float) -> str:
@@ -440,28 +486,50 @@ def parse_whisper_json(path, json_full: bool = False) -> list[WhisperSeg]:
     json-full format additionally has ``offsets``; per-word timestamps (when
     present, e.g. from verbose_json-style ``words`` arrays) are captured on
     the optional ``words`` field for HTML karaoke-style highlighting.
+
+    M4 (wave-1 audit): segments whose ``timestamps`` fail to parse used to
+    become t=0..0 zero-length cues — silently poisoning the merge (a t=0
+    segment overlaps nothing and picked up an arbitrary speaker). They are
+    now skipped, with one stderr warning carrying the count so a degraded
+    parse is visible instead of invisible.
     """
     data = json.loads(path.read_text(encoding="utf-8"))
     segs: list[WhisperSeg] = []
     # whisper-cli -oj/-ojf produces {"transcription": [{"timestamps":{"from","to"}, "text":"..."}, ...]}
     # -ojf adds more fields but the segment shape is the same.
     transcription = data.get("transcription", [])
+    skipped = 0
     for entry in transcription:
         ts = entry.get("timestamps", {})
         start = _ts_to_seconds(ts.get("from", "00:00:00,000"))
         end = _ts_to_seconds(ts.get("to", "00:00:00,000"))
         text = entry.get("text", "").strip()
         words = entry.get("words")  # present in verbose_json-style output
-        if text:
-            segs.append(WhisperSeg(start=start, end=end, text=text, words=words))
+        if not text:
+            continue
+        if start is None or end is None:
+            skipped += 1
+            continue
+        segs.append(WhisperSeg(start=start, end=end, text=text, words=words))
+    if skipped:
+        print(
+            f"Warning: skipped {skipped} segment(s) in {path.name} with "
+            "unparseable timestamps (zero-length cues would poison the merge).",
+            file=sys.stderr,
+        )
     return segs
 
 
-def _ts_to_seconds(ts: str) -> float:
-    """'00:01:23,456' or '00:01:23.456' -> 83.456."""
+def _ts_to_seconds(ts: str) -> float | None:
+    """'00:01:23,456' or '00:01:23.456' -> 83.456; None if unparseable.
+
+    Callers treat None as "timestamp failed to parse" and decide the
+    fallback — ``parse_whisper_json`` skips (and warns) rather than
+    defaulting the segment to t=0.
+    """
     ts = ts.strip().replace(".", ",")
     m = re.match(r"(\d+):(\d{2}):(\d{2}),(\d{3})", ts)
     if not m:
-        return 0.0
+        return None
     h, mi, s, ms = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
     return h * 3600 + mi * 60 + s + ms / 1000.0
