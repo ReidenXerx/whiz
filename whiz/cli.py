@@ -756,21 +756,32 @@ def _extract_and_manifest_screenshots(
 def _save_named_profiles(
     name_map: dict[str, str],
     cluster_embeddings: dict[int, list[float]],
+    auto_labels: set[str] | None = None,
 ) -> None:
     """Save (or merge) a voice profile for each speaker that received a real name.
 
     ``name_map`` is keyed by ``Speaker A/B/...`` labels; we map those back to
     cluster ids via the merge module's letter ordering and persist the
     corresponding embedding under the chosen name. If a profile already exists
-    for that name, ``P.save_profile`` merges the new embedding with the stored
-    one via a sample-weighted running mean, so re-confirming a speaker across
-    recordings makes their profile more accurate over time.
+    for that name and the save is USER-confirmed, ``P.save_profile`` merges
+    the new embedding with the stored one via a sample-weighted running mean,
+    so re-confirming a speaker across recordings makes their profile more
+    accurate over time.
+
+    M3 (wave-1 audit): labels in ``auto_labels`` carry names sourced from a
+    voice-profile auto-match, not a human confirmation. Those saves pass
+    ``auto_match=True``: an auto-match may CREATE a profile (marked
+    ``source: "auto"``) but never MERGE into or REPLACE an existing one — a
+    chain of self-confirming matches used to silently drift the stored
+    centroid. When the guard keeps an existing profile, the run SAYS so
+    instead of reporting a merge that never happened.
     """
     from whiz.merge import _SPEAKER_LETTERS
 
     label_to_cid: dict[str, int] = {
         f"Speaker {letter}": i for i, letter in enumerate(_SPEAKER_LETTERS)
     }
+    auto_labels = auto_labels or set()
     saved = 0
     merged_count = 0
     for label, name in name_map.items():
@@ -780,13 +791,26 @@ def _save_named_profiles(
         # Don't save a profile whose "name" is just the default Speaker label.
         if not name or name.startswith("Speaker "):
             continue
+        is_auto = label in auto_labels
         try:
             existed = P._profile_path(name).exists()
-            path = P.save_profile(name, cluster_embeddings[cid], samples=1)
+            path = P.save_profile(name, cluster_embeddings[cid], samples=1, auto_match=is_auto)
+            if is_auto and existed:
+                # save_profile's no-clobber guard kept the existing file —
+                # announce the keep, not a merge that did not happen.
+                ui.status(
+                    f"Voice profile '{name}' already exists — auto-match not "
+                    "merged (only a name you confirm merges into it).",
+                    kind="hint",
+                    detail=str(path),
+                )
+                continue
             saved += 1
             if existed:
                 merged_count += 1
                 ui.status(f"Merged voice profile: {name}", kind="ok", detail=str(path))
+            elif is_auto:
+                ui.status(f"Saved voice profile (auto-match): {name}", kind="ok", detail=str(path))
             else:
                 ui.status(f"Saved voice profile: {name}", kind="ok", detail=str(path))
         except Exception as e:  # noqa: BLE001
@@ -828,11 +852,22 @@ def _write_labeled_outputs(
     When ``save_profiles`` is True and ``cluster_embeddings`` is provided, a
     voice profile is saved for each speaker that ended up with a real name
     (i.e. not ``Speaker X``), so later recordings can auto-match them.
+    Auto-matched names are saved with ``auto_match=True`` — create-only,
+    never a merge (M3, wave-1; see ``_save_named_profiles``); names a human
+    supplied via ``--speakers-names`` or the interactive prompt merge
+    normally.
     """
     name_map: dict[str, str] = {}
+    # Labels whose name arrived via profile auto-match (M3, wave-1): tracked
+    # so profile saving can flag those saves as machine-sourced. Any later
+    # HUMAN source that writes the label — --speakers-names, the interactive
+    # prompt, even accepting the suggested name with Enter — upgrades it to
+    # user-confirmed.
+    auto_labels: set[str] = set()
     # 1. Voice-profile auto-match seeds the defaults.
     if profile_names and merged:
         name_map.update(profile_names)
+        auto_labels.update(profile_names)
         ui.info(f"Auto-matched {len(profile_names)} speaker(s) from voice profiles.")
         for lbl, nm in profile_names.items():
             ui.muted(f"  {lbl} -> {nm}")
@@ -840,11 +875,13 @@ def _write_labeled_outputs(
     if speakers_names and merged:
         merged, list_map = _apply_speaker_names_list(merged, speakers_names)
         name_map.update(list_map)
+        auto_labels.difference_update(list_map)
     # 3. Interactive prompt overrides/augments when both are given.
     if name_speakers and merged:
         interactive_map = _prompt_speaker_names(merged, default_names=name_map or None)
         if interactive_map:
             name_map.update(interactive_map)
+            auto_labels.difference_update(interactive_map)
     # Apply the combined names to the merged list so labels reflect every
     # source (profile matches alone wouldn't relabel otherwise).
     if name_map and merged:
@@ -866,7 +903,7 @@ def _write_labeled_outputs(
         )
     # Save voice profiles for speakers that received a real name.
     if save_profiles and cluster_embeddings and name_map:
-        _save_named_profiles(name_map, cluster_embeddings)
+        _save_named_profiles(name_map, cluster_embeddings, auto_labels=auto_labels)
     return srt_out, txt_out, html_out, name_map
 
 
@@ -2381,14 +2418,32 @@ def cmd_speakers_match(args: argparse.Namespace) -> int:
     matches = P.match_speakers(cluster_embeddings, profiles, threshold=config.speaker_match_threshold)
     rows = []
     for cid, emb in sorted(cluster_embeddings.items()):
-        scores = sorted(
-            ((P.cosine_similarity(emb, prof.embedding), prof.name) for prof in profiles),
-            reverse=True,
+        # M3 (wave-1 audit): cosine_similarity returns None when a stored
+        # profile's dim doesn't match the run's embeddings (embedding model
+        # swapped) — the pair is NOT comparable, so it renders n/a instead of
+        # crashing the sort (None vs float) or the score format. When every
+        # profile is incomparable there is no best score at all.
+        scored: list[tuple[float, str]] = []
+        skipped: list[str] = []
+        for prof in profiles:
+            s = P.cosine_similarity(emb, prof.embedding)
+            if s is None:
+                skipped.append(prof.name)
+            else:
+                scored.append((s, prof.name))
+        scored.sort(reverse=True)
+        all_str = ", ".join(
+            [f"{nm}={s:.3f}" for s, nm in scored]
+            + [f"{nm}=n/a" for nm in skipped]
         )
-        all_str = ", ".join(f"{nm}={s:.3f}" for s, nm in scores)
         m = matches.get(cid)
         best = f"{m[0]}" if m else "(no match)"
-        best_score = f"{m[1]:.3f}" if m else f"{scores[0][0]:.3f}"
+        if m:
+            best_score = f"{m[1]:.3f}"
+        elif scored:
+            best_score = f"{scored[0][0]:.3f}"
+        else:
+            best_score = "n/a"
         rows.append([speaker_label(cid), best, best_score, all_str])
     ui.table(
         "Speaker match (dry run)",

@@ -8,6 +8,7 @@ Run with: pytest tests/test_cli.py
 from __future__ import annotations
 
 import builtins
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -1756,3 +1757,148 @@ def test_transcribe_degraded_run_keeps_named_frames_manifest_rc0(tmp_path, monke
     assert loaded[0].speaker == "Alice"
     flat = " ".join(capsys.readouterr().err.split())
     assert "already exists with named speakers" in flat
+
+
+# ---------- wave-1 M3 adoption: profiles API at the CLI call sites ----------
+#
+# py-support-2 (fbd04d5) gave profiles.py an auto-match provenance API:
+# cosine_similarity returns None on dim mismatch, and save_profile(auto_match)
+# creates-but-never-merges. These tests pin the CLI's ADOPTION of it — the
+# speakers-match score table under a dim-mismatched stored profile, and the
+# auto-vs-confirmed provenance threaded through _write_labeled_outputs →
+# _save_named_profiles.
+
+
+def test_speakers_match_dim_mismatch_renders_na_not_crash(tmp_path, monkeypatch, capsys):
+    """`whiz speakers match` against a stored profile saved with a DIFFERENT
+    embedding dim (embedding model swapped): cosine_similarity returns None
+    and the score table must render an honest n/a — the old code crashed
+    sorting None among floats, and read scores[0][0] on what could be an
+    empty list."""
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    _stub_setup_ready(monkeypatch)
+    monkeypatch.setattr(
+        cli.D, "run_diarization",
+        lambda wav, config, num_speakers=0, threshold=0.9: [
+            DiarSegment(start=0.0, end=3.0, speaker=0),
+        ],
+    )
+    monkeypatch.setattr(cli.P, "profiles_dir", lambda: tmp_path)
+    cli.P.save_profile("OldDim", [1.0, 2.0, 3.0, 4.0], samples=2)  # dim 4
+    monkeypatch.setattr(
+        cli.P, "compute_speaker_embeddings",
+        lambda wav, segments, config: {0: [1.0, 1.0]},  # dim 2
+    )
+
+    args = SimpleNamespace(file=str(audio), speakers=1, cluster_threshold=None,
+                           no_auto_diarization_setup=False)
+    rc = cli.cmd_speakers_match(args)
+
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "OldDim=n/a" in err        # incomparable pair rendered, not crashed
+    assert "n/a" in err               # best score is n/a too — no scores existed
+    assert "dimension mismatch" in err  # match_speakers' skip warning fired
+
+
+def test_merge_auto_match_never_merges_existing_profile(tmp_path, monkeypatch, capsys):
+    """M3 cli adoption: a name that arrived via VOICE-PROFILE auto-match
+    never merges into an existing profile — save_profile's guard keeps the
+    stored centroid byte-identical and the run says so. (Before the adoption
+    every named speaker was merged, so a self-confirming auto-match chain
+    silently drifted the stored centroid.)"""
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    _stub_setup_ready(monkeypatch)
+    monkeypatch.setattr(
+        cli.D, "run_diarization",
+        lambda wav, config, num_speakers=0, threshold=0.9: [
+            DiarSegment(start=0.0, end=3.0, speaker=0),
+        ],
+    )
+    monkeypatch.setattr(cli.P, "profiles_dir", lambda: tmp_path)
+    cli.P.save_profile("Alice", [0.5, 0.5], samples=4)  # user-confirmed base
+    before = (tmp_path / "Alice.json").read_text(encoding="utf-8")
+    # The run's cluster embedding auto-matches Alice at threshold 0.8.
+    monkeypatch.setattr(
+        cli.P, "compute_speaker_embeddings",
+        lambda wav, segments, config: {0: [0.5, 0.5]},
+    )
+
+    args = _merge_args(audio, outputs="html", speakers=1)
+    args.no_voice_profiles = False  # enable the feature under test
+    rc = cli.cmd_merge(args)
+
+    assert rc == 0
+    # The stored centroid is untouched — no merge, no replace.
+    assert (tmp_path / "Alice.json").read_text(encoding="utf-8") == before
+    flat = " ".join(capsys.readouterr().err.split())
+    assert "auto-match not merged" in flat
+    assert "Merged voice profile" not in flat  # no merge that didn't happen
+
+
+def test_merge_confirmed_name_merges_existing_profile(tmp_path, monkeypatch, capsys):
+    """M3 flip side: --speakers-names is a HUMAN confirmation — it overrides
+    any auto-match for the same label and merges into the stored profile
+    normally (auto_match=False), upgrading provenance to 'user'."""
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    _stub_setup_ready(monkeypatch)
+    monkeypatch.setattr(
+        cli.D, "run_diarization",
+        lambda wav, config, num_speakers=0, threshold=0.9: [
+            DiarSegment(start=0.0, end=3.0, speaker=0),
+        ],
+    )
+    monkeypatch.setattr(cli.P, "profiles_dir", lambda: tmp_path)
+    cli.P.save_profile("Alice", [0.0, 0.0], samples=2)
+    monkeypatch.setattr(
+        cli.P, "compute_speaker_embeddings",
+        lambda wav, segments, config: {0: [2.0, 2.0]},
+    )
+
+    args = _merge_args(audio, outputs="html", speakers=1, speakers_names=["Alice"])
+    args.no_voice_profiles = False
+    rc = cli.cmd_merge(args)
+
+    assert rc == 0
+    data = json.loads((tmp_path / "Alice.json").read_text(encoding="utf-8"))
+    assert data["samples"] == 3                       # merged: 2 stored + 1 new
+    # (0*2 + 2*1)/3 = 2/3 — plain abs checks, matching test_profiles.py's
+    # idiom (pytest.approx routes through np.isscalar, gone in numpy 2.x).
+    assert all(abs(v - 2/3) < 1e-9 for v in data["embedding"])
+    assert data["source"] == "user"
+    flat = " ".join(capsys.readouterr().err.split())
+    assert "Merged voice profile: Alice" in flat
+
+
+def test_write_labeled_outputs_prompt_confirmation_upgrades_auto_label(tmp_path, monkeypatch, capsys):
+    """M3 provenance threading: interactive confirmation — even just pressing
+    Enter on the auto-matched suggestion — upgrades the label from auto to
+    user-confirmed, so the save MERGES instead of no-clobbering."""
+    monkeypatch.setattr(cli.P, "profiles_dir", lambda: tmp_path)
+    merged = [(cli.MR.WhisperSeg(start=0.0, end=2.0, text="hi"), "Speaker A")]
+    # The interactive prompt returns the auto-suggested name (Enter accepted).
+    monkeypatch.setattr(
+        cli, "_prompt_speaker_names",
+        lambda merged, default_names=None: {"Speaker A": "Alice"},
+    )
+    cli.P.save_profile("Alice", [0.0, 0.0], samples=2, auto_match=True)  # source 'auto'
+
+    _srt, _txt, _html, name_map = cli._write_labeled_outputs(
+        merged, tmp_path / "rec", name_speakers=True,
+        profile_names={"Speaker A": "Alice"},
+        cluster_embeddings={0: [2.0, 2.0]},
+        save_profiles=True,
+    )
+
+    assert name_map == {"Speaker A": "Alice"}
+    data = json.loads((tmp_path / "Alice.json").read_text(encoding="utf-8"))
+    assert data["samples"] == 3   # merged, not skipped — Enter is confirmation
+    assert data["source"] == "user"  # provenance upgraded from 'auto'
