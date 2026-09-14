@@ -2513,6 +2513,20 @@ _CONFIG_ENUM_VALUES: dict[str, set[str]] = {
     "dictate_trigger": {"toggle", "ptt"},
 }
 
+# Provider-selection fields (M16, wave-2): also enum-like, but their valid
+# values are the live provider registry rather than a fixed set here — a
+# typo like `dictate_stt_provider=mlxx` used to be accepted and silently
+# fell back to auto-detect, hiding the mistake behind a "why is it using the
+# wrong provider" debugging session. The registry module is import-light
+# (constructors are thunks; heavy deps import only on selection), so the
+# per-validation import is cheap. Empty string stays valid — it means
+# auto-detect.
+_PROVIDER_CONFIG_KEYS: dict[str, str] = {
+    "dictate_stt_provider": "stt",
+    "dictate_injector": "injector",
+    "dictate_indicator": "indicator",
+}
+
 
 def _validate_config_value(key: str, value: object) -> None:
     """Reject out-of-range values for enum-like config fields."""
@@ -2521,6 +2535,16 @@ def _validate_config_value(key: str, value: object) -> None:
         raise SystemExit(
             f"Invalid {key}={value!r}. Must be one of: {', '.join(sorted(allowed))}"
         )
+    kind = _PROVIDER_CONFIG_KEYS.get(key)
+    if kind is not None and value != "":
+        from whiz.dictate import providers
+
+        names = {name for name, _, _ in providers.list_providers()[kind]}
+        if value not in names:
+            raise SystemExit(
+                f"Invalid {key}={value!r}. Must be one of: "
+                f"{', '.join(sorted(names))} (or empty for auto-detect)"
+            )
 
 
 def cmd_config_set(args: argparse.Namespace) -> int:
