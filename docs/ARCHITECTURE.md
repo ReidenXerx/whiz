@@ -115,6 +115,20 @@ still raised by the noise frames). A tuning change to the floor is a
 contract change — it moves the speech/noise discrimination line in both
 engines and must ship with the corpus regenerated in the same commit.
 
+Since wave-2 (M13) the raised gates are capped: the median's
+**contribution** is clamped at `calibration_speech_floor`
+(`max(floor, min(median × multiplier, floor))`), so a calibrated gate can
+never demand speech louder than speech. Before the cap, a measured fan
+median of 0.02 raised the frame gate to 0.07 — above normal talking
+(~0.05-0.06 RMS) — and no `frame_energy`/`min_energy` setting could
+counter it, because the static floors are minimums and `max()` kept the
+calibrated gate dominant; the documented remedy ("lower `frame_energy`")
+silently did nothing. The cap applies to the contribution, not the whole
+gate: the static floors stay true minimums, so a floor set above 0.03
+applies exactly as set. It cannot misfire — the median is measured only on
+quiet frames (below the floor), so the contribution only ever rises toward
+the cap from below.
+
 Accepted trade-off: steady noise at or above the speech floor (loud
 fans, HVAC) can no longer be calibrated against — by energy alone it is
 indistinguishable from speech. That regime is owned by the secondary
@@ -173,6 +187,29 @@ differ is out of the contract.
 Silero VAD after the gates, rejecting whole utterances before
 transcription. Either is fine — the golden contract covers only the
 energy-gate state machine.
+
+**Menu bar (`dictate_menu_bar`).** Python honors `false` by not installing
+the rumps menu. The Swift app always shows its `MenuBarExtra`: hiding it
+would orphan Settings and Quit, the menu being the only route to both
+(`WhizApp.swift`), so the key is accepted-but-ignored there. An extra menu
+item is the lesser evil (M2, wave-2); revisit only alongside a
+settings-independent quit path.
+
+**Whisper decoder thresholds.** Since wave-2 (M12) both engines pin
+`no_speech_threshold` (0.35) and `logprob_threshold` (-0.5) against
+`tuning/tuning.toml` — `mlx.py` (`NO_SPEECH_THRESHOLD`/`LOGPROB_THRESHOLD`)
+and `WhisperEngine.swift` (`noSpeechThreshold`/`logprobThreshold`, applied
+as whisper.cpp's `no_speech_thold`/`logprob_thold`). One asymmetry
+remains: mlx also passes `hallucination_silence_threshold=2.0`, for which
+whisper.cpp has no equivalent parameter — Python-only by capability, not
+by choice.
+
+**Auto-stop on silence** used to be a fourth divergence — Python honored
+`dictate_auto_stop_silence`, the Swift app round-tripped the config value
+without reading it. Wave-2 (M1) implemented it in `SessionController` on
+top of `UtteranceDetector`'s `continuousSilence` accumulator, so both
+engines now end a session after the configured silence; the divergence is
+recorded here only so the wave-1 audit trail stays legible.
 
 ## Known shared defects
 
