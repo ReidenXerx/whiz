@@ -112,7 +112,12 @@ class Config:
     # --- Microphone sensitivity ---
     # Static energy floors for utterance segmentation (normalized RMS, 0.0-1.0).
     # These are FLOORS: the adaptive noise calibration at session start can
-    # raise them, never lower them.
+    # raise the effective gates above them, never lower them. The calibration
+    # contribution is itself capped at the speech floor (0.03 — see
+    # tuning/tuning.toml's calibration_speech_floor): a calibrated gate above
+    # the speech/noise discrimination line would demand speech louder than
+    # speech, and no setting here could counter it. A floor set above 0.03
+    # therefore always applies exactly as set (M13, wave-2).
     #
     # The original values (0.03 / 0.025) were tuned on one machine and proved
     # far too high on others — measured room noise of 0.0005-0.002 against

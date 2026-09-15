@@ -1902,3 +1902,50 @@ def test_write_labeled_outputs_prompt_confirmation_upgrades_auto_label(tmp_path,
     data = json.loads((tmp_path / "Alice.json").read_text(encoding="utf-8"))
     assert data["samples"] == 3   # merged, not skipped — Enter is confirmation
     assert data["source"] == "user"  # provenance upgraded from 'auto'
+
+
+def test_merge_speakers_names_overrides_wrong_auto_match(tmp_path, monkeypatch, capsys):
+    """W2-M15: --speakers-names is a HUMAN confirmation and must override a
+    wrong auto-match. A stored profile whose centroid sits exactly on the
+    run's cluster embedding (cosine 1.0 >= threshold) makes the auto-match
+    fire with the WRONG name — the user passing --speakers-names is
+    correcting it, so the run must use the name they gave, merge into (or
+    create) that profile, and not leave the wrong profile's keep-hint
+    around."""
+    audio = tmp_path / "meeting.m4a"
+    audio.write_bytes(b"fake audio")
+    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    _stub_setup_ready(monkeypatch)
+    monkeypatch.setattr(
+        cli.D, "run_diarization",
+        lambda wav, config, num_speakers=0, threshold=0.9: [
+            DiarSegment(start=0.0, end=3.0, speaker=0),
+        ],
+    )
+    monkeypatch.setattr(cli.P, "profiles_dir", lambda: tmp_path)
+    # A wrong auto-match target: centroid identical to the run's cluster
+    # embedding, so cosine similarity is 1.0 and the auto-match fires.
+    cli.P.save_profile("WrongName", [0.5, 0.5], samples=2)
+    monkeypatch.setattr(
+        cli.P, "compute_speaker_embeddings",
+        lambda wav, segments, config: {0: [0.5, 0.5]},
+    )
+
+    args = _merge_args(audio, outputs="html", speakers=1, speakers_names=["Alice"])
+    args.no_voice_profiles = False
+    rc = cli.cmd_merge(args)
+
+    assert rc == 0
+    flat = " ".join(capsys.readouterr().err.split())
+    # The human-supplied name won.
+    assert "Alice" in flat
+    assert "WrongName" in flat  # the wrong match is named in the auto-match note
+    # Alice's profile was created by the human confirmation.
+    alice = json.loads((tmp_path / "Alice.json").read_text(encoding="utf-8"))
+    assert alice["samples"] == 1
+    assert alice["source"] == "user"
+    # The wrong profile was NOT merged into — its centroid is byte-identical.
+    wrong = json.loads((tmp_path / "WrongName.json").read_text(encoding="utf-8"))
+    assert wrong["samples"] == 2
+    assert all(abs(v - 0.5) < 1e-9 for v in wrong["embedding"])
