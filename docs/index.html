@@ -1,0 +1,672 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>whiz · one command from a recording to a transcript that knows who spoke</title>
+<meta name="description" content="whiz turns a meeting or screen recording into a labeled, named, frame-illustrated transcript in one command — then analyses it and leaves a dense Essentials block you can feed back. Local-first on whisper.cpp, sherpa-onnx and Ollama.">
+<meta name="color-scheme" content="light dark">
+<meta property="og:title" content="whiz · one command from a recording to a transcript that knows who spoke">
+<meta property="og:description" content="Transcribe, diarize, name the speakers, capture a frame per segment and write a self-contained HTML transcript — in one command, on your own machine.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://duduphudu.app/whiz/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect x='6' y='20' width='5' height='8' rx='2.5' fill='%23F0A32E'/%3E%3Crect x='15' y='12' width='5' height='24' rx='2.5' fill='%23F0A32E'/%3E%3Cpath d='M30 6 L22 26 h7 l-3 16 12-22 h-7 z' fill='%23F0A32E'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<style>
+  :root {
+    --ground: #F6F3EE;
+    --surface: #FFFDFA;
+    --sunk: #ECE7DF;
+    --ink: #17141B;
+    --muted: #625B68;
+    --rule: #DBD3C9;
+    --chip: #E9E3DA;
+    --accent: #A85E06;
+    --sp-a: #A85E06;
+    --sp-b: #0F6B78;
+    --sp-c: #9B3060;
+    --sp-d: #5A4BA8;
+    --display: "Archivo", "Helvetica Neue", system-ui, sans-serif;
+    --body: "Archivo", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #100E14;
+      --surface: #191620;
+      --sunk: #14111A;
+      --ink: #EFEAF2;
+      --muted: #9A93A6;
+      --rule: #2A2534;
+      --chip: #201C29;
+      --accent: #F0A32E;
+      --sp-a: #F0A32E;
+      --sp-b: #4ECBD9;
+      --sp-c: #FF8FB1;
+      --sp-d: #A99BF5;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #100E14;
+    --surface: #191620;
+    --sunk: #14111A;
+    --ink: #EFEAF2;
+    --muted: #9A93A6;
+    --rule: #2A2534;
+    --chip: #201C29;
+    --accent: #F0A32E;
+    --sp-a: #F0A32E;
+    --sp-b: #4ECBD9;
+    --sp-c: #FF8FB1;
+    --sp-d: #A99BF5;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font: 16px/1.6 var(--body);
+    font-variation-settings: "wdth" 100;
+    padding-inline: 20px;
+    padding-block: 0 72px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .page { max-width: 1080px; margin: 0 auto; }
+  p { margin: 0 0 14px; max-width: 66ch; }
+  a { color: var(--accent); text-underline-offset: .18em; }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
+  code { font-family: var(--mono); font-size: .85em; background: var(--chip); padding: .08em .36em; border-radius: 4px; overflow-wrap: anywhere; }
+  b, strong { font-weight: 700; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .label { font: 500 11.5px/1.4 var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); margin: 0 0 12px; }
+
+  .sp-a { --sp: var(--sp-a); }
+  .sp-b { --sp: var(--sp-b); }
+  .sp-c { --sp: var(--sp-c); }
+  .sp-d { --sp: var(--sp-d); }
+
+  /* ---------------------------------------------------------------- nav */
+  .nav { display: flex; align-items: center; justify-content: space-between; gap: 12px 24px; flex-wrap: wrap; padding-block: 18px; border-bottom: 1px solid var(--rule); }
+  .brand { display: inline-flex; align-items: center; gap: 10px; text-decoration: none; color: var(--ink); font: 700 1.36rem/1 var(--display); font-variation-settings: "wdth" 112; letter-spacing: -.02em; }
+  .brand svg { width: 26px; height: 26px; }
+  .nav-links { display: flex; flex-wrap: wrap; gap: 6px 18px; font: 400 13px/1.5 var(--mono); }
+  .nav-links a { color: var(--muted); text-decoration: none; border-bottom: 1px solid transparent; }
+  .nav-links a:hover { color: var(--accent); border-color: currentColor; }
+
+  /* ---------------------------------------------------------------- hero */
+  .hero { padding-block: 56px 20px; }
+  h1 {
+    font-family: var(--display);
+    font-variation-settings: "wdth" 112;
+    font-weight: 800;
+    font-size: clamp(2.5rem, 6.6vw, 4.6rem);
+    line-height: .98;
+    letter-spacing: -.035em;
+    margin: 0 0 20px;
+    max-width: 17ch;
+    text-wrap: balance;
+  }
+  h1 .beat { color: var(--accent); }
+  .lede { font-size: clamp(1.02rem, 1.5vw, 1.18rem); color: var(--muted); max-width: 58ch; }
+  .lede b { color: var(--ink); font-weight: 600; }
+  .cta { display: flex; flex-wrap: wrap; gap: 10px; margin: 26px 0 0; }
+  .button { display: inline-flex; align-items: center; gap: 8px; padding: 11px 17px; border-radius: 6px; border: 1px solid var(--ink); color: var(--ink); text-decoration: none; font: 600 .94rem/1 var(--body); }
+  .button.primary { background: var(--ink); color: var(--ground); font-family: var(--mono); font-weight: 500; position: relative; cursor: pointer; }
+  .button.primary .copied { position: absolute; inset: 0; display: grid; place-items: center; border-radius: 6px; background: var(--accent); color: #17141B; opacity: 0; transition: opacity .16s ease; }
+  .button.primary.done .copied { opacity: 1; }
+  .button:hover { border-color: var(--accent); color: var(--accent); }
+  .button.primary:hover { background: var(--accent); border-color: var(--accent); color: #17141B; }
+  .button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .facts { display: flex; flex-wrap: wrap; gap: 8px; margin: 24px 0 0; padding: 0; list-style: none; }
+  .facts li { font: 500 11.5px/1 var(--mono); letter-spacing: .04em; padding: 8px 11px; border-radius: 4px; background: var(--chip); color: var(--muted); }
+
+  /* ---------------------------------------------------------------- the tape */
+  .tape { margin: 44px 0 0; border: 1px solid var(--rule); border-radius: 10px; background: var(--surface); padding: 22px 22px 18px; overflow: hidden; }
+  .tape figcaption { display: flex; flex-wrap: wrap; gap: 6px 18px; justify-content: space-between; font: 500 11.5px/1.5 var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-bottom: 16px; }
+  .tape svg { width: 100%; height: auto; display: block; }
+  .wave-bar { fill: var(--sp); opacity: .55; animation: pulse 3.4s ease-in-out infinite; animation-delay: calc(var(--i) * -22ms); }
+  @keyframes pulse { 0%, 100% { opacity: .5; } 50% { opacity: .95; } }
+  .band rect { fill: var(--sp); opacity: .18; }
+  .band text { fill: var(--sp); font: 600 12px var(--mono); }
+  .shot-frame { fill: none; stroke: var(--sp); stroke-width: 1.4; opacity: .55; }
+  .sprocket { fill: var(--sp); opacity: .3; }
+  .shot-art { fill: var(--sp); opacity: .8; color: var(--sp); }
+  .shot-time { fill: var(--muted); font: 500 11px var(--mono); }
+  .playhead { animation: sweep 9s linear infinite; }
+  @keyframes sweep { from { transform: translateX(0); } to { transform: translateX(960px); } }
+  @media (prefers-reduced-motion: reduce) { .wave-bar, .playhead { animation: none; } }
+
+  /* ---------------------------------------------------------------- sections */
+  section { padding-block: 48px; border-top: 1px solid var(--rule); }
+  h2 { font: 800 clamp(1.7rem, 3.4vw, 2.4rem)/1.1 var(--display); font-variation-settings: "wdth" 108; letter-spacing: -.028em; margin: 0 0 16px; max-width: 24ch; text-wrap: balance; }
+  h3 { font: 700 1.02rem/1.35 var(--body); margin: 0 0 6px; letter-spacing: -.01em; }
+  .section-lede { color: var(--muted); max-width: 62ch; }
+  .section-lede b { color: var(--ink); }
+  .two { display: grid; gap: 26px; }
+  @media (min-width: 880px) { .two { grid-template-columns: 1fr 1fr; gap: 36px; align-items: start; } }
+
+  /* pipeline */
+  .pipeline { list-style: none; margin: 30px 0 0; padding: 0; display: grid; gap: 1px; background: var(--rule); border: 1px solid var(--rule); border-radius: 10px; overflow: hidden; }
+  @media (min-width: 700px) { .pipeline { grid-template-columns: 1fr 1fr; } }
+  @media (min-width: 1000px) { .pipeline { grid-template-columns: repeat(3, 1fr); } }
+  .step { background: var(--surface); padding: 22px; position: relative; }
+  .step-glyph { width: 40px; height: 40px; color: var(--accent); display: block; margin-bottom: 12px; }
+  .step-n { position: absolute; top: 18px; right: 20px; font: 500 11.5px var(--mono); color: var(--muted); }
+  .step p { color: var(--muted); font-size: .94rem; margin: 0; }
+
+  /* transcript sample */
+  .transcript { border: 1px solid var(--rule); border-radius: 10px; background: var(--surface); overflow: hidden; }
+  .transcript .bar { display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--rule); background: var(--sunk); font: 500 11.5px var(--mono); color: var(--muted); }
+  .transcript .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--sp); }
+  .transcript .lines { padding: 6px 0; }
+  .line { display: grid; grid-template-columns: 76px 54px 1fr; gap: 12px; padding: 10px 16px; align-items: baseline; }
+  .line .who { font: 600 12.5px var(--mono); color: var(--sp); }
+  .line .at { font: 400 12px var(--mono); color: var(--muted); }
+  .line p { margin: 0; font-size: .96rem; }
+  @media (max-width: 560px) {
+    .line { grid-template-columns: 1fr; gap: 2px; }
+    .line .at { grid-row: 1; justify-self: end; }
+  }
+
+  /* cards */
+  .cards { display: grid; gap: 18px; margin-top: 28px; }
+  @media (min-width: 760px) { .cards { grid-template-columns: repeat(2, 1fr); } }
+  .card { border: 1px solid var(--rule); border-radius: 10px; background: var(--surface); padding: 22px; }
+  .card .label { margin-bottom: 8px; }
+  .card p:last-child { margin-bottom: 0; }
+
+  pre { margin: 20px 0 0; padding: 18px 20px; background: var(--sunk); border: 1px solid var(--rule); border-radius: 8px; overflow-x: auto; font: 400 13px/1.7 var(--mono); }
+  pre .cmd { color: var(--accent); }
+  pre .dim { color: var(--muted); }
+  pre .ok { color: var(--sp-b); }
+  pre .a { color: var(--sp-a); }
+  pre .b { color: var(--sp-b); }
+  pre .c { color: var(--sp-c); }
+  pre .d { color: var(--sp-d); }
+  blockquote { margin: 22px 0 0; padding: 16px 20px; border-left: 3px solid var(--accent); background: var(--surface); border-radius: 0 8px 8px 0; color: var(--muted); }
+  blockquote b { color: var(--ink); }
+
+  .needs { list-style: none; margin: 22px 0 0; padding: 0; display: grid; gap: 10px; }
+  .needs li { display: grid; grid-template-columns: 18px 1fr; gap: 12px; align-items: baseline; color: var(--muted); }
+  .needs li b { color: var(--ink); font-weight: 600; }
+  .needs .tick { color: var(--accent); font-family: var(--mono); }
+
+  .note { font-size: .88rem; color: var(--muted); }
+  .footer { border-top: 1px solid var(--rule); padding-top: 26px; margin-top: 46px; display: flex; flex-wrap: wrap; gap: 14px 26px; justify-content: space-between; align-items: baseline; font-size: .9rem; color: var(--muted); }
+  .footer a { color: var(--muted); }
+  .footer a:hover { color: var(--accent); }
+  .footer-links { display: flex; flex-wrap: wrap; gap: 6px 18px; font-family: var(--mono); font-size: 12.5px; }
+</style>
+</head>
+<body>
+<div class="page">
+
+<header class="nav">
+  <a class="brand" href="#top">
+    <svg viewBox="0 0 48 48" aria-hidden="true">
+      <rect x="3" y="19" width="5" height="10" rx="2.5" fill="var(--sp-b)" opacity=".55"/>
+      <rect x="11" y="13" width="5" height="22" rx="2.5" fill="var(--sp-b)" opacity=".8"/>
+      <rect x="19" y="8" width="5" height="32" rx="2.5" fill="var(--sp-b)"/>
+      <path d="M38 4 L25 25 h8 l-4 19 15-25 h-9 z" fill="var(--accent)" stroke="var(--surface)" stroke-width="2.4" stroke-linejoin="round"/>
+    </svg>
+    whiz
+  </a>
+  <nav class="nav-links" aria-label="Sections">
+    <a href="#pipeline">One command</a>
+    <a href="#voices">Voices</a>
+    <a href="#vision">Frames</a>
+    <a href="#essentials">Essentials</a>
+    <a href="#local">Local</a>
+    <a href="#install">Install</a>
+    <a href="https://github.com/ReidenXerx/whiz">GitHub</a>
+  </nav>
+</header>
+
+<main id="top">
+
+<section class="hero" style="border-top: 0;">
+  <p class="label">whiz transcribe recording.mov</p>
+  <h1>A recording goes in. A transcript that <span class="beat">knows who spoke</span> comes out.</h1>
+  <p class="lede">Most transcription stops at text. whiz transcribes, works out who spoke when, asks you their names once, grabs the frame that was on screen for every segment, and writes a self-contained HTML transcript — <b>from one command, on your own machine.</b></p>
+  <div class="cta">
+    <button class="button primary" type="button" data-copy="whiz transcribe recording.mov">
+      <span>whiz transcribe recording.mov</span><span class="copied" aria-hidden="true">copied</span>
+    </button>
+    <a class="button" href="https://github.com/ReidenXerx/whiz">Read the source</a>
+    <a class="button" href="#install">Install</a>
+  </div>
+  <ul class="facts">
+    <li>local-first · no API keys</li>
+    <li>whisper.cpp · sherpa-onnx · Ollama</li>
+    <li>macOS · Linux</li>
+    <li>MIT</li>
+  </ul>
+
+  <figure class="tape">
+    <figcaption><span>recording.mov · 23:18</span><span>4 speakers detected · 351 segments · 4 frames</span></figcaption>
+    <svg viewBox="0 0 960 250" role="img" aria-label="A waveform coloured by speaker, the speaker bands under it, and the frames captured at 00:12, 04:31, 09:04 and 17:40.">
+      <g transform="translate(0 0)">
+        <rect class="wave-bar sp-a" x="0.0" y="28.8" width="3.58" height="38.4" rx="1.60" style="--i: 0"/>
+        <rect class="wave-bar sp-a" x="6.4" y="29.4" width="3.58" height="37.2" rx="1.60" style="--i: 1"/>
+        <rect class="wave-bar sp-a" x="12.8" y="20.5" width="3.58" height="54.9" rx="1.60" style="--i: 2"/>
+        <rect class="wave-bar sp-a" x="19.2" y="27.6" width="3.58" height="40.7" rx="1.60" style="--i: 3"/>
+        <rect class="wave-bar sp-a" x="25.6" y="18.6" width="3.58" height="58.7" rx="1.60" style="--i: 4"/>
+        <rect class="wave-bar sp-a" x="32.0" y="20.1" width="3.58" height="55.8" rx="1.60" style="--i: 5"/>
+        <rect class="wave-bar sp-a" x="38.4" y="24.5" width="3.58" height="47.0" rx="1.60" style="--i: 6"/>
+        <rect class="wave-bar sp-a" x="44.8" y="15.2" width="3.58" height="65.6" rx="1.60" style="--i: 7"/>
+        <rect class="wave-bar sp-a" x="51.2" y="23.5" width="3.58" height="48.9" rx="1.60" style="--i: 8"/>
+        <rect class="wave-bar sp-a" x="57.6" y="15.3" width="3.58" height="65.3" rx="1.60" style="--i: 9"/>
+        <rect class="wave-bar sp-a" x="64.0" y="22.3" width="3.58" height="51.3" rx="1.60" style="--i: 10"/>
+        <rect class="wave-bar sp-a" x="70.4" y="44.9" width="3.58" height="6.2" rx="1.60" style="--i: 11"/>
+        <rect class="wave-bar sp-a" x="76.8" y="44.1" width="3.58" height="7.8" rx="1.60" style="--i: 12"/>
+        <rect class="wave-bar sp-a" x="83.2" y="43.3" width="3.58" height="9.5" rx="1.60" style="--i: 13"/>
+        <rect class="wave-bar sp-a" x="89.6" y="22.8" width="3.58" height="50.3" rx="1.60" style="--i: 14"/>
+        <rect class="wave-bar sp-a" x="96.0" y="22.0" width="3.58" height="52.1" rx="1.60" style="--i: 15"/>
+        <rect class="wave-bar sp-a" x="102.4" y="16.2" width="3.58" height="63.6" rx="1.60" style="--i: 16"/>
+        <rect class="wave-bar sp-a" x="108.8" y="12.7" width="3.58" height="70.6" rx="1.60" style="--i: 17"/>
+        <rect class="wave-bar sp-a" x="115.2" y="20.6" width="3.58" height="54.9" rx="1.60" style="--i: 18"/>
+        <rect class="wave-bar sp-a" x="121.6" y="25.1" width="3.58" height="45.9" rx="1.60" style="--i: 19"/>
+        <rect class="wave-bar sp-a" x="128.0" y="19.3" width="3.58" height="57.4" rx="1.60" style="--i: 20"/>
+        <rect class="wave-bar sp-a" x="134.4" y="32.9" width="3.58" height="30.2" rx="1.60" style="--i: 21"/>
+        <rect class="wave-bar sp-a" x="140.8" y="25.6" width="3.58" height="44.9" rx="1.60" style="--i: 22"/>
+        <rect class="wave-bar sp-a" x="147.2" y="33.3" width="3.58" height="29.3" rx="1.60" style="--i: 23"/>
+        <rect class="wave-bar sp-a" x="153.6" y="36.2" width="3.58" height="23.7" rx="1.60" style="--i: 24"/>
+        <rect class="wave-bar sp-a" x="160.0" y="37.6" width="3.58" height="20.7" rx="1.60" style="--i: 25"/>
+        <rect class="wave-bar sp-a" x="166.4" y="46.7" width="3.58" height="2.5" rx="1.60" style="--i: 26"/>
+        <rect class="wave-bar sp-a" x="172.8" y="46.5" width="3.58" height="3.0" rx="1.60" style="--i: 27"/>
+        <rect class="wave-bar sp-a" x="179.2" y="46.8" width="3.58" height="2.5" rx="1.60" style="--i: 28"/>
+        <rect class="wave-bar sp-a" x="185.6" y="46.8" width="3.58" height="2.5" rx="1.60" style="--i: 29"/>
+        <rect class="wave-bar sp-a" x="192.0" y="38.6" width="3.58" height="18.7" rx="1.60" style="--i: 30"/>
+        <rect class="wave-bar sp-a" x="198.4" y="40.1" width="3.58" height="15.9" rx="1.60" style="--i: 31"/>
+        <rect class="wave-bar sp-a" x="204.8" y="39.0" width="3.58" height="18.0" rx="1.60" style="--i: 32"/>
+        <rect class="wave-bar sp-a" x="211.2" y="41.1" width="3.58" height="13.8" rx="1.60" style="--i: 33"/>
+        <rect class="wave-bar sp-a" x="217.6" y="40.5" width="3.58" height="14.9" rx="1.60" style="--i: 34"/>
+        <rect class="wave-bar sp-a" x="224.0" y="38.8" width="3.58" height="18.4" rx="1.60" style="--i: 35"/>
+        <rect class="wave-bar sp-a" x="230.4" y="34.3" width="3.58" height="27.3" rx="1.60" style="--i: 36"/>
+        <rect class="wave-bar sp-a" x="236.8" y="34.7" width="3.58" height="26.6" rx="1.60" style="--i: 37"/>
+        <rect class="wave-bar sp-a" x="243.2" y="34.1" width="3.58" height="27.7" rx="1.60" style="--i: 38"/>
+        <rect class="wave-bar sp-a" x="249.6" y="29.8" width="3.58" height="36.4" rx="1.60" style="--i: 39"/>
+        <rect class="wave-bar sp-a" x="256.0" y="29.3" width="3.58" height="37.5" rx="1.60" style="--i: 40"/>
+        <rect class="wave-bar sp-a" x="262.4" y="29.3" width="3.58" height="37.5" rx="1.60" style="--i: 41"/>
+        <rect class="wave-bar sp-a" x="268.8" y="44.7" width="3.58" height="6.5" rx="1.60" style="--i: 42"/>
+        <rect class="wave-bar sp-a" x="275.2" y="44.6" width="3.58" height="6.7" rx="1.60" style="--i: 43"/>
+        <rect class="wave-bar sp-a" x="281.6" y="45.3" width="3.58" height="5.5" rx="1.60" style="--i: 44"/>
+        <rect class="wave-bar sp-a" x="288.0" y="44.4" width="3.58" height="7.2" rx="1.60" style="--i: 45"/>
+        <rect class="wave-bar sp-a" x="294.4" y="17.4" width="3.58" height="61.2" rx="1.60" style="--i: 46"/>
+        <rect class="wave-bar sp-a" x="300.8" y="9.7" width="3.58" height="76.6" rx="1.60" style="--i: 47"/>
+        <rect class="wave-bar sp-a" x="307.2" y="11.1" width="3.58" height="73.8" rx="1.60" style="--i: 48"/>
+        <rect class="wave-bar sp-a" x="313.6" y="18.7" width="3.58" height="58.6" rx="1.60" style="--i: 49"/>
+        <rect class="wave-bar sp-a" x="320.0" y="4.6" width="3.58" height="86.8" rx="1.60" style="--i: 50"/>
+        <rect class="wave-bar sp-b" x="326.4" y="21.4" width="3.58" height="53.2" rx="1.60" style="--i: 51"/>
+        <rect class="wave-bar sp-b" x="332.8" y="15.5" width="3.58" height="65.1" rx="1.60" style="--i: 52"/>
+        <rect class="wave-bar sp-b" x="339.2" y="9.1" width="3.58" height="77.8" rx="1.60" style="--i: 53"/>
+        <rect class="wave-bar sp-b" x="345.6" y="21.5" width="3.58" height="53.0" rx="1.60" style="--i: 54"/>
+        <rect class="wave-bar sp-b" x="352.0" y="15.9" width="3.58" height="64.2" rx="1.60" style="--i: 55"/>
+        <rect class="wave-bar sp-b" x="358.4" y="25.2" width="3.58" height="45.6" rx="1.60" style="--i: 56"/>
+        <rect class="wave-bar sp-b" x="364.8" y="15.3" width="3.58" height="65.3" rx="1.60" style="--i: 57"/>
+        <rect class="wave-bar sp-b" x="371.2" y="44.1" width="3.58" height="7.8" rx="1.60" style="--i: 58"/>
+        <rect class="wave-bar sp-b" x="377.6" y="44.7" width="3.58" height="6.6" rx="1.60" style="--i: 59"/>
+        <rect class="wave-bar sp-b" x="384.0" y="44.4" width="3.58" height="7.2" rx="1.60" style="--i: 60"/>
+        <rect class="wave-bar sp-b" x="390.4" y="45.6" width="3.58" height="4.8" rx="1.60" style="--i: 61"/>
+        <rect class="wave-bar sp-b" x="396.8" y="25.0" width="3.58" height="46.1" rx="1.60" style="--i: 62"/>
+        <rect class="wave-bar sp-b" x="403.2" y="28.2" width="3.58" height="39.6" rx="1.60" style="--i: 63"/>
+        <rect class="wave-bar sp-b" x="409.6" y="30.4" width="3.58" height="35.3" rx="1.60" style="--i: 64"/>
+        <rect class="wave-bar sp-b" x="416.0" y="33.3" width="3.58" height="29.4" rx="1.60" style="--i: 65"/>
+        <rect class="wave-bar sp-b" x="422.4" y="31.9" width="3.58" height="32.2" rx="1.60" style="--i: 66"/>
+        <rect class="wave-bar sp-b" x="428.8" y="32.9" width="3.58" height="30.2" rx="1.60" style="--i: 67"/>
+        <rect class="wave-bar sp-b" x="435.2" y="37.4" width="3.58" height="21.3" rx="1.60" style="--i: 68"/>
+        <rect class="wave-bar sp-b" x="441.6" y="37.3" width="3.58" height="21.5" rx="1.60" style="--i: 69"/>
+        <rect class="wave-bar sp-b" x="448.0" y="41.2" width="3.58" height="13.6" rx="1.60" style="--i: 70"/>
+        <rect class="wave-bar sp-b" x="454.4" y="38.3" width="3.58" height="19.4" rx="1.60" style="--i: 71"/>
+        <rect class="wave-bar sp-b" x="460.8" y="38.7" width="3.58" height="18.6" rx="1.60" style="--i: 72"/>
+        <rect class="wave-bar sp-b" x="467.2" y="36.8" width="3.58" height="22.5" rx="1.60" style="--i: 73"/>
+        <rect class="wave-bar sp-b" x="473.6" y="46.7" width="3.58" height="2.6" rx="1.60" style="--i: 74"/>
+        <rect class="wave-bar sp-b" x="480.0" y="46.8" width="3.58" height="2.5" rx="1.60" style="--i: 75"/>
+        <rect class="wave-bar sp-b" x="486.4" y="46.8" width="3.58" height="2.5" rx="1.60" style="--i: 76"/>
+        <rect class="wave-bar sp-b" x="492.8" y="34.6" width="3.58" height="26.9" rx="1.60" style="--i: 77"/>
+        <rect class="wave-bar sp-b" x="499.2" y="38.1" width="3.58" height="19.8" rx="1.60" style="--i: 78"/>
+        <rect class="wave-bar sp-b" x="505.6" y="33.0" width="3.58" height="30.1" rx="1.60" style="--i: 79"/>
+        <rect class="wave-bar sp-b" x="512.0" y="34.1" width="3.58" height="27.7" rx="1.60" style="--i: 80"/>
+        <rect class="wave-bar sp-b" x="518.4" y="33.2" width="3.58" height="29.7" rx="1.60" style="--i: 81"/>
+        <rect class="wave-bar sp-b" x="524.8" y="32.4" width="3.58" height="31.3" rx="1.60" style="--i: 82"/>
+        <rect class="wave-bar sp-b" x="531.2" y="21.5" width="3.58" height="53.1" rx="1.60" style="--i: 83"/>
+        <rect class="wave-bar sp-b" x="537.6" y="28.5" width="3.58" height="39.1" rx="1.60" style="--i: 84"/>
+        <rect class="wave-bar sp-b" x="544.0" y="25.2" width="3.58" height="45.6" rx="1.60" style="--i: 85"/>
+        <rect class="wave-bar sp-b" x="550.4" y="21.4" width="3.58" height="53.3" rx="1.60" style="--i: 86"/>
+        <rect class="wave-bar sp-b" x="556.8" y="11.5" width="3.58" height="72.9" rx="1.60" style="--i: 87"/>
+        <rect class="wave-bar sp-b" x="563.2" y="24.3" width="3.58" height="47.4" rx="1.60" style="--i: 88"/>
+        <rect class="wave-bar sp-b" x="569.6" y="44.2" width="3.58" height="7.6" rx="1.60" style="--i: 89"/>
+        <rect class="wave-bar sp-b" x="576.0" y="43.9" width="3.58" height="8.2" rx="1.60" style="--i: 90"/>
+        <rect class="wave-bar sp-b" x="582.4" y="43.0" width="3.58" height="9.9" rx="1.60" style="--i: 91"/>
+        <rect class="wave-bar sp-b" x="588.8" y="43.1" width="3.58" height="9.7" rx="1.60" style="--i: 92"/>
+        <rect class="wave-bar sp-b" x="595.2" y="6.6" width="3.58" height="82.8" rx="1.60" style="--i: 93"/>
+        <rect class="wave-bar sp-b" x="601.6" y="18.5" width="3.58" height="59.0" rx="1.60" style="--i: 94"/>
+        <rect class="wave-bar sp-c" x="608.0" y="16.4" width="3.58" height="63.3" rx="1.60" style="--i: 95"/>
+        <rect class="wave-bar sp-c" x="614.4" y="18.3" width="3.58" height="59.5" rx="1.60" style="--i: 96"/>
+        <rect class="wave-bar sp-c" x="620.8" y="9.8" width="3.58" height="76.5" rx="1.60" style="--i: 97"/>
+        <rect class="wave-bar sp-c" x="627.2" y="10.2" width="3.58" height="75.7" rx="1.60" style="--i: 98"/>
+        <rect class="wave-bar sp-c" x="633.6" y="25.4" width="3.58" height="45.2" rx="1.60" style="--i: 99"/>
+        <rect class="wave-bar sp-c" x="640.0" y="26.4" width="3.58" height="43.2" rx="1.60" style="--i: 100"/>
+        <rect class="wave-bar sp-c" x="646.4" y="27.1" width="3.58" height="41.8" rx="1.60" style="--i: 101"/>
+        <rect class="wave-bar sp-c" x="652.8" y="28.7" width="3.58" height="38.6" rx="1.60" style="--i: 102"/>
+        <rect class="wave-bar sp-c" x="659.2" y="27.3" width="3.58" height="41.4" rx="1.60" style="--i: 103"/>
+        <rect class="wave-bar sp-c" x="665.6" y="28.1" width="3.58" height="39.8" rx="1.60" style="--i: 104"/>
+        <rect class="wave-bar sp-c" x="672.0" y="46.2" width="3.58" height="3.5" rx="1.60" style="--i: 105"/>
+        <rect class="wave-bar sp-c" x="678.4" y="46.7" width="3.58" height="2.6" rx="1.60" style="--i: 106"/>
+        <rect class="wave-bar sp-c" x="684.8" y="46.4" width="3.58" height="3.1" rx="1.60" style="--i: 107"/>
+        <rect class="wave-bar sp-c" x="691.2" y="46.7" width="3.58" height="2.7" rx="1.60" style="--i: 108"/>
+        <rect class="wave-bar sp-c" x="697.6" y="36.7" width="3.58" height="22.6" rx="1.60" style="--i: 109"/>
+        <rect class="wave-bar sp-c" x="704.0" y="35.5" width="3.58" height="25.0" rx="1.60" style="--i: 110"/>
+        <rect class="wave-bar sp-c" x="710.4" y="37.8" width="3.58" height="20.3" rx="1.60" style="--i: 111"/>
+        <rect class="wave-bar sp-c" x="716.8" y="39.2" width="3.58" height="17.6" rx="1.60" style="--i: 112"/>
+        <rect class="wave-bar sp-c" x="723.2" y="38.9" width="3.58" height="18.3" rx="1.60" style="--i: 113"/>
+        <rect class="wave-bar sp-c" x="729.6" y="38.4" width="3.58" height="19.2" rx="1.60" style="--i: 114"/>
+        <rect class="wave-bar sp-c" x="736.0" y="41.2" width="3.58" height="13.6" rx="1.60" style="--i: 115"/>
+        <rect class="wave-bar sp-c" x="742.4" y="35.8" width="3.58" height="24.3" rx="1.60" style="--i: 116"/>
+        <rect class="wave-bar sp-c" x="748.8" y="35.4" width="3.58" height="25.3" rx="1.60" style="--i: 117"/>
+        <rect class="wave-bar sp-c" x="755.2" y="33.3" width="3.58" height="29.5" rx="1.60" style="--i: 118"/>
+        <rect class="wave-bar sp-c" x="761.6" y="32.1" width="3.58" height="31.8" rx="1.60" style="--i: 119"/>
+        <rect class="wave-bar sp-c" x="768.0" y="33.7" width="3.58" height="28.5" rx="1.60" style="--i: 120"/>
+        <rect class="wave-bar sp-c" x="774.4" y="46.1" width="3.58" height="3.8" rx="1.60" style="--i: 121"/>
+        <rect class="wave-bar sp-c" x="780.8" y="46.3" width="3.58" height="3.5" rx="1.60" style="--i: 122"/>
+        <rect class="wave-bar sp-c" x="787.2" y="45.3" width="3.58" height="5.4" rx="1.60" style="--i: 123"/>
+        <rect class="wave-bar sp-c" x="793.6" y="46.0" width="3.58" height="4.1" rx="1.60" style="--i: 124"/>
+        <rect class="wave-bar sp-c" x="800.0" y="29.5" width="3.58" height="37.0" rx="1.60" style="--i: 125"/>
+        <rect class="wave-bar sp-d" x="806.4" y="25.9" width="3.58" height="44.1" rx="1.60" style="--i: 126"/>
+        <rect class="wave-bar sp-d" x="812.8" y="25.3" width="3.58" height="45.5" rx="1.60" style="--i: 127"/>
+        <rect class="wave-bar sp-d" x="819.2" y="20.9" width="3.58" height="54.2" rx="1.60" style="--i: 128"/>
+        <rect class="wave-bar sp-d" x="825.6" y="24.9" width="3.58" height="46.2" rx="1.60" style="--i: 129"/>
+        <rect class="wave-bar sp-d" x="832.0" y="25.0" width="3.58" height="46.0" rx="1.60" style="--i: 130"/>
+        <rect class="wave-bar sp-d" x="838.4" y="21.5" width="3.58" height="53.0" rx="1.60" style="--i: 131"/>
+        <rect class="wave-bar sp-d" x="844.8" y="22.0" width="3.58" height="52.0" rx="1.60" style="--i: 132"/>
+        <rect class="wave-bar sp-d" x="851.2" y="16.5" width="3.58" height="62.9" rx="1.60" style="--i: 133"/>
+        <rect class="wave-bar sp-d" x="857.6" y="23.2" width="3.58" height="49.5" rx="1.60" style="--i: 134"/>
+        <rect class="wave-bar sp-d" x="864.0" y="6.7" width="3.58" height="82.6" rx="1.60" style="--i: 135"/>
+        <rect class="wave-bar sp-d" x="870.4" y="12.4" width="3.58" height="71.1" rx="1.60" style="--i: 136"/>
+        <rect class="wave-bar sp-d" x="876.8" y="44.9" width="3.58" height="6.2" rx="1.60" style="--i: 137"/>
+        <rect class="wave-bar sp-d" x="883.2" y="44.8" width="3.58" height="6.4" rx="1.60" style="--i: 138"/>
+        <rect class="wave-bar sp-d" x="889.6" y="44.7" width="3.58" height="6.6" rx="1.60" style="--i: 139"/>
+        <rect class="wave-bar sp-d" x="896.0" y="21.8" width="3.58" height="52.5" rx="1.60" style="--i: 140"/>
+        <rect class="wave-bar sp-d" x="902.4" y="27.1" width="3.58" height="41.8" rx="1.60" style="--i: 141"/>
+        <rect class="wave-bar sp-d" x="908.8" y="18.0" width="3.58" height="60.0" rx="1.60" style="--i: 142"/>
+        <rect class="wave-bar sp-d" x="915.2" y="18.4" width="3.58" height="59.2" rx="1.60" style="--i: 143"/>
+        <rect class="wave-bar sp-d" x="921.6" y="27.3" width="3.58" height="41.3" rx="1.60" style="--i: 144"/>
+        <rect class="wave-bar sp-d" x="928.0" y="29.1" width="3.58" height="37.9" rx="1.60" style="--i: 145"/>
+        <rect class="wave-bar sp-d" x="934.4" y="34.9" width="3.58" height="26.2" rx="1.60" style="--i: 146"/>
+        <rect class="wave-bar sp-d" x="940.8" y="36.1" width="3.58" height="23.7" rx="1.60" style="--i: 147"/>
+        <rect class="wave-bar sp-d" x="947.2" y="35.5" width="3.58" height="25.0" rx="1.60" style="--i: 148"/>
+        <rect class="wave-bar sp-d" x="953.6" y="37.4" width="3.58" height="21.2" rx="1.60" style="--i: 149"/>
+      </g>
+      <g transform="translate(0 112)">
+        <g class="band sp-a"><rect x="0.0" y="0" width="320.4" height="22" rx="4"/><text x="12.0" y="15">Alice</text></g>
+        <g class="band sp-b"><rect x="326.4" y="0" width="272.4" height="22" rx="4"/><text x="338.4" y="15">Bob</text></g>
+        <g class="band sp-c"><rect x="604.8" y="0" width="195.6" height="22" rx="4"/><text x="616.8" y="15">Carol</text></g>
+        <g class="band sp-d"><rect x="806.4" y="0" width="147.6" height="22" rx="4"/><text x="818.4" y="15">Dave</text></g>
+      </g>
+      <g transform="translate(0 150)">
+        <g class="shot sp-a" transform="translate(0.0 0)">
+          <rect class="shot-frame" x="0" y="0" width="218.0" height="76" rx="5"/>
+          <rect class="sprocket" x="8.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="34.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="60.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="86.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="112.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="138.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="164.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="190.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="8.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="34.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="60.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="86.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="112.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="138.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="164.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="190.0" y="68" width="9" height="5" rx="1.5"/>
+          <g class="shot-art" transform="translate(81.0 14)"><rect x="6" y="26" width="8" height="14" rx="1"/><rect x="18" y="18" width="8" height="22" rx="1"/><rect x="30" y="8" width="8" height="32" rx="1"/><rect x="42" y="22" width="8" height="18" rx="1"/></g>
+          <text class="shot-time" x="2" y="92">00:12</text>
+        </g>
+        <g class="shot sp-b" transform="translate(240.0 0)">
+          <rect class="shot-frame" x="0" y="0" width="218.0" height="76" rx="5"/>
+          <rect class="sprocket" x="8.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="34.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="60.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="86.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="112.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="138.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="164.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="190.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="8.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="34.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="60.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="86.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="112.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="138.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="164.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="190.0" y="68" width="9" height="5" rx="1.5"/>
+          <g class="shot-art" transform="translate(81.0 14)"><rect x="6" y="8" width="20" height="3" rx="1.5"/><rect x="6" y="15" width="34" height="3" rx="1.5"/><rect x="10" y="22" width="26" height="3" rx="1.5"/><rect x="10" y="29" width="32" height="3" rx="1.5"/><rect x="6" y="36" width="16" height="3" rx="1.5"/></g>
+          <text class="shot-time" x="2" y="92">04:31</text>
+        </g>
+        <g class="shot sp-b" transform="translate(480.0 0)">
+          <rect class="shot-frame" x="0" y="0" width="218.0" height="76" rx="5"/>
+          <rect class="sprocket" x="8.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="34.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="60.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="86.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="112.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="138.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="164.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="190.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="8.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="34.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="60.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="86.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="112.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="138.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="164.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="190.0" y="68" width="9" height="5" rx="1.5"/>
+          <g class="shot-art" transform="translate(81.0 14)"><rect x="6" y="6" width="44" height="8" rx="2"/><rect x="6" y="18" width="20" height="22" rx="2"/><rect x="30" y="18" width="20" height="10" rx="2"/><rect x="30" y="32" width="20" height="8" rx="2"/></g>
+          <text class="shot-time" x="2" y="92">09:04</text>
+        </g>
+        <g class="shot sp-c" transform="translate(720.0 0)">
+          <rect class="shot-frame" x="0" y="0" width="218.0" height="76" rx="5"/>
+          <rect class="sprocket" x="8.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="34.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="60.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="86.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="112.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="138.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="164.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="190.0" y="3" width="9" height="5" rx="1.5"/><rect class="sprocket" x="8.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="34.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="60.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="86.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="112.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="138.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="164.0" y="68" width="9" height="5" rx="1.5"/><rect class="sprocket" x="190.0" y="68" width="9" height="5" rx="1.5"/>
+          <g class="shot-art" transform="translate(81.0 14)"><circle cx="14" cy="14" r="5"/><circle cx="42" cy="16" r="5"/><circle cx="26" cy="36" r="5"/><path d="M19 15h18M17 18l7 13M39 20l-9 12" stroke="currentColor" stroke-width="1.6" fill="none"/></g>
+          <text class="shot-time" x="2" y="92">17:40</text>
+        </g>
+      </g>
+      <g class="playhead">
+        <rect x="0" y="0" width="1.6" height="232" fill="var(--accent)" opacity=".8"/>
+      </g>
+    </svg>
+  </figure>
+</section>
+
+<section id="pipeline">
+  <p class="label">What the one command does</p>
+  <h2>Six steps you would otherwise run by hand</h2>
+  <p class="section-lede">Give it a video and it turns all of this on by itself — screenshots, speaker detection and the naming prompt. Give it audio and it stays out of the way. <b>Every step is a flag you can turn off.</b></p>
+  <ol class="pipeline">
+      <li class="step">
+        <svg class="step-glyph" viewBox="0 0 48 48" aria-hidden="true"><path d="M8 20v8M14 14v20M20 9v30M26 16v16M32 12v24M38 18v12" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" fill="none"/></svg>
+        <span class="step-n">01</span>
+        <h3>Extract</h3>
+        <p>ffmpeg pulls the audio out of the video container.</p>
+      </li>
+      <li class="step">
+        <svg class="step-glyph" viewBox="0 0 48 48" aria-hidden="true"><path d="M10 14h28M10 22h28M10 30h18" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" fill="none"/></svg>
+        <span class="step-n">02</span>
+        <h3>Transcribe</h3>
+        <p>whisper.cpp, with the best model it can find on your machine.</p>
+      </li>
+      <li class="step">
+        <svg class="step-glyph" viewBox="0 0 48 48" aria-hidden="true"><path d="M6 24h13" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/><path d="M19 24 L30 13M19 24 L30 35" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" fill="none"/><circle cx="36" cy="12" r="5" fill="currentColor"/><circle cx="36" cy="36" r="5" fill="none" stroke="currentColor" stroke-width="2.4"/></svg>
+        <span class="step-n">03</span>
+        <h3>Diarize</h3>
+        <p>sherpa-onnx splits one mono track into Speaker A, B, C.</p>
+      </li>
+      <li class="step">
+        <svg class="step-glyph" viewBox="0 0 48 48" aria-hidden="true"><path d="M12 34c0-6 5-9 12-9s12 3 12 9" fill="none" stroke="currentColor" stroke-width="2.4"/><circle cx="24" cy="16" r="6.5" fill="none" stroke="currentColor" stroke-width="2.4"/></svg>
+        <span class="step-n">04</span>
+        <h3>Name</h3>
+        <p>It asks you once, and remembers the voices for next time.</p>
+      </li>
+      <li class="step">
+        <svg class="step-glyph" viewBox="0 0 48 48" aria-hidden="true"><rect x="8" y="12" width="32" height="24" rx="3" fill="none" stroke="currentColor" stroke-width="2.4"/><circle cx="24" cy="24" r="5" fill="none" stroke="currentColor" stroke-width="2.4"/></svg>
+        <span class="step-n">05</span>
+        <h3>Capture</h3>
+        <p>One on-screen frame per segment, into a manifest.</p>
+      </li>
+      <li class="step">
+        <svg class="step-glyph" viewBox="0 0 48 48" aria-hidden="true"><path d="M18 16l-8 8 8 8M30 16l8 8-8 8" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span class="step-n">06</span>
+        <h3>Write</h3>
+        <p>A self-contained HTML transcript. No server, no external images.</p>
+      </li>
+  </ol>
+
+  <div class="two" style="margin-top: 34px;">
+    <div>
+      <h3>What lands next to your recording</h3>
+      <p class="section-lede">Plain files, named after the input, openable anywhere: <code>.srt</code> and <code>.json</code> from the transcription, <code>.speakers.srt</code> and <code>.speakers.txt</code> once the names are in, <code>.frames.json</code> for the captures, and the one file you actually send people — <code>.speakers.html</code>, self-contained, images and all.</p>
+      <p class="section-lede">Changed your mind about the speaker count? <code>whiz merge</code> re-runs only the diarization and the merge against the transcription you already have, from a cached result. <b>No re-transcription.</b></p>
+    </div>
+    <div class="transcript sp-a">
+      <div class="bar"><span class="dot"></span> recording.speakers.html</div>
+      <div class="lines">
+        <div class="line sp-a">
+          <span class="who">Alice</span>
+          <span class="at">00:12</span>
+          <p>We measured it on the 1,900-mod profile. The merge never repaid the extra pass.</p>
+        </div>
+        <div class="line sp-b">
+          <span class="who">Bob</span>
+          <span class="at">00:29</span>
+          <p>Then we kill it. Write it down so nobody re-proposes it in March.</p>
+        </div>
+        <div class="line sp-c">
+          <span class="who">Carol</span>
+          <span class="at">01:04</span>
+          <p>The frame at 4:31 shows the old dialog, so the screenshot in the doc is stale.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="voices">
+  <p class="label">Voice profiles</p>
+  <h2>Name someone once. whiz knows them in the next recording.</h2>
+  <div class="two">
+    <div>
+      <p class="section-lede">The first time, it asks: <i>who is Speaker B?</i> You type <b>Bob</b>. That answer is not just a find-and-replace — it saves the voice.</p>
+      <p class="section-lede">Next week's recording with the same people comes out labeled <b>with no flags at all</b>. Profiles merge across recordings and get more accurate as they see more of a voice, and <code>whiz speakers list</code> shows you who it knows.</p>
+      <p class="section-lede">Nobody else's server ever hears any of it: the embeddings live on your machine, beside the models.</p>
+    </div>
+    <div>
+<pre><span class="cmd">$ whiz transcribe standup.mov</span>
+<span class="dim">Speakers  4 detected</span>
+    ● <span class="a">Alice</span>   181 segments   <span class="dim">known voice</span>
+    ● <span class="b">Bob</span>     152 segments   <span class="dim">known voice</span>
+    ● <span class="c">Carol</span>    12 segments   <span class="dim">known voice</span>
+    ● <span class="d">Dave</span>      6 segments   <span class="dim">new — who is this?</span>
+
+<span class="cmd">$ whiz speakers list</span>
+Alice   14 recordings   <span class="dim">profile merged ×3</span>
+Bob     11 recordings
+Carol    4 recordings</pre>
+    </div>
+  </div>
+</section>
+
+<section id="vision">
+  <p class="label">Frames, and what the model does with them</p>
+  <h2>It reads the screen as a timeline, not a pile of screenshots</h2>
+  <div class="two">
+    <div>
+      <p class="section-lede">Every segment gets the frame that was on screen when it was said. That alone makes a screen recording readable — but the analysis goes further when your model can see.</p>
+      <p class="section-lede">The analyst posture <b>reconciles what is visible with what was said</b> and surfaces the discrepancies: the number on the slide that nobody read out, the dialog that has since been redesigned. Consecutive frames are treated as a sequence, so it can reason about what changed between them instead of describing four unrelated pictures.</p>
+      <p class="section-lede">It turns itself on when frames exist and the model can take them. No flag.</p>
+    </div>
+    <div class="cards" style="margin-top: 0; grid-template-columns: 1fr;">
+      <div class="card">
+        <p class="label">From an analysis</p>
+        <p><b>Discrepancy at 04:31.</b> Carol says the export dialog has three options; the frame shows four, with "CSV (legacy)" added. The doc quoted in the meeting is older than the build on screen.</p>
+      </div>
+      <div class="card">
+        <p class="label">Long recordings</p>
+        <p>An hour-long video is not one enormous prompt. A rolling-context map-reduce keeps every call focused on a small, coherent window, so quality holds at the end of the recording — <b>and it costs no extra calls</b>.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="essentials">
+  <p class="label">Essentials</p>
+  <h2>Every analysis ends with the part you feed back</h2>
+  <div class="two">
+    <div>
+      <p class="section-lede">After the summary, the action items or the implementation plan, whiz appends a dense <code>## Essentials</code> list: <b>every fact, decision, number and UI detail</b>, written to be read by a model rather than admired by a human.</p>
+      <p class="section-lede">Hand it to the next <code>whiz analyze</code> and the model starts where the last one finished, instead of re-reading an hour of dialogue. No flag, no second file — it is simply always there.</p>
+    </div>
+    <div>
+<pre><span class="dim">recording.analysis.md</span>
+
+## Essentials
+
+- Merge pass on the 1,900-mod profile: <b>measured,
+  never repaid</b> — dropped (<span class="a">Alice</span>, 00:12)
+- Decision: kill it; record so it is not
+  re-proposed (<span class="b">Bob</span>, 00:29)
+- Export dialog now has 4 options, not 3;
+  doc is stale (frame 04:31)
+- Open: who owns the migration note</pre>
+    </div>
+  </div>
+</section>
+
+<section id="local">
+  <p class="label">Local by default</p>
+  <h2>Nothing leaves your machine unless you send it somewhere</h2>
+  <div class="two">
+    <div>
+      <p class="section-lede">Transcription runs on <a href="https://github.com/ggerganov/whisper.cpp">whisper.cpp</a>, diarization on <a href="https://github.com/k2-fsa/sherpa-onnx">sherpa-onnx</a>, analysis on <a href="https://ollama.com">Ollama</a> — all on your hardware, with no account and no API key. Point it at an OpenAI-compatible endpoint if you would rather, but that is a choice you make, not a default you discover.</p>
+      <ul class="needs">
+        <li><span class="tick">▸</span><span><b>Python 3.11+</b> and <code>pipx</code></span></li>
+        <li><span class="tick">▸</span><span><b>whisper-cli</b> on your PATH, and one ggml model</span></li>
+        <li><span class="tick">▸</span><span><b>ffmpeg</b>, for video inputs</span></li>
+        <li><span class="tick">▸</span><span><b>Ollama</b>, only if you want the analysis</span></li>
+      </ul>
+    </div>
+    <div class="card">
+      <p class="label">Also: dictation</p>
+      <h3>Speak into whatever has focus</h3>
+      <p class="section-lede"><code>whiz dictate</code> turns the same stack into system-wide speech to text: a hotkey, a live mic indicator, and your words typed into the app you are already in. Voice activity detection splits what you say into utterances, so text appears as you pause rather than at the end.</p>
+      <p class="note">The engine is provider-abstracted — speech, typing and indicator are pluggable. macOS providers ship today; a Linux one is being built.</p>
+    </div>
+  </div>
+</section>
+
+<section id="install">
+  <p class="label">Install</p>
+  <h2>One install, then one command per recording</h2>
+  <div class="two">
+    <div>
+<pre><span class="cmd">$ pipx install git+https://github.com/ReidenXerx/whiz.git</span>
+
+<span class="dim"># the happy path — video</span>
+<span class="cmd">$ whiz transcribe recording.mov</span>
+
+<span class="dim"># add the HTML transcript</span>
+<span class="cmd">$ whiz transcribe --outputs srt,html recording.mov</span>
+
+<span class="dim"># transcribe and analyse in one go</span>
+<span class="cmd">$ whiz transcribe --analyze recording.mov</span>
+
+<span class="dim"># analyse a transcript you already have</span>
+<span class="cmd">$ whiz analyze recording.mov</span></pre>
+    </div>
+    <div>
+      <h3>The rest of the commands</h3>
+      <p class="section-lede"><code>whiz merge</code> re-tunes speakers without re-transcribing · <code>whiz models</code> lists and downloads models · <code>whiz speakers</code> lists, forgets and matches voices · <code>whiz config</code> shows and edits settings · <code>whiz dictate</code> is the dictation service · <code>whiz upgrade</code> updates the install.</p>
+      <p class="section-lede">Every command explains itself with <code>--help</code>, and the terminal output degrades to clean plain text the moment you pipe it somewhere.</p>
+      <blockquote>Video inputs turn on screenshots, speaker detection and the naming prompt by themselves. <b>Pass <code>--no-screenshots</code>, <code>--no-speakers</code> or <code>--no-name-speakers</code> to opt out.</b></blockquote>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="footer">
+  <div>
+    <div class="footer-links">
+      <a href="https://github.com/ReidenXerx/whiz">GitHub</a>
+      <a href="https://github.com/ReidenXerx/whiz#readme">README</a>
+      <a href="https://github.com/ReidenXerx/whiz/releases">Releases</a>
+      <a href="https://github.com/ggerganov/whisper.cpp">whisper.cpp</a>
+      <a href="https://github.com/k2-fsa/sherpa-onnx">sherpa-onnx</a>
+      <a href="https://ollama.com">Ollama</a>
+    </div>
+    <p class="note" style="margin-top: 12px;">MIT · built by <a href="https://duduphudu.app/">DuduPhudu</a> · v0.14.0</p>
+  </div>
+  <p class="note" style="max-width: 36ch;">The speakers on this page are the README's Alice, Bob, Carol and Dave. Your recordings stay where they are.</p>
+</footer>
+
+</div>
+<script>
+  document.querySelectorAll("[data-copy]").forEach(function (button) {
+    button.addEventListener("click", function () {
+      var done = function () {
+        button.classList.add("done");
+        setTimeout(function () { button.classList.remove("done"); }, 1100);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(button.dataset.copy).then(done, function () {});
+      }
+    });
+  });
+</script>
+</body>
+</html>

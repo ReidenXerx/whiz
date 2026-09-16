@@ -1,19 +1,28 @@
+<div align="center">
+
+<img src="https://raw.githubusercontent.com/ReidenXerx/whiz/main/docs/assets/whiz-mark.svg" alt="whiz" width="76">
+
 # whiz
 
-[![Version](https://img.shields.io/badge/version-0.13.1-blue)](https://github.com/ReidenXerx/whiz/releases)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Python ≥3.11](https://img.shields.io/badge/python-%E2%89%A53.11-blue)](https://www.python.org/)
-[![macOS](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](#requirements)
-[![Powered by whisper.cpp](https://img.shields.io/badge/powered%20by-whisper.cpp%20%2B%20sherpa--onnx-orange)](https://github.com/ggerganov/whisper.cpp)
+**A recording goes in. A transcript that knows who spoke comes out.**
 
-**A transcription CLI for meetings, screen recordings, and interviews — from audio/video to a labeled, named, frame-illustrated transcript in one command.**
+From audio or video to a labeled, named, frame-illustrated transcript — in one command, on your own machine.
 
-```
+[![Version](https://img.shields.io/badge/version-0.14.0-F0A32E)](https://github.com/ReidenXerx/whiz/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-4ECBD9)](LICENSE)
+[![Python ≥3.11](https://img.shields.io/badge/python-%E2%89%A53.11-4ECBD9)](https://www.python.org/)
+[![macOS · Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](#requirements)
+[![Powered by whisper.cpp](https://img.shields.io/badge/powered%20by-whisper.cpp%20%2B%20sherpa--onnx-F0A32E)](https://github.com/ggerganov/whisper.cpp)
+
+```bash
 whiz transcribe recording.mov
 ```
 
+**[duduphudu.app/whiz](https://duduphudu.app/whiz/)** — what one command does, and what it costs you in privacy (nothing)
+
+</div>
+
 <p align="center">
-  <em>Terminal demo coming soon</em><br>
   <img src="docs/images/terminal-demo.gif" alt="whiz terminal demo" width="720">
 </p>
 
