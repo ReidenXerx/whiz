@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" width="1200" height="300" role="img" aria-label="Name Speaker B as Bob once, and the next recording with the same people is labeled automatically, with no flags.">
+  <style>
+    .s { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; }
+    .m { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; }
+    .lab { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 12px; letter-spacing: 1.4px; fill: #9A93A6; }
+    .h { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 21px; font-weight: 700; fill: #EFEAF2; }
+    .t { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 15px; fill: #EFEAF2; }
+    .d { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 14px; fill: #9A93A6; }
+    .mono { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 13px; fill: #EFEAF2; }
+    .monod { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 13px; fill: #9A93A6; }
+    .small { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 11.5px; fill: #9A93A6; }
+  </style>
+  <rect width="1200" height="300" rx="14" fill="#100E14"/>
+  <rect x="0.75" y="0.75" width="1198.5" height="298.5" rx="13.5" fill="none" stroke="#2A2534" stroke-width="1.5"/>
+<text x="36" y="44" class="lab" text-anchor="start">VOICE PROFILES</text>
+<text x="36" y="76" class="h" text-anchor="start">Name someone once</text>
+<rect x="36" y="116" width="552" height="150" rx="10" fill="#191620" stroke="#2A2534" stroke-width="1.5"/>
+<text x="60" y="146" class="lab" text-anchor="start">MONDAY · standup.mov</text>
+<text x="60" y="180" class="t" text-anchor="start">Who is Speaker B?</text>
+<rect x="60" y="196" width="220" height="34" rx="6" fill="#14111A" stroke="#4ECBD9" stroke-width="1.4"/>
+<text x="76" y="218" class="mono" text-anchor="start" style="fill:#4ECBD9">Bob</text>
+<text x="300" y="218" class="small" text-anchor="start">saved: voice + name</text>
+<path d="M600 190 L640 190" stroke="#F0A32E" stroke-width="2" marker-end="url(#wa)"/>
+<defs><marker id="wa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#F0A32E"/></marker></defs>
+<rect x="660" y="116" width="504" height="150" rx="10" fill="#191620" stroke="#F0A32E" stroke-width="1.5"/>
+<text x="684" y="146" class="lab" text-anchor="start" style="fill:#F0A32E">THURSDAY · review.mov — no flags</text>
+<circle cx="700" cy="175" r="5" fill="#F0A32E"/>
+<text x="716" y="180" class="mono" text-anchor="start" style="fill:#F0A32E">Alice</text>
+<text x="800" y="180" class="monod" text-anchor="start">181 segments</text>
+<text x="1140" y="180" class="small" text-anchor="end">known voice</text>
+<circle cx="700" cy="201" r="5" fill="#4ECBD9"/>
+<text x="716" y="206" class="mono" text-anchor="start" style="fill:#4ECBD9">Bob</text>
+<text x="800" y="206" class="monod" text-anchor="start">152 segments</text>
+<text x="1140" y="206" class="small" text-anchor="end">known voice</text>
+<circle cx="700" cy="227" r="5" fill="#FF8FB1"/>
+<text x="716" y="232" class="mono" text-anchor="start" style="fill:#FF8FB1">Carol</text>
+<text x="800" y="232" class="monod" text-anchor="start">12 segments</text>
+<text x="1140" y="232" class="small" text-anchor="end">known voice</text>
+<text x="36" y="288" class="d" text-anchor="start">Profiles merge across recordings and get more accurate as they see more of a voice. The embeddings live on your machine, beside the models.</text>
+</svg>

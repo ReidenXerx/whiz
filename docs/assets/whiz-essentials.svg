@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 400" width="1200" height="400" role="img" aria-label="An analysis with a summary and action items, ending in a dense Essentials list of every fact, decision and number, each cited to a speaker or a frame.">
+  <style>
+    .s { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; }
+    .m { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; }
+    .lab { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 12px; letter-spacing: 1.4px; fill: #9A93A6; }
+    .h { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 21px; font-weight: 700; fill: #EFEAF2; }
+    .t { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 15px; fill: #EFEAF2; }
+    .d { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 14px; fill: #9A93A6; }
+    .mono { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 13px; fill: #EFEAF2; }
+    .monod { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 13px; fill: #9A93A6; }
+    .small { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 11.5px; fill: #9A93A6; }
+  </style>
+  <rect width="1200" height="400" rx="14" fill="#100E14"/>
+  <rect x="0.75" y="0.75" width="1198.5" height="398.5" rx="13.5" fill="none" stroke="#2A2534" stroke-width="1.5"/>
+<text x="36" y="44" class="lab" text-anchor="start">RECORDING.ANALYSIS.MD</text>
+<text x="36" y="76" class="h" text-anchor="start">Every analysis ends with the part you feed back</text>
+<rect x="36" y="116" width="552" height="244" rx="10" fill="#14111A" stroke="#2A2534" stroke-width="1.5"/>
+<text x="60" y="146" class="mono" text-anchor="start" style="fill:#9A93A6">## Summary</text>
+<text x="60" y="172" class="monod" text-anchor="start">The merge pass was measured on the 1,900-mod</text>
+<text x="60" y="194" class="monod" text-anchor="start">profile and dropped. The export dialog on screen</text>
+<text x="60" y="216" class="monod" text-anchor="start">has four options; the doc quoted has three.</text>
+<text x="60" y="254" class="mono" text-anchor="start" style="fill:#9A93A6">## Action items</text>
+<text x="60" y="280" class="monod" text-anchor="start">- Dave: migration note</text>
+<text x="60" y="302" class="monod" text-anchor="start">- Alice: land NS-9</text>
+<rect x="612" y="116" width="552" height="244" rx="10" fill="#191620" stroke="#F0A32E" stroke-width="1.5"/>
+<text x="636" y="146" class="mono" text-anchor="start" style="fill:#F0A32E;font-weight:600">## Essentials</text>
+<text x="636" y="178" class="mono" text-anchor="start">- Merge pass on the 1,900-mod profile:</text>
+<text x="636" y="202" class="mono" text-anchor="start">  measured, never repaid — dropped</text>
+<text x="1140" y="202" class="small" text-anchor="end">(Alice, 00:12)</text>
+<text x="636" y="226" class="mono" text-anchor="start">- Decision: kill it; record it so it is</text>
+<text x="636" y="250" class="mono" text-anchor="start">  not re-proposed</text>
+<text x="1140" y="250" class="small" text-anchor="end">(Bob, 00:29)</text>
+<text x="636" y="274" class="mono" text-anchor="start">- Export dialog has 4 options, not 3;</text>
+<text x="636" y="298" class="mono" text-anchor="start">  the doc is stale</text>
+<text x="1140" y="298" class="small" text-anchor="end">(frame 04:31)</text>
+<text x="636" y="322" class="mono" text-anchor="start">- Open: who owns the migration note</text>
+<text x="36" y="386" class="d" text-anchor="start">Every fact, decision, number and UI detail — written to be read by the next model, not admired by a human. No flag, no second file.</text>
+</svg>

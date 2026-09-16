@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 270" width="1200" height="270" role="img" aria-label="One command runs six steps: extract the audio, transcribe with whisper.cpp, diarize with sherpa-onnx, name the speakers, capture a frame per segment and write a self-contained HTML transcript.">
+  <style>
+    .s { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; }
+    .m { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; }
+    .lab { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 12px; letter-spacing: 1.4px; fill: #9A93A6; }
+    .h { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 21px; font-weight: 700; fill: #EFEAF2; }
+    .t { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 15px; fill: #EFEAF2; }
+    .d { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 14px; fill: #9A93A6; }
+    .mono { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 13px; fill: #EFEAF2; }
+    .monod { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 13px; fill: #9A93A6; }
+    .small { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 11.5px; fill: #9A93A6; }
+  </style>
+  <rect width="1200" height="270" rx="14" fill="#100E14"/>
+  <rect x="0.75" y="0.75" width="1198.5" height="268.5" rx="13.5" fill="none" stroke="#2A2534" stroke-width="1.5"/>
+<text x="36" y="44" class="lab" text-anchor="start">WHAT THE ONE COMMAND DOES</text>
+<text x="36" y="76" class="h" text-anchor="start">Six steps you would otherwise run by hand</text>
+<rect x="36" y="116" width="178.0" height="104" rx="10" fill="#191620" stroke="#2A2534" stroke-width="1.5"/>
+<text x="52" y="144" class="small" text-anchor="start" style="fill:#F0A32E">01</text>
+<text x="52" y="172" class="t" text-anchor="start" style="font-weight:600">Extract</text>
+<text x="52" y="196" class="small" text-anchor="start">audio out of the video</text>
+<path d="M216.0 168 L223.0 168" stroke="#2A2534" stroke-width="1.4"/>
+<rect x="226.0" y="116" width="178.0" height="104" rx="10" fill="#191620" stroke="#2A2534" stroke-width="1.5"/>
+<text x="242.0" y="144" class="small" text-anchor="start" style="fill:#F0A32E">02</text>
+<text x="242.0" y="172" class="t" text-anchor="start" style="font-weight:600">Transcribe</text>
+<text x="242.0" y="196" class="small" text-anchor="start">whisper.cpp, best model found</text>
+<path d="M406.0 168 L413.0 168" stroke="#2A2534" stroke-width="1.4"/>
+<rect x="416.0" y="116" width="178.0" height="104" rx="10" fill="#191620" stroke="#2A2534" stroke-width="1.5"/>
+<text x="432.0" y="144" class="small" text-anchor="start" style="fill:#F0A32E">03</text>
+<text x="432.0" y="172" class="t" text-anchor="start" style="font-weight:600">Diarize</text>
+<text x="432.0" y="196" class="small" text-anchor="start">sherpa-onnx, one track to many</text>
+<path d="M596.0 168 L603.0 168" stroke="#2A2534" stroke-width="1.4"/>
+<rect x="606.0" y="116" width="178.0" height="104" rx="10" fill="#191620" stroke="#2A2534" stroke-width="1.5"/>
+<text x="622.0" y="144" class="small" text-anchor="start" style="fill:#F0A32E">04</text>
+<text x="622.0" y="172" class="t" text-anchor="start" style="font-weight:600">Name</text>
+<text x="622.0" y="196" class="small" text-anchor="start">asked once, remembered</text>
+<path d="M786.0 168 L793.0 168" stroke="#2A2534" stroke-width="1.4"/>
+<rect x="796.0" y="116" width="178.0" height="104" rx="10" fill="#191620" stroke="#2A2534" stroke-width="1.5"/>
+<text x="812.0" y="144" class="small" text-anchor="start" style="fill:#F0A32E">05</text>
+<text x="812.0" y="172" class="t" text-anchor="start" style="font-weight:600">Capture</text>
+<text x="812.0" y="196" class="small" text-anchor="start">a frame per segment</text>
+<path d="M976.0 168 L983.0 168" stroke="#2A2534" stroke-width="1.4"/>
+<rect x="986.0" y="116" width="178.0" height="104" rx="10" fill="#191620" stroke="#2A2534" stroke-width="1.5"/>
+<text x="1002.0" y="144" class="small" text-anchor="start" style="fill:#F0A32E">06</text>
+<text x="1002.0" y="172" class="t" text-anchor="start" style="font-weight:600">Write</text>
+<text x="1002.0" y="196" class="small" text-anchor="start">self-contained HTML</text>
+<text x="36" y="250" class="d" text-anchor="start">Video inputs turn on screenshots, speaker detection and the naming prompt by themselves. Audio inputs stay out of the way.</text>
+</svg>

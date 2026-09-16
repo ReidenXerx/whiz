@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 470" width="1200" height="470" role="img" aria-label="A frame-illustrated HTML transcript: Alice, Bob, Carol and Dave each in their own colour, with the on-screen frame captured next to every line.">
+  <style>
+    .s { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; }
+    .m { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; }
+    .lab { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 12px; letter-spacing: 1.4px; fill: #9A93A6; }
+    .h { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 21px; font-weight: 700; fill: #EFEAF2; }
+    .t { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 15px; fill: #EFEAF2; }
+    .d { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 14px; fill: #9A93A6; }
+    .mono { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 13px; fill: #EFEAF2; }
+    .monod { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 13px; fill: #9A93A6; }
+    .small { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 11.5px; fill: #9A93A6; }
+  </style>
+  <rect width="1200" height="470" rx="14" fill="#100E14"/>
+  <rect x="0.75" y="0.75" width="1198.5" height="468.5" rx="13.5" fill="none" stroke="#2A2534" stroke-width="1.5"/>
+<text x="36" y="44" class="lab" text-anchor="start">RECORDING.SPEAKERS.HTML</text>
+<text x="1164" y="44" class="small" text-anchor="end">self-contained · opens anywhere</text>
+<rect x="36" y="70" width="1128" height="330" rx="10" fill="#191620" stroke="#2A2534" stroke-width="1.5"/>
+<circle cx="72" cy="114" r="5" fill="#F0A32E"/>
+<text x="88" y="119" class="mono" text-anchor="start" style="fill:#F0A32E;font-weight:600">Alice</text>
+<text x="176" y="119" class="small" text-anchor="start">00:12</text>
+<text x="240" y="119" class="t" text-anchor="start">We measured it on the 1,900-mod profile. The merge never repaid the extra pass.</text>
+<rect x="900" y="96" width="220" height="56" rx="6" fill="#14111A" stroke="#F0A32E" stroke-width="1.2" opacity=".85"/>
+<g fill="#F0A32E" opacity=".6"><rect x="978" y="130" width="10" height="14" rx="2"/><rect x="994" y="118" width="10" height="26" rx="2"/><rect x="1010" y="106" width="10" height="38" rx="2"/><rect x="1026" y="124" width="10" height="20" rx="2"/></g>
+<circle cx="72" cy="190" r="5" fill="#4ECBD9"/>
+<text x="88" y="195" class="mono" text-anchor="start" style="fill:#4ECBD9;font-weight:600">Bob</text>
+<text x="176" y="195" class="small" text-anchor="start">00:29</text>
+<text x="240" y="195" class="t" text-anchor="start">Then we kill it. Write it down so nobody re-proposes it in March.</text>
+<rect x="900" y="172" width="220" height="56" rx="6" fill="#14111A" stroke="#4ECBD9" stroke-width="1.2" opacity=".85"/>
+<g fill="#4ECBD9" opacity=".6"><rect x="978" y="186" width="36" height="4" rx="2"/><rect x="982" y="195" width="52" height="4" rx="2"/><rect x="978" y="204" width="44" height="4" rx="2"/><rect x="982" y="213" width="58" height="4" rx="2"/></g>
+<circle cx="72" cy="266" r="5" fill="#FF8FB1"/>
+<text x="88" y="271" class="mono" text-anchor="start" style="fill:#FF8FB1;font-weight:600">Carol</text>
+<text x="176" y="271" class="small" text-anchor="start">01:04</text>
+<text x="240" y="271" class="t" text-anchor="start">The frame at 4:31 shows the old dialog, so the screenshot in the doc is stale.</text>
+<rect x="900" y="248" width="220" height="56" rx="6" fill="#14111A" stroke="#FF8FB1" stroke-width="1.2" opacity=".85"/>
+<g fill="#FF8FB1" opacity=".6"><rect x="978" y="258" width="62" height="8" rx="2"/><rect x="978" y="272" width="28" height="26" rx="2"/><rect x="1012" y="272" width="28" height="11" rx="2"/><rect x="1012" y="287" width="28" height="11" rx="2"/></g>
+<circle cx="72" cy="342" r="5" fill="#A99BF5"/>
+<text x="88" y="347" class="mono" text-anchor="start" style="fill:#A99BF5;font-weight:600">Dave</text>
+<text x="176" y="347" class="small" text-anchor="start">01:22</text>
+<text x="240" y="347" class="t" text-anchor="start">I'll take the migration note. Alice, can you land the north-star?</text>
+<rect x="900" y="324" width="220" height="56" rx="6" fill="#14111A" stroke="#A99BF5" stroke-width="1.2" opacity=".85"/>
+<g fill="#A99BF5" opacity=".6"><path d="M992 344 L1028 346 M990 348 L1004 364 M1028 352 L1012 366" stroke="#A99BF5" stroke-width="2" fill="none"/><circle cx="988" cy="342" r="6"/><circle cx="1032" cy="346" r="6"/><circle cx="1006" cy="370" r="6"/></g>
+<text x="36" y="436" class="d" text-anchor="start">Colour per speaker, the on-screen frame beside what was said, and nothing loaded from anywhere — images and all are inside the file.</text>
+</svg>
