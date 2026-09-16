@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/ReidenXerx/whiz/main/docs/assets/whiz-mark.svg" alt="whiz" width="76">
+<img src="docs/assets/whiz-mark.svg" alt="whiz" width="76">
 
 # whiz
 
@@ -22,11 +22,11 @@ whiz transcribe recording.mov
 
 </div>
 
-<img src="https://raw.githubusercontent.com/ReidenXerx/whiz/main/docs/assets/whiz-tape.svg" alt="A waveform coloured by who is speaking, the speaker bands under it, and the frames captured at 00:12, 04:31, 09:04 and 17:40." width="100%">
+<img src="docs/assets/whiz-tape.svg" alt="A waveform coloured by who is speaking, the speaker bands under it, and the frames captured at 00:12, 04:31, 09:04 and 17:40." width="100%">
 
 whiz transcribes, detects who spoke when, prompts you to name each speaker, captures an on-screen frame per segment, and emits a self-contained HTML transcript — all from that single command. Then it can AI-analyze the whole thing (with the frames) and write a concentrated Essentials section you feed back to a later analysis. It's powered by [whisper.cpp](https://github.com/ggerganov/whisper.cpp) for transcription and [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) for diarization, with a polished terminal UI built on [rich](https://rich.readthedocs.io).
 
-<img src="https://raw.githubusercontent.com/ReidenXerx/whiz/main/docs/assets/whiz-transcript.svg" alt="A frame-illustrated HTML transcript: Alice, Bob, Carol and Dave each in their own colour, with the frame that was on screen beside every line." width="100%">
+<img src="docs/assets/whiz-transcript.svg" alt="A frame-illustrated HTML transcript: Alice, Bob, Carol and Dave each in their own colour, with the frame that was on screen beside every line." width="100%">
 
 ---
 
@@ -112,7 +112,7 @@ whiz models download turbo      # ggml-large-v3-turbo.bin — unquantized (NS-15
 
 ## What it does
 
-<img src="https://raw.githubusercontent.com/ReidenXerx/whiz/main/docs/assets/whiz-pipeline.svg" alt="One command runs six steps: extract the audio, transcribe with whisper.cpp, diarize with sherpa-onnx, name the speakers, capture a frame per segment and write a self-contained HTML transcript." width="100%">
+<img src="docs/assets/whiz-pipeline.svg" alt="One command runs six steps: extract the audio, transcribe with whisper.cpp, diarize with sherpa-onnx, name the speakers, capture a frame per segment and write a self-contained HTML transcript." width="100%">
 
 - **Transcribe** audio or video — auto-finds the best Whisper model, extracts audio from video containers, resolves friendly model aliases (`turbo`, `large-v3`).
 - **Diarize** mono recordings (meetings, screen recordings) into `Speaker A/B/C…` labels via sherpa-onnx. Auto-on for video inputs.
@@ -471,7 +471,7 @@ whiz merge recording.mov --speakers-names Alice,Bob,Carol,Dave
 
 ## Speaker voice profiles (cross-recording recognition)
 
-<img src="https://raw.githubusercontent.com/ReidenXerx/whiz/main/docs/assets/whiz-voices.svg" alt="Name Speaker B as Bob once, and the next recording with the same people is labeled automatically, with no flags." width="100%">
+<img src="docs/assets/whiz-voices.svg" alt="Name Speaker B as Bob once, and the next recording with the same people is labeled automatically, with no flags." width="100%">
 
 
 When you name a speaker (with `--name-speakers` or `--speakers-names`), whiz can save a **voice profile**: a fixed-size embedding vector for that speaker's audio, computed with the same sherpa-onnx embedding extractor used for diarization. On later recordings, each detected cluster's embedding is compared (cosine similarity) to the stored profiles and a name is auto-assigned when the best match exceeds `speaker_match_threshold` (default `0.8`).
@@ -618,7 +618,7 @@ Output is written to `<stem>.analysis.md` (the prompt + the response) and the re
 
 ## Essentials (always on): concentrated context for a later analysis
 
-<img src="https://raw.githubusercontent.com/ReidenXerx/whiz/main/docs/assets/whiz-essentials.svg" alt="An analysis with a summary and action items, ending in a dense Essentials list of every fact, decision and number, each cited to a speaker or a frame." width="100%">
+<img src="docs/assets/whiz-essentials.svg" alt="An analysis with a summary and action items, ending in a dense Essentials list of every fact, decision and number, each cited to a speaker or a frame." width="100%">
 
 Every `whiz analyze` run — auto-detect, `--summary`, `--actions`, `--plan`, or `--prompt`, single-call or map-reduce — also produces a dense **`## Essentials`** section appended to the same `.analysis.md`. It extracts **every meaningful point** from the whole recording into one tight bullet list: facts, decisions, requirements, names, numbers, UI/schema details, workflows, open questions, and rejected alternatives. There's no flag for it and no extra model call — it's folded into the analysis you already run.
 
