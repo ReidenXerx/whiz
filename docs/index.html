@@ -601,10 +601,10 @@ Carol    4 recordings</pre>
       </ul>
     </div>
     <div class="card">
-      <p class="label">Also: dictation</p>
-      <h3>Speak into whatever has focus</h3>
-      <p class="section-lede"><code>whiz dictate</code> turns the same stack into system-wide speech to text: a hotkey, a live mic indicator, and your words typed into the app you are already in. Voice activity detection splits what you say into utterances, so text appears as you pause rather than at the end.</p>
-      <p class="note">The engine is provider-abstracted — speech, typing and indicator are pluggable. macOS providers ship today; a Linux one is being built.</p>
+      <p class="label">It used to do this too</p>
+      <h3>Dictation moved out, and became Mynah</h3>
+      <p class="section-lede">Typing what you say into whatever window has focus grew into its own thing: <a href="https://duduphudu.app/mynah/">Mynah</a>, a separate tool with its own hotkey, its own indicator and its own release. Two products, each explicable in a sentence, instead of one that needed two.</p>
+      <p class="note">Your old settings are not lost: Mynah imports the <code>dictate_*</code> keys from whiz's config on its first run.</p>
     </div>
   </div>
 </section>
@@ -630,7 +630,7 @@ Carol    4 recordings</pre>
     </div>
     <div>
       <h3>The rest of the commands</h3>
-      <p class="section-lede"><code>whiz merge</code> re-tunes speakers without re-transcribing · <code>whiz models</code> lists and downloads models · <code>whiz speakers</code> lists, forgets and matches voices · <code>whiz config</code> shows and edits settings · <code>whiz dictate</code> is the dictation service · <code>whiz upgrade</code> updates the install.</p>
+      <p class="section-lede"><code>whiz merge</code> re-tunes speakers without re-transcribing · <code>whiz models</code> lists and downloads models · <code>whiz speakers</code> lists, forgets and matches voices · <code>whiz config</code> shows and edits settings · <code>whiz upgrade</code> updates the install.</p>
       <p class="section-lede">Every command explains itself with <code>--help</code>, and the terminal output degrades to clean plain text the moment you pipe it somewhere.</p>
       <blockquote>Video inputs turn on screenshots, speaker detection and the naming prompt by themselves. <b>Pass <code>--no-screenshots</code>, <code>--no-speakers</code> or <code>--no-name-speakers</code> to opt out.</b></blockquote>
     </div>
