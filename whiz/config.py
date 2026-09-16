@@ -73,72 +73,10 @@ class Config:
     speaker_match_threshold: float = 0.8
     # When True, save a voice profile for each named speaker after transcription/merge.
     save_voice_profiles: bool = True
-    # --- Dictation (whiz dictate) ---
-    # mlx-whisper model repo or path (empty => provider default, e.g.
-    # mlx-community/whisper-large-v3-turbo).
-    dictate_model: str = ""
-    # Spoken language code for dictation (default "ru").
-    dictate_language: str = "ru"
-    # Whisper initial_prompt to bias recognition (empty => built-in Russian
-    # jargon/obscenity prompt from the engine).
-    dictate_prompt: str = ""
-    # Seconds to keep the STT model loaded after a session ends before
-    # unloading (0 => never unload; default 45 for warm back-to-back).
-    dictate_idle_timeout: float = 45.0
-    # Force a specific STT provider by name (empty => auto-detect by platform).
-    dictate_stt_provider: str = ""
-    # Force a specific text injector by name (empty => auto-detect).
-    dictate_injector: str = ""
-    # Force a specific dictation indicator by name (empty => auto-detect).
-    dictate_indicator: str = ""
-    # Global toggle hotkey in pynput syntax. The '.' key is a literal
-    # character, NOT a named key — pynput's HotKey.parse rejects '<period>'
-    # with ValueError, so it must be written as a bare '.'.
-    dictate_hotkey: str = "<cmd>+<shift>+."
-    # Trigger mode: "toggle" (press to start, press again to stop) or "ptt"
-    # (push-to-talk: hold to dictate, release to stop).
-    dictate_trigger: str = "toggle"
-    # Enable WebRTC VAD for utterance segmentation.
-    dictate_vad: bool = True
-    # Seconds of continuous silence before a session auto-stops (0 => off).
-    dictate_auto_stop_silence: float = 10.0
-    # Show the floating dictation indicator overlay.
-    dictate_show_indicator: bool = True
-    # Keep the indicator visible in its dimmed idle state while the service
-    # runs (not just during an active session). False hides the overlay until
-    # a session starts — most users want it only when dictating. Enable with:
-    #   whiz dictate set idle_visible=true
-    dictate_idle_visible: bool = False
-    # --- Microphone sensitivity ---
-    # Static energy floors for utterance segmentation (normalized RMS, 0.0-1.0).
-    # These are FLOORS: the adaptive noise calibration at session start can
-    # raise the effective gates above them, never lower them. The calibration
-    # contribution is itself capped at the speech floor (0.03 — see
-    # tuning/tuning.toml's calibration_speech_floor): a calibrated gate above
-    # the speech/noise discrimination line would demand speech louder than
-    # speech, and no setting here could counter it. A floor set above 0.03
-    # therefore always applies exactly as set (M13, wave-2).
-    #
-    # The original values (0.03 / 0.025) were tuned on one machine and proved
-    # far too high on others — measured room noise of 0.0005-0.002 against
-    # speech at 0.05-0.06 meant the gate sat just below speaking level and
-    # normal talking was discarded. Lower defaults leave the adaptive floor to
-    # do the work in genuinely noisy rooms.
-    #
-    # Raise these if noise is being transcribed; lower them if you have to
-    # raise your voice:
-    #   whiz dictate set frame_energy=0.005
-    dictate_frame_energy: float = 0.010
-    # Minimum whole-utterance RMS to bother transcribing.
-    dictate_min_energy: float = 0.008
-    # Minimum utterance length in seconds. Below this it is a click or breath.
-    # Short words like "да" / "yes" can fall under 0.35s.
-    dictate_min_utterance: float = 0.25
-    # Show a menu bar item (macOS NSStatusItem) with Start/Stop, Open Config,
-    # About, and Quit — so users can control dictation without the CLI. Runs
-    # inside the LaunchAgent process. Disable for a pure hotkey/CLI experience:
-    #   whiz dictate set menu_bar=false
-    dictate_menu_bar: bool = True
+    # Dictation used to live here as dictate_* keys. It is Mynah now
+    # (github.com/ReidenXerx/mynah), which reads them out of this file once and
+    # then keeps its own. save() preserves keys it does not know, so an existing
+    # config file keeps them until Mynah has imported them.
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

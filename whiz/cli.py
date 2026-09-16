@@ -8,7 +8,7 @@ Subcommands:
   whiz models download N   Download a model from HuggingFace.
   whiz speakers list       List stored voice profiles.
   whiz analyze <file>      AI-analyze a prior transcript (+ frames).
-  whiz dictate             System-wide voice dictation (toggle hotkey + floating indicator).
+  whiz dictate             Moved to Mynah: github.com/ReidenXerx/mynah
   whiz config show         Show current config.
   whiz config edit         Open config in $EDITOR.
   whiz config set K=V      Set a config value.
@@ -2076,256 +2076,27 @@ def cmd_merge(args: argparse.Namespace) -> int:
     return 0
 
 
-# ---------- dictate ----------
+# ---------- dictate (moved to Mynah) ----------
+
+# Dictation left whiz for https://github.com/ReidenXerx/mynah. The command stays
+# for a release or two, because `whiz dictate` is in people's muscle memory, in
+# their LaunchAgent, and in a shell history they will page back through: it
+# should say where its replacement went rather than "unknown command".
+MYNAH_MOVED = """\
+Dictation moved to Mynah — its own tool now.
+
+  pipx install git+https://github.com/ReidenXerx/mynah.git
+  mynah setup
+
+Your settings come with it: Mynah's first run reads the dictate_* keys out of
+whiz's config.toml. https://duduphudu.app/mynah/
+
+whiz still transcribes recordings: whiz transcribe, whiz analyze, whiz merge."""
+
 
 def cmd_dictate(args: argparse.Namespace) -> int:
-    """System-wide voice dictation via mlx-whisper with a toggle hotkey.
-
-    Listens for a global hotkey (default Cmd+Shift+.). Press to start/stop a
-    dictation session: mic audio is transcribed and typed into whatever app
-    has keyboard focus. A floating indicator shows live mic level. Requires
-    macOS Accessibility + Microphone permissions and the ``dictate`` extra
-    (``pipx inject whiz 'whiz[dictate]'``).
-    """
-    config = cfg.load()
-
-    # --list-providers: print available providers and exit (no deps needed).
-    if getattr(args, "list_providers", False):
-        from whiz.dictate.providers import list_providers
-
-        provs = list_providers()
-        ui.header("whiz", "dictate providers")
-        for kind in ("stt", "injector", "indicator"):
-            rows = [
-                [name, supports, "yes" if current else "no"]
-                for name, supports, current in provs[kind]
-            ]
-            ui.table(
-                f"{kind} providers",
-                [("Name", "left"), ("Platform", "left"), ("Current", "right")],
-                rows,
-            )
-        return 0
-
-    # Check for the optional extra before importing the engine (which pulls in
-    # sounddevice/pynput). A missing dep gives a clear install hint instead of
-    # an ImportError traceback.
-    try:
-        import sounddevice  # noqa: F401
-        import pynput  # noqa: F401
-    except ImportError:
-        raise SystemExit(
-            "The 'dictate' extra is not installed. Install it with:\n"
-            "  pipx inject whiz 'whiz[dictate]'\n\n"
-            "Then grant Accessibility + Microphone permissions in System "
-            "Settings → Privacy & Security."
-        )
-
-    from whiz.dictate import run_dictate
-
-    # Set the process title early so the dictation agent shows as "whiz"
-    # (not "python") in Activity Monitor, Force Quit, and ps. This runs
-    # before any threads/AppKit are started so the title sticks for the
-    # whole process lifetime.
-    try:
-        import setproctitle
-
-        setproctitle.setproctitle("whiz")
-    except Exception:
-        # setproctitle is optional; never let a title-setting failure
-        # abort dictation startup.
-        pass
-
-    # Configure logging so the engine/indicator/provider debug messages
-    # reach the LaunchAgent log file (stdout/stderr is redirected to
-    # ~/Library/Logs/whiz-dictate.log by the plist). Without this,
-    # logger.debug() calls are silently dropped and swallowed exceptions
-    # (the indicator fade path, VAD decisions, etc.) are invisible.
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
-    )
-
-    overrides: dict[str, object] = {
-        "model": args.model or "",
-        "language": args.language or "",
-        "prompt": args.prompt if args.prompt is not None else "",
-        "hotkey": args.hotkey or "",
-    }
-    if args.trigger:
-        overrides["trigger"] = args.trigger
-    if args.idle_timeout is not None:
-        overrides["idle_timeout"] = args.idle_timeout
-    if args.auto_stop_silence is not None:
-        overrides["auto_stop_silence"] = args.auto_stop_silence
-    if args.no_indicator:
-        overrides["show_indicator"] = False
-
-    return run_dictate(config, **overrides)
-
-
-def cmd_dictate_service(args: argparse.Namespace) -> int:
-    """Manage the whiz dictate login LaunchAgent.
-
-    Subcommands: install | uninstall | status.
-    install writes the plist to ~/Library/LaunchAgents and loads it so
-    dictation starts at login and stays running (KeepAlive). uninstall
-    unloads and removes it. status reports whether it's loaded.
-    """
-    from whiz.dictate import service
-
-    action = getattr(args, "service_action", "") or ""
-    if action == "install":
-        # Refuse to install the LaunchAgent if the 'dictate' extra isn't
-        # installed: the agent would exit non-zero on startup and, with
-        # KeepAlive=true, launchd would restart it in a crash loop that
-        # spams the log file forever. Make the user install the extra first,
-        # then run `service install`.
-        try:
-            import sounddevice  # noqa: F401
-            import pynput  # noqa: F401
-        except ImportError:
-            print(
-                "The 'dictate' extra is not installed. The LaunchAgent would "
-                "crash-loop on startup. Install the extra first, then retry:\n"
-                "  pipx inject whiz 'whiz[dictate]'\n"
-                "  whiz dictate service install",
-                file=sys.stderr,
-            )
-            return 1
-        return service.install()
-    if action == "uninstall":
-        return service.uninstall()
-    if action == "status":
-        return service.status()
-    raise SystemExit(f"Unknown service action '{action}'. Use install|uninstall|status.")
-
-
-def cmd_dictate_setup(args: argparse.Namespace) -> int:
-    """Guided first-time setup / doctor for whiz dictate.
-
-    One-command onboarding: auto-injects the dictate extra, checks/requests
-    Accessibility + Microphone permissions, validates the hotkey, and installs
-    the always-on login service — unless ``--no-service`` was passed.
-    """
-    from whiz.dictate import setup as setup_mod
-
-    return setup_mod.setup(install_service=not getattr(args, "no_service", False))
-
-
-# Friendly key names → config field names for `whiz dictate set`.
-# Lets users say `whiz dictate set hotkey=<f8>` instead of the verbose
-# `whiz config set dictate_hotkey=<f8>`.
-_DICTATE_FRIENDLY_KEYS: dict[str, str] = {
-    "model": "dictate_model",
-    "language": "dictate_language",
-    "lang": "dictate_language",
-    "prompt": "dictate_prompt",
-    "idle_timeout": "dictate_idle_timeout",
-    "idle": "dictate_idle_timeout",
-    "timeout": "dictate_idle_timeout",
-    "hotkey": "dictate_hotkey",
-    "key": "dictate_hotkey",
-    "trigger": "dictate_trigger",
-    "mode": "dictate_trigger",
-    "vad": "dictate_vad",
-    "auto_stop_silence": "dictate_auto_stop_silence",
-    "silence": "dictate_auto_stop_silence",
-    "show_indicator": "dictate_show_indicator",
-    "indicator": "dictate_show_indicator",
-    "idle_visible": "dictate_idle_visible",
-    "idle_badge": "dictate_idle_visible",
-    "menu_bar": "dictate_menu_bar",
-    "menubar": "dictate_menu_bar",
-    "frame_energy": "dictate_frame_energy",
-    "sensitivity": "dictate_frame_energy",
-    "min_energy": "dictate_min_energy",
-    "min_utterance": "dictate_min_utterance",
-    "stt_provider": "dictate_stt_provider",
-    "injector": "dictate_injector",
-    "indicator_provider": "dictate_indicator",
-}
-
-# All dictate_* config fields, in display order, with a short label for the
-# `whiz dictate config` (show) table.
-_DICTATE_CONFIG_FIELDS: list[tuple[str, str, str]] = [
-    # (config_key, label, description)
-    ("dictate_hotkey", "Hotkey", "Global hotkey (pynput syntax, e.g. <ctrl>+<space>)"),
-    ("dictate_trigger", "Trigger", "toggle (press to start/stop) or ptt (hold to talk)"),
-    ("dictate_language", "Language", "Spoken language code (default: ru)"),
-    ("dictate_model", "Model", "mlx-whisper model repo/path (empty = default whisper-large-v3-turbo)"),
-    ("dictate_prompt", "Prompt", "Whisper initial_prompt (empty = built-in Russian jargon)"),
-    ("dictate_idle_timeout", "Idle timeout", "Seconds before model unloads after session (0 = never)"),
-    ("dictate_auto_stop_silence", "Auto-stop silence", "Seconds of silence to auto-stop (0 = off)"),
-    ("dictate_vad", "VAD", "WebRTC VAD for utterance segmentation"),
-    ("dictate_show_indicator", "Indicator", "Floating dictation overlay"),
-    ("dictate_idle_visible", "Idle badge", "Keep the indicator dimmed-visible while idle (not just during a session)"),
-    ("dictate_menu_bar", "Menu bar", "Menu bar item with Start/Stop, Open Config, About, Quit"),
-    ("dictate_frame_energy", "Frame energy", "Per-frame energy floor for speech detection (lower = more sensitive)"),
-    ("dictate_min_energy", "Min energy", "Minimum utterance energy to transcribe (lower = more sensitive)"),
-    ("dictate_min_utterance", "Min utterance", "Shortest utterance to transcribe, in seconds"),
-    ("dictate_stt_provider", "STT provider", "Force STT provider (empty = auto)"),
-    ("dictate_injector", "Injector", "Force text injector (empty = auto)"),
-    ("dictate_indicator", "Indicator provider", "Force indicator provider (empty = auto)"),
-]
-
-
-def cmd_dictate_config(args: argparse.Namespace) -> int:
-    """Show current dictation settings in a readable table."""
-    config = cfg.load()
-    ui.header("whiz", "dictate settings")
-    rows: list[list[str]] = []
-    for key, label, desc in _DICTATE_CONFIG_FIELDS:
-        value = getattr(config, key)
-        rows.append([label, _format_dictate_value(value), desc])
-    ui.table(
-        f"Config: {cfg.CONFIG_PATH}",
-        [("Setting", "left"), ("Value", "left"), ("Description", "left")],
-        rows,
-    )
-    ui.muted("Change with:  whiz dictate set <key>=<value>  (e.g. whiz dictate set hotkey=<f8>)")
-    return 0
-
-
-def _format_dictate_value(value: object) -> str:
-    if isinstance(value, bool):
-        return "on" if value else "off"
-    if isinstance(value, str) and value == "":
-        return "(default)"
-    return str(value)
-
-
-def cmd_dictate_set(args: argparse.Namespace) -> int:
-    """Set a dictation setting using friendly key names.
-
-    ``whiz dictate set hotkey=<f8>`` is equivalent to
-    ``whiz config set dictate_hotkey=<f8>`` but easier to type and discover.
-    Accepts friendly aliases (lang, idle, silence, indicator, ...) mapped via
-    _DICTATE_FRIENDLY_KEYS. Unknown keys are rejected with the valid list.
-    """
-    config = cfg.load()
-    assignment = args.assignment
-    if "=" not in assignment:
-        raise SystemExit("Expected KEY=VALUE (e.g. whiz dictate set hotkey=<f8>)")
-    friendly_key, _, value = assignment.partition("=")
-    friendly_key = friendly_key.strip().lower()
-    # Resolve friendly name → config field.
-    if friendly_key not in _DICTATE_FRIENDLY_KEYS:
-        valid = ", ".join(sorted(_DICTATE_FRIENDLY_KEYS.keys()))
-        raise SystemExit(
-            f"Unknown dictate setting '{friendly_key}'. Valid: {valid}"
-        )
-    config_key = _DICTATE_FRIENDLY_KEYS[friendly_key]
-    field_type = cfg.Config.__dataclass_fields__[config_key].type
-    coerced = _coerce(value.strip(), field_type)
-    # Validate enum-like fields (e.g. dictate_trigger must be toggle/ptt).
-    _validate_config_value(config_key, coerced)
-    setattr(config, config_key, coerced)
-    path = cfg.save(config)
-    ui.status(f"Set {friendly_key} = {coerced!r}  →  {config_key}", kind="ok")
-    ui.muted(f"Saved to {path}")
-    return 0
+    print(MYNAH_MOVED, file=sys.stderr)
+    return 1
 
 
 # ---------- speakers (voice profiles) ----------
@@ -2507,25 +2278,9 @@ def _coerce(value: str, field_type: type):
 
 
 # Enum-like config fields with a fixed set of allowed values. Shared by both
-# `whiz config set` and `whiz dictate set` so the two entry points enforce
-# the same constraints — a typo via either path can't silently degrade.
-_CONFIG_ENUM_VALUES: dict[str, set[str]] = {
-    "dictate_trigger": {"toggle", "ptt"},
-}
-
-# Provider-selection fields (M16, wave-2): also enum-like, but their valid
-# values are the live provider registry rather than a fixed set here — a
-# typo like `dictate_stt_provider=mlxx` used to be accepted and silently
-# fell back to auto-detect, hiding the mistake behind a "why is it using the
-# wrong provider" debugging session. The registry module is import-light
-# (constructors are thunks; heavy deps import only on selection), so the
-# per-validation import is cheap. Empty string stays valid — it means
-# auto-detect.
-_PROVIDER_CONFIG_KEYS: dict[str, str] = {
-    "dictate_stt_provider": "stt",
-    "dictate_injector": "injector",
-    "dictate_indicator": "indicator",
-}
+# Enum-like config fields, validated wherever they are set so a typo cannot
+# silently degrade behaviour.
+_CONFIG_ENUM_VALUES: dict[str, set[str]] = {}
 
 
 def _validate_config_value(key: str, value: object) -> None:
@@ -2535,16 +2290,6 @@ def _validate_config_value(key: str, value: object) -> None:
         raise SystemExit(
             f"Invalid {key}={value!r}. Must be one of: {', '.join(sorted(allowed))}"
         )
-    kind = _PROVIDER_CONFIG_KEYS.get(key)
-    if kind is not None and value != "":
-        from whiz.dictate import providers
-
-        names = {name for name, _, _ in providers.list_providers()[kind]}
-        if value not in names:
-            raise SystemExit(
-                f"Invalid {key}={value!r}. Must be one of: "
-                f"{', '.join(sorted(names))} (or empty for auto-detect)"
-            )
 
 
 def cmd_config_set(args: argparse.Namespace) -> int:
@@ -2573,16 +2318,6 @@ def cmd_config_set(args: argparse.Namespace) -> int:
 _INSTALL_SOURCE = "git+https://github.com/ReidenXerx/whiz.git"
 
 
-def _dictate_extra_installed() -> bool:
-    """True if the 'dictate' extra's heavy deps are importable."""
-    try:
-        import sounddevice  # noqa: F401
-        import pynput  # noqa: F401
-        return True
-    except ImportError:
-        return False
-
-
 def _diarize_extra_installed() -> bool:
     """True if sherpa-onnx (the 'diarize' extra) is importable."""
     try:
@@ -2590,13 +2325,6 @@ def _diarize_extra_installed() -> bool:
     except ImportError:
         return False
     return True
-
-
-def _service_plist_exists() -> bool:
-    """True if the whiz dictate LaunchAgent plist is on disk."""
-    from whiz.dictate import service
-
-    return service.plist_path().exists()
 
 
 def _run_live(cmd: list[str]) -> int:
@@ -2610,127 +2338,40 @@ def _run_live(cmd: list[str]) -> int:
 
 
 def cmd_upgrade(args: argparse.Namespace) -> int:
-    """One-command upgrade: reinstall whiz, refresh the dictate extra, and
-    restart the background LaunchAgent so the new code takes effect
-    immediately — no manual pipx/service-restart dance.
+    """Reinstall whiz from git, keeping the extras that were already there.
 
-    The classic trap: `pipx install --force` updates the whiz binary in the
-    venv but does NOT touch the running LaunchAgent, so the old code keeps
-    running until the agent happens to restart. Users reinstall, think they're
-    on the new version, and the hotkey/indicator is still broken because the
-    agent is serving stale code. This command closes that gap end to end:
-
-    1. Reinstall whiz from git (pulls the latest commit).
-    2. Re-inject the 'dictate' extra IF it was already installed (so an
-       upgraded whiz picks up any new/changed extra deps). Skipped if the
-       extra was never installed — we don't want to surprise a user who only
-       uses whiz for transcription with a 1.6 GB mlx-whisper download.
-       The 'diarize' extra follows the same rule: sherpa-onnx survives
-       `pipx install --force` only if it is re-injected after the reinstall.
-    3. Restart the LaunchAgent IF it's installed (unload + load) so launchd
-       re-execs the agent from the freshly installed code. Skipped if no
-       service is installed.
-    4. Re-verify the full stack IF the dictate extra is installed
-       (`whiz dictate setup` in checks-only mode: extra, perms, hotkey —
-       never installing anything). When the extra is absent the checks are
-       skipped: setup()'s auto-inject would re-attempt the exact 1.6 GB
-       install step 2 chose to skip, failing the whole upgrade at the last
-       mile with a misleading "verification" message (M12, wave-1 audit).
-
-    Returns 0 if everything succeeded, 1 if a step failed.
+    The trap this closes: `pipx install --force` gives you a new whiz, but an
+    extra installed alongside it (diarization) is not re-injected, so the next
+    run fails on an import that worked yesterday. Re-inject what was installed,
+    and only what was installed — a transcription-only user should not be
+    surprised by a download they never asked for.
     """
     ui.header("whiz", "upgrade")
-    old_version = __version__
 
-    # 1. Reinstall from git.
-    ui.phase("reinstalling whiz from git")
+    had_diarize = _diarize_extra_installed()
+
+    ui.phase("reinstalling whiz")
     rc = _run_live(["pipx", "install", "--force", _INSTALL_SOURCE])
     if rc != 0:
-        ui.status(f"pipx install failed (exit {rc}). Aborting upgrade.", kind="warn")
+        ui.status(f"pipx install failed (exit {rc}) — nothing else was changed", kind="bad")
         return 1
+    ui.status("whiz reinstalled", kind="ok")
 
-    # Reload __version__ from the freshly installed package — the value
-    # imported at module load is the OLD one; the new code is on disk now.
-    import importlib
-
-    importlib.reload(sys.modules["whiz"])
-    new_version = sys.modules["whiz"].__version__
-    if new_version != old_version:
-        ui.status(f"Updated {old_version} → {new_version}", kind="ok")
-    else:
-        ui.status(f"Reinstalled (still {new_version})", kind="ok")
-
-    # 2. Re-inject the dictate extra if it was installed.
-    if _dictate_extra_installed():
-        ui.phase("refreshing the dictate extra")
-        rc = _run_live(["pipx", "inject", "whiz", "whiz[dictate]"])
-        if rc != 0:
-            ui.status(
-                f"pipx inject whiz[dictate] failed (exit {rc}). "
-                "The extra may be stale — re-run: pipx inject whiz 'whiz[dictate]'",
-                kind="warn",
-            )
-        else:
-            ui.status("dictate extra refreshed", kind="ok")
-    else:
-        ui.muted("dictate extra not installed — skipping (install with: pipx inject whiz 'whiz[dictate]')")
-
-    # 2b. Same for the diarize extra: sherpa-onnx was either auto-installed by
-    # _ensure_diarization_ready or injected manually — either way a
-    # `pipx install --force` wipes the venv, so without a re-inject the next
-    # transcribe silently re-runs the auto-setup (or degrades, when opted out).
-    if _diarize_extra_installed():
+    if had_diarize:
         ui.phase("refreshing the diarize extra")
         rc = _run_live(["pipx", "inject", "whiz", "whiz[diarize]"])
         if rc != 0:
             ui.status(
-                f"pipx inject whiz[diarize] failed (exit {rc}). "
-                "The extra may be stale — re-run: pipx inject whiz 'whiz[diarize]'",
+                f"pipx inject whiz[diarize] failed (exit {rc}). Speaker detection may be "
+                "stale — re-run: pipx inject whiz 'whiz[diarize]'",
                 kind="warn",
             )
         else:
             ui.status("diarize extra refreshed", kind="ok")
     else:
-        ui.muted("diarize extra not installed — skipping (install with: pipx inject whiz 'whiz[diarize]'")
+        ui.muted("diarize extra not installed — skipping")
 
-    # 3. Restart the LaunchAgent if it's installed.
-    if _service_plist_exists():
-        ui.phase("restarting the background service")
-        from whiz.dictate import service
-
-        service.uninstall()
-        rc = service.install()
-        if rc != 0:
-            ui.status("service restart failed — see message above", kind="warn")
-            return 1
-        ui.status("background service restarted with the new code", kind="ok")
-    else:
-        ui.muted("dictate service not installed — skipping (install with: whiz dictate service install)")
-
-    # 4. Re-verify the full stack.
-    # M12 (wave-1 audit): `setup()` defaults to install_service=True, which
-    # silently installs the LaunchAgent — an upgrade must NEVER add a new
-    # login service the user never asked for; only restart the (existing)
-    # service in step 3. And its step-0 auto-inject of the dictate extra
-    # re-fires the exact 1.6 GB install upgrade step 2 just skipped, failing
-    # the whole upgrade at the last mile with a misleading "verification"
-    # message — so when the extra is absent, skip setup entirely.
-    ui.phase("verifying")
-    if not _dictate_extra_installed():
-        ui.muted(
-            "dictate extra not installed — skipping the dictate verification "
-            "checks (install with: pipx inject whiz 'whiz[dictate]', then: "
-            "whiz dictate setup)"
-        )
-        ui.status("Upgrade complete.", kind="ok")
-        return 0
-    from whiz.dictate import setup as setup_mod
-
-    setup_rc = setup_mod.setup(install_service=False)
-    if setup_rc != 0:
-        ui.status("verification found issues — see the report above", kind="warn")
-        return 1
-    ui.status("Upgrade complete. Everything ready.", kind="ok")
+    ui.muted("\nDictation lives in Mynah now: https://github.com/ReidenXerx/mynah")
     return 0
 
 
@@ -2848,32 +2489,8 @@ def build_parser() -> argparse.ArgumentParser:
     sm.set_defaults(func=cmd_speakers_match)
 
     # dictate
-    dt = sub.add_parser("dictate", aliases=["d"], help="System-wide voice dictation via mlx-whisper. Toggle or push-to-talk with a global hotkey; transcribed text is typed into the focused app. Requires the 'dictate' extra: pipx inject whiz 'whiz[dictate]'")
-    dt.add_argument("--model", default="", help="mlx-whisper model repo/path (default: mlx-community/whisper-large-v3-turbo)")
-    dt.add_argument("-l", "--language", default="", help="Spoken language code (default: ru)")
-    dt.add_argument("--prompt", default=None, help="Whisper initial_prompt to bias recognition (default: built-in Russian jargon/obscenity prompt)")
-    dt.add_argument("--idle-timeout", dest="idle_timeout", type=float, default=None, help="Seconds to keep the model loaded after a session before unloading (default: 45; 0 = never unload)")
-    dt.add_argument("--hotkey", default="", help="Global hotkey in pynput syntax (default: <cmd>+<shift>+.)")
-    dt.add_argument("--trigger", default="", choices=["", "toggle", "ptt"], help="Trigger mode: toggle (press to start/stop) or ptt (hold to talk; release to stop). Default: config dictate_trigger")
-    dt.add_argument("--auto-stop-silence", dest="auto_stop_silence", type=float, default=None, help="Seconds of silence before a session auto-stops (default: 10; 0 = off)")
-    dt.add_argument("--no-indicator", dest="no_indicator", action="store_true", help="Hide the floating dictation indicator overlay")
-    dt.add_argument("--list-providers", dest="list_providers", action="store_true", help="List available STT/injector/indicator providers for this platform and exit")
-    # Optional subcommands: `whiz dictate config` and `whiz dictate set`.
-    # When no subcommand is given, bare `whiz dictate` runs dictation (via the
-    # default func=cmd_dictate set below). Subcommands override the default.
-    dtsub = dt.add_subparsers(dest="dictate_command", required=False)
-    dtsub.add_parser("config", aliases=["cfg"], help="Show current dictation settings").set_defaults(func=cmd_dictate_config)
-    dts = dtsub.add_parser("set", aliases=["s"], help="Set a dictation setting with a friendly key name (e.g. whiz dictate set hotkey=<f8>)")
-    dts.add_argument("assignment", help="KEY=VALUE, e.g. hotkey=<f8> or trigger=ptt or language=en")
-    dts.set_defaults(func=cmd_dictate_set)
-    dsvc = dtsub.add_parser("service", aliases=["svc"], help="Manage the whiz dictate login LaunchAgent (install | uninstall | status)")
-    dsvc_sub = dsvc.add_subparsers(dest="dictate_service_action", required=True)
-    dsvc_sub.add_parser("install", help="Install and load the LaunchAgent so dictation starts at login").set_defaults(func=cmd_dictate_service, service_action="install")
-    dsvc_sub.add_parser("uninstall", aliases=["remove"], help="Unload and remove the LaunchAgent").set_defaults(func=cmd_dictate_service, service_action="uninstall")
-    dsvc_sub.add_parser("status", aliases=["st"], help="Show whether the service is loaded").set_defaults(func=cmd_dictate_service, service_action="status")
-    dtsub.add_parser("setup", aliases=["doctor"], help="One-command onboarding: auto-install the dictate extra, request Accessibility + Microphone permissions, and install the always-on login service").set_defaults(func=cmd_dictate_setup)
-    dts_no_svc = dtsub.add_parser("setup-no-service", aliases=["doctor-no-service"], help="Run setup checks without installing the login service")
-    dts_no_svc.set_defaults(func=cmd_dictate_setup, no_service=True)
+    dt = sub.add_parser("dictate", aliases=["d"], help="Moved to Mynah (github.com/ReidenXerx/mynah)")
+    dt.add_argument("rest", nargs="*", help=argparse.SUPPRESS)
     dt.set_defaults(func=cmd_dictate)
 
     # config

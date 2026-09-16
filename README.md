@@ -54,8 +54,7 @@ Most transcription tools stop at text. whiz is the one-command path from a scree
 - [Speaker voice profiles](#speaker-voice-profiles-cross-recording-recognition)
 - [AI analysis](#ai-analysis-auto-detect-summary-action-items-implementation-plans-vision)
 - [Essentials (always on)](#essentials-always-on-concentrated-context-for-a-later-analysis)
-- [Voice dictation](#voice-dictation-system-wide-speech-to-text-whiz-dictate)
-- [Native macOS app (`Whiz.app`)](#native-macos-app-whizapp--in-development)
+- [Dictation moved to Mynah](#dictation-moved-to-mynah)
 - [Testing](#testing)
 - [License](#license)
 
@@ -273,13 +272,13 @@ whiz analyze recording.mov --prompt "What risks? {transcript}"
 
 ### `whiz upgrade`
 
-One-command update — reinstalls whiz from git, refreshes the dictate extra if installed, restarts the background dictation service if installed, and re-verifies the full stack. Handles the entire update dance so you never need manual pipx/service-restart steps:
+One-command update — reinstalls whiz from git and re-verifies the stack, so a new version is actually the one running:
 
 ```bash
 whiz upgrade
 ```
 
-Why this exists: `pipx install --force` updates the whiz binary but does NOT restart the running LaunchAgent, so the old code keeps serving until the agent happens to restart — a silent staleness trap. `whiz upgrade` closes the gap end to end. It only restarts the service if it's already installed, and only re-injects the dictate extra if it was already installed (so a transcription-only user isn't surprised by a 1.6 GB mlx-whisper download).
+It re-injects the `diarize` extra when that one is already installed, so speaker detection keeps working across an upgrade.
 
 ## Configuration
 
@@ -315,20 +314,6 @@ ai_max_frames = 50
 # --- Speaker voice profiles ---
 speaker_match_threshold = 0.8
 save_voice_profiles = true
-# --- Voice dictation (whiz dictate) ---
-dictate_model = ""
-dictate_language = "ru"
-dictate_prompt = ""
-dictate_idle_timeout = 45.0
-dictate_stt_provider = ""
-dictate_injector = ""
-dictate_indicator = ""
-dictate_hotkey = "<cmd>+<shift>+."
-dictate_trigger = "toggle"
-dictate_vad = true
-dictate_auto_stop_silence = 10.0
-dictate_show_indicator = true
-dictate_idle_visible = true
 ```
 
 If `model` is empty, whiz auto-picks the best available model by this preference
@@ -636,212 +621,27 @@ whiz analyze recording.mov --plan
 whiz analyze recording.mov --prompt "Given these essentials, draft the migration steps. Essentials:\n$(awk '/^## Essentials/{f=1;next} f' recording.analysis.md)\n\nTranscript: {transcript}"
 ```
 
-## Voice dictation (system-wide speech-to-text: `whiz dictate`)
+## Dictation moved to Mynah
 
-whiz can act as a **system-wide voice dictation tool**: press a hotkey, speak, and your words are typed into whatever app currently has keyboard focus — any text field, any app, system-wide. A small floating indicator shows a live mic level so you know it's listening. It's powered by [mlx-whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper) running on the Apple Silicon GPU (Metal), so it's fast and accurate without spawning external binaries.
+`whiz dictate` grew into its own product. Talking to your computer and transcribing a recording
+turned out to be two different tools that happened to share a speech engine: one runs for a second
+per file, the other from login to shutdown, with a hotkey, a tray icon and permissions.
 
-### How it works
-
-- **Trigger mode** — two ways to start a session, set with `--trigger` or `dictate_trigger` in config:
-  - **Toggle** (default) — press the hotkey (default Cmd+Shift+.) to start; press again to stop. Hands-free once you start.
-  - **Push-to-talk** (`ptt`) — hold the hotkey down to talk; release to stop. Works with a single key (e.g. `<f8>`) or a modifier+key combo (e.g. `<ctrl>+<space>`); all modifiers must be held for the press to count, so a combo won't hijack the final key alone. Tighter control, no accidental on-air when you pause.
-- **Utterance segmentation** — WebRTC VAD splits your speech into utterances. Each utterance is transcribed and typed as soon as you pause, so text appears incrementally without waiting for the whole session. Turning VAD off (`whiz dictate set vad=false`) disables this: the entire session is transcribed as one block when the session ends, so you only see text after you stop. Keep VAD on for live incremental dictation.
-- **Spawn-on-demand + idle timeout** — the model loads on first use and stays warm for 45 seconds after you stop, so back-to-back dictation is instant. After the idle window it unloads, dropping to zero RAM at idle.
-- **Floating indicator** — a compact native macOS HUD pill (vibrancy blur via `NSVisualEffectView`) with an SF Symbols mic glyph and 5 live waveform bars (cyan = listening, amber = transcribing, gray = idle). It appears only during an active session and fades in/out smoothly; set `dictate_idle_visible=true` to keep a dimmed badge visible while idle, or `--no-indicator` to disable the overlay entirely.
-- **Menu bar item** — a mic icon in the macOS menu bar (always visible while the service runs) with Start/Stop Dictation, a live status line, Open Config File, About, and Quit — so you can control dictation without the CLI or a terminal. Disable with `dictate_menu_bar=false`.
-- **Russian lexica** — the default model (`mlx-community/whisper-large-v3-turbo`) and a built-in `initial_prompt` in informal Russian register bias recognition toward accurate Russian jargon, slang, and obscenity (no self-censoring). Override with `--prompt` or `dictate_prompt` in config.
-- **Provider-abstracted** — the engine depends on pluggable provider interfaces (STT, text injector, indicator). macOS providers are built in; Linux/Windows providers can be added later without touching the engine.
-
-### One-time setup (macOS)
-
-Run the guided setup command — it checks the `dictate` extra, macOS Accessibility + Microphone permissions, prints a ✓/✗ report with next-step hints, and points you at the login service once everything passes:
+**[Mynah](https://github.com/ReidenXerx/mynah)** is that half — the same engine, the same tuned
+segmentation, the same macOS app, now with a name of its own:
 
 ```bash
-whiz dictate setup
+pipx install git+https://github.com/ReidenXerx/mynah.git
+mynah setup
 ```
 
-Or do the steps manually:
-
-```bash
-# 1. Install the dictation extra (mlx-whisper, sounddevice, webrtcvad, pynput, pyobjc):
-pipx inject whiz 'whiz[dictate]'
-
-# 2. Grant permissions in System Settings → Privacy & Security:
-#    - Accessibility (so whiz can type into other apps)
-#    - Microphone (so whiz can capture audio)
-```
-
-After granting a permission, re-run `whiz dictate setup` to re-check. The model (~1.6 GB) auto-downloads from HuggingFace on first use and caches under `~/.cache/huggingface`.
-
-### Usage
-
-```bash
-# Start dictation — press Cmd+Shift+. to toggle on/off:
-whiz dictate
-
-# Use a different hotkey:
-whiz dictate --hotkey "<cmd>+d"
-
-# Push-to-talk: hold the hotkey to talk, release to stop:
-whiz dictate --trigger ptt --hotkey "<f8>"
-
-# Dictate in English:
-whiz dictate --language en
-
-# Keep the model loaded for 2 minutes after stopping (warm for back-to-back):
-whiz dictate --idle-timeout 120
-
-# Hide the floating indicator:
-whiz dictate --no-indicator
-
-# Use a different mlx-whisper model:
-whiz dictate --model mlx-community/whisper-large-v3-turbo
-
-# List available providers for this platform:
-whiz dictate --list-providers
-```
-
-Run `whiz dictate --help` for the full flag reference.
-
-### Settings: `whiz dictate config` / `whiz dictate set`
-
-Dictation has its own friendly settings commands so you don't have to remember the `dictate_` config prefixes. `whiz dictate config` shows all settings in a table; `whiz dictate set` changes one using a short key name and writes it to config.
-
-```bash
-# Show all dictation settings (label, current value, description):
-whiz dictate config
-
-# Change settings with friendly keys (persisted to config.toml):
-whiz dictate set hotkey="<f8>"           # → dictate_hotkey
-whiz dictate set trigger=ptt           # → dictate_trigger (toggle | ptt)
-whiz dictate set lang=en               # → dictate_language  (alias: language)
-whiz dictate set idle=60               # → dictate_idle_timeout (alias: timeout)
-whiz dictate set silence=15            # → dictate_auto_stop_silence (alias: auto_stop_silence)
-whiz dictate set indicator=false       # → dictate_show_indicator (alias: show_indicator)
-whiz dictate set prompt="my custom"     # → dictate_prompt
-whiz dictate set model=mlx-community/whisper-large-v3-turbo  # → dictate_model
-```
-
-Friendly keys and their aliases:
-
-- `hotkey` / `key` — global hotkey (pynput syntax)
-- `trigger` / `mode` — `toggle` or `ptt`
-- `language` / `lang` — spoken language code
-- `model` — mlx-whisper model repo/path
-- `prompt` — Whisper `initial_prompt`
-- `idle_timeout` / `idle` / `timeout` — seconds before model unloads
-- `auto_stop_silence` / `silence` — seconds of silence to auto-stop
-- `vad` — WebRTC VAD on/off
-- `show_indicator` / `indicator` — floating overlay on/off
-- `idle_visible` / `idle_badge` — keep the dimmed pill visible while idle (off by default; the pill normally only appears during a session)
-- `menu_bar` / `menubar` — menu bar item on/off (on by default)
-- `stt_provider`, `injector`, `indicator_provider` — force a provider (auto if empty)
-
-You can also set these with the generic `whiz config set dictate_*` commands (see [Configuration](#configuration)).
-
-### Always-on login service (`whiz dictate service`)
-
-Instead of keeping a terminal open, install whiz dictate as a macOS **LaunchAgent** that starts at login and stays running in the background — the hotkey is always armed and a mic icon sits in the menu bar so you can Start/Stop, open the config, or quit without a terminal. Manage it with `whiz dictate service`:
-
-```bash
-whiz dictate service install      # write the LaunchAgent plist and load it (starts at login, KeepAlive)
-whiz dictate service status       # is it loaded? shows PID + last exit status
-whiz dictate service uninstall    # unload and remove the LaunchAgent
-```
-
-The plist lives at `~/Library/LaunchAgents/com.reidenxerx.whiz.dictate.plist`; combined stdout/stderr logs go to `~/Library/Logs/whiz-dictate.log`. `KeepAlive=true` means the agent restarts if it exits (including a deliberate kill) — run `service uninstall` to stop it.
-
-The background agent is a **separate process** from any terminal `whiz`, so it needs its own **Accessibility** grant in System Settings → Privacy & Security (pynput's global hotkey and CGEvent text injection both require it). After granting, restart the agent:
-
-```bash
-whiz dictate service uninstall && whiz dictate service install
-```
-
-### Menu bar control
-
-While the dictate service (or a foreground `whiz dictate`) is running, a **mic icon** appears in the macOS menu bar. It mirrors the dictation state by color (gray idle / cyan listening / amber transcribing) and its menu lets you control everything without the CLI:
-
-- **Start Dictation / Stop Dictation** — toggles the session (same as pressing the hotkey).
-- a live status line (`● Listening`, `● Transcribing…`, or `○ Idle`).
-- **Open Config File** — reveals `~/.config/whiz/config.toml` in Finder.
-- **About whiz** — prints the version, model, hotkey, and trigger mode.
-- **Quit whiz dictate** — stops the engine (under the KeepAlive LaunchAgent, launchd restarts it, so this effectively restarts on a clean state).
-
-The menu bar item runs inside the same process as the engine, so it drives dictation directly — no IPC, no separate app. Disable it for a pure hotkey/CLI workflow:
-
-```bash
-whiz dictate set menu_bar=false
-```
-
-Interactive setup actions (`whiz dictate setup`, `service install/uninstall`) stay CLI-only — a background accessory app can't host an interactive terminal session — but the in-process actions (toggle, open config, about, quit) are all in the menu.
-
-## Native macOS app (`Whiz.app`) — in development
-
-A native Swift menu bar app is replacing the PyObjC dictation daemon described
-above. It is a **separate build** from the Python package: no pipx, no Homebrew,
-no Python at runtime.
-
-| | `whiz dictate` (Python) | `Whiz.app` (Swift) |
-|---|---|---|
-| Install | `pipx install whiz` | download a zip |
-| Speech engine | mlx-whisper (Apple Silicon only) | whisper.cpp, statically linked |
-| Models | `whiz models download` | downloaded in-app |
-| Runs at login | LaunchAgent plist | `SMAppService` |
-| Requires | Python, pipx, ~1.2 GB of deps | nothing |
-
-The transcription CLI (`whiz transcribe`, `whiz analyze`, diarization) is
-unaffected and remains a Python package.
-
-### Building it
-
-Requires Xcode Command Line Tools and `cmake` (`brew install cmake`). macOS 13+,
-Apple Silicon.
-
-```sh
-git submodule update --init --recursive   # vendored whisper.cpp, pinned to v1.9.2
-macos/scripts/create-signing-cert.sh      # once: a stable local signing identity
-macos/scripts/build-app.sh                # -> macos/build/Whiz.app
-open macos/build/Whiz.app
-```
-
-`build-app.sh` compiles the vendored whisper.cpp on first run (a few minutes),
-then reuses it. Pass `release` for an optimised build.
-
-The signing certificate is optional but worth doing: without it the app is
-ad-hoc signed, its identity changes on every rebuild, and macOS drops the
-Accessibility permission each time. With it, you grant permission once.
-
-### Sharing a build
-
-```sh
-macos/scripts/package.sh        # -> macos/build/Whiz-<version>.zip
-```
-
-Produces a ~1 MB archive containing `Whiz.app` and an `INSTALL.txt`. The
-recipient needs macOS 13+ on Apple Silicon, and must run this once because the
-app is signed with a self-signed certificate rather than a paid Apple Developer
-ID:
-
-```sh
-xattr -dr com.apple.quarantine /Applications/Whiz.app
-```
-
-Note that on macOS 15 and later the old right-click → Open shortcut no longer
-works for unnotarized apps, so that command is the only route. Notarization is
-what removes this step; it requires a paid Apple Developer account and has not
-been done.
-
-Once open, the app is self-sufficient: **Settings… → Recognition** downloads the
-speech model (~1.6 GB, shared with the Python CLI's cache at `~/.cache/whisper`),
-and the menu offers **Grant Accessibility…**, which is required before
-transcribed text can be typed into other apps.
-
-See [docs/SWIFT-APP.md](docs/SWIFT-APP.md) for the architecture, the engine
-decision record, and known issues.
+Your settings come with it: Mynah's first run imports the `dictate_*` keys from
+`~/.config/whiz/config.toml`. `whiz dictate` keeps working as a pointer for a release or two, then
+goes away.
 
 ## Testing
 
-whiz ships a pytest suite covering the pure-Python modules (merge, models, screenshots, ai, diarize cache, profiles, and the dictation engine/providers) — no sherpa-onnx, ffmpeg, mlx-whisper, or network required. The dictate tests inject fake `numpy`/`sounddevice` modules so they run without the optional extra installed. Install the test extras and run:
+whiz ships a pytest suite covering the pure-Python modules (merge, models, screenshots, ai, diarize cache, profiles) — no sherpa-onnx, ffmpeg or network required. Install the test extras and run:
 
 ```bash
 pipx install --force --editable '.[test]'
