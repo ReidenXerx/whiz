@@ -6,6 +6,11 @@
 # is what TCC keys permission grants to. Running the raw binary works for a
 # smoke test but re-prompts for Accessibility on every rebuild.
 #
+# The swiftc path compiles WhizKit and WhizApp as one flat set of files rather
+# than as separate modules. That is fine — it produces the same binary, and it
+# sidesteps having to build and link a library first — but it means the module
+# boundary is only enforced by `swift build`. Run that before relying on it.
+#
 # Two build paths. SwiftPM is preferred, but it needs full Xcode: with Command
 # Line Tools alone its manifest fails to link against libPackageDescription
 # (even a three-line package fails), so we fall back to invoking swiftc over the
@@ -25,6 +30,13 @@ DEPLOYMENT_TARGET="13.0"
 # our own build is what makes the app distributable: no Homebrew requirement, no
 # absolute /opt/homebrew paths, and a deployment target we control.
 "$ROOT/scripts/build-whisper.sh" || exit 1
+"$ROOT/scripts/build-sherpa.sh" || exit 1
+
+SHERPA_LIB="$ROOT/vendor/sherpa-onnx/lib"
+if [ ! -f "$SHERPA_LIB/libsherpa-onnx-c-api.dylib" ]; then
+  echo "error: vendored sherpa-onnx dylibs not found at $SHERPA_LIB" >&2
+  exit 1
+fi
 
 if [ ! -f "$VENDOR/lib/libwhisper.a" ]; then
   echo "error: vendored whisper.cpp not built at $VENDOR" >&2
@@ -72,7 +84,7 @@ build_with_swiftc() {
     -lc++ \
     -framework Metal -framework MetalKit -framework Accelerate \
     -framework Foundation -framework CoreML \
-    $(find "$ROOT/Sources/WhizApp" -name '*.swift') \
+    $(find "$ROOT/Sources/WhizKit" "$ROOT/Sources/WhizApp" -name '*.swift') \
     -o "$out/WhizApp" || return 1
   echo "$out"
 }
@@ -93,6 +105,24 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/WhizApp" "$APP/Contents/MacOS/WhizApp"
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 
+# The app icon. LSUIElement keeps whiz out of the Dock and the app switcher, but
+# it still appears in Finder, Launchpad, Spotlight and — the one that matters
+# most — the Accessibility permission list, where a generic placeholder is
+# genuinely hard to identify when granting access.
+# Regenerate with: swift scripts/make-icon.swift
+if [ -f "$ROOT/Resources/Whiz.icns" ]; then
+  cp "$ROOT/Resources/Whiz.icns" "$APP/Contents/Resources/Whiz.icns"
+fi
+
+# sherpa-onnx ships as dylibs rather than static archives (its cmake wants
+# onnxruntime, so the wheel's prebuilt binaries are vendored instead), which
+# means unlike whisper.cpp they have to travel inside the bundle. Both already
+# use @rpath install names, so no install_name_tool rewriting is needed — the
+# app just needs Contents/Frameworks on its rpath, which Package.swift and the
+# swiftc fallback both now add.
+mkdir -p "$APP/Contents/Frameworks"
+cp "$SHERPA_LIB"/*.dylib "$APP/Contents/Frameworks/"
+
 # Signing. An ad-hoc signature changes on every rebuild, so macOS sees a
 # different app each time and silently drops the Accessibility grant. Set
 # WHIZ_SIGN_IDENTITY to a stable self-signed identity to avoid that — create one
@@ -103,6 +133,13 @@ IDENTITY="${WHIZ_SIGN_IDENTITY:-}"
 if [ -z "$IDENTITY" ] && security find-certificate -c whiz-dev >/dev/null 2>&1; then
   IDENTITY="whiz-dev"   # use it automatically once it exists
 fi
+
+# Nested code must be signed before the bundle that contains it.
+for dylib in "$APP/Contents/Frameworks"/*.dylib; do
+  [ -f "$dylib" ] || continue
+  codesign --force --sign "${IDENTITY:--}" "$dylib" 2>/dev/null \
+    || echo "warning: could not sign $(basename "$dylib")"
+done
 
 if [ -n "$IDENTITY" ]; then
   codesign --force --sign "$IDENTITY" "$APP" \
