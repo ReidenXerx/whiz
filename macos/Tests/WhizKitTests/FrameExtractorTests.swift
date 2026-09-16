@@ -137,6 +137,30 @@ struct FrameExtractorTests {
         #expect((segments?[3]["frame"] as? String)?.isEmpty == true)
     }
 
+    @Test("a capture failure logs the per-frame warning, not silently")
+    func captureFailureLogs() async throws {
+        let video = tempURL("mov")
+        defer { try? FileManager.default.removeItem(at: video) }
+        try await writeColoredVideo(at: video)
+
+        let framesDir = tempURL("frames-dir")
+        defer { try? FileManager.default.removeItem(at: framesDir) }
+
+        let collector = LogRecorder()
+        // Segment at t=99 — beyond the 3s video, so copyCGImage must fail.
+        let entries = try await FrameExtractor.extractFrames(
+            video: video,
+            segments: [LabeledSegment(
+                segment: WhisperBatchTranscriber.Segment(start: 99.0, end: 100.0, text: "beyond"),
+                speaker: "Speaker")],
+            into: framesDir,
+            onProgress: { _ in },
+            onLog: { collector.record($0) })
+
+        #expect(entries[0].frame.isEmpty)
+        #expect(collector.latest.contains("Warning: failed to extract frame 1 at t=99.000s"))
+    }
+
     @Test("audio files have no video track and yield no frames")
     func audioInputYieldsNoFrames() async throws {
         let wav = tempURL("wav")
@@ -270,5 +294,23 @@ private final class ProgressRecorder: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return values
+    }
+}
+
+/// Lock-guarded collection point for `@Sendable` log callbacks in tests.
+private final class LogRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var messages: [String] = []
+
+    func record(_ message: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        messages.append(message)
+    }
+
+    var latest: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return messages
     }
 }

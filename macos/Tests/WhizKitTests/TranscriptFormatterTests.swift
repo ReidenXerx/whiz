@@ -86,6 +86,29 @@ struct TranscriptFormatterTests {
         #expect(transcription?.isEmpty == true)
     }
 
+    @Test("control characters in segment text produce JSON Python can parse")
+    func controlCharactersRoundTrip() throws {
+        // The -oj artifact is read by `json.loads` (whiz merge --resume); a
+        // raw control byte in the text would produce invalid JSON that the
+        // reader silently rejects. Every escape must round-trip.
+        let segments = [
+            WhisperBatchTranscriber.Segment(start: 0, end: 1, text: "line one\nline two\ttabbed"),
+            WhisperBatchTranscriber.Segment(start: 1, end: 2, text: "quote \" and back\\slash"),
+            WhisperBatchTranscriber.Segment(start: 2, end: 3, text: "ctrl \u{01} \u{0B} end"),
+        ]
+        let text = TranscriptFormatter.json(segments)
+
+        // The whole file parses.
+        let object = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any]
+        let transcription = object?["transcription"] as? [[String: Any]]
+        #expect(transcription?.count == 3)
+
+        // And each entry's text round-trips back to the original.
+        #expect((transcription?[0]["text"] as? String) == "line one\nline two\ttabbed")
+        #expect((transcription?[1]["text"] as? String) == "quote \" and back\\slash")
+        #expect((transcription?[2]["text"] as? String) == "ctrl \u{01} \u{0B} end")
+    }
+
     @Test("segment log lines read as timestamps plus text")
     func segmentLogLines() {
         let segment = WhisperBatchTranscriber.Segment(start: 61.0, end: 76.5, text: "Hi")

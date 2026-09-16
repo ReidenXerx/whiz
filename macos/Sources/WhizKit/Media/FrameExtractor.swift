@@ -60,7 +60,8 @@ enum FrameExtractor {
         segments: [LabeledSegment],
         into framesDir: URL,
         width: Int = 1280,
-        onProgress: (@Sendable (Double) -> Void)? = nil
+        onProgress: (@Sendable (Double) -> Void)? = nil,
+        onLog: (@Sendable (String) -> Void)? = nil
     ) async throws -> [Entry] {
         guard !segments.isEmpty else { return [] }
         guard await hasVideoTrack(video) else { return [] }
@@ -92,14 +93,25 @@ enum FrameExtractor {
                 .joined(separator: " ")
 
             var frameName = ""
-            if let image = try? generator.copyCGImage(
-                at: CMTime(seconds: max(0.0, pair.segment.start), preferredTimescale: 600),
-                actualTime: nil)
-            {
+            do {
+                let image = try generator.copyCGImage(
+                    at: CMTime(seconds: max(0.0, pair.segment.start), preferredTimescale: 600),
+                    actualTime: nil)
                 let name = String(format: "seg%04d.jpg", offset + 1)
                 if writeJPEG(image, to: framesDir.appendingPathComponent(name), quality: 0.9) {
                     frameName = name
+                } else {
+                    // screenshots.py:98 — a failed write is never silent.
+                    onLog?(String(
+                        format: "Warning: failed to write frame %d at t=%.3fs",
+                        offset + 1, pair.segment.start))
                 }
+            } catch {
+                // A failed capture is non-fatal (the entry stays aligned),
+                // but never silent — Python prints a per-frame warning.
+                onLog?(String(
+                    format: "Warning: failed to extract frame %d at t=%.3fs",
+                    offset + 1, pair.segment.start))
             }
 
             entries.append(Entry(

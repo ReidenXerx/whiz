@@ -80,12 +80,33 @@ enum TranscriptFormatter {
         Int((max(0.0, seconds) * 1000).rounded())
     }
 
-    /// `cli.cpp:escape_double_quotes_and_backslashes` — the only two
-    /// characters that need escaping for these JSON strings.
+    /// Full JSON string escaping for the -oj output — the artifact Python's
+    /// `json.loads` must parse back (whiz merge --resume), so it carries the
+    /// same rules as `json.dumps`: quotes, backslashes, the named whitespace
+    /// escapes (\n, \r, \t), and every other C0 control character as
+    /// \u00XX. One raw control byte in whisper text would produce an invalid
+    /// JSON file the reader side would silently reject — same contract as
+    /// FrameExtractor's manifest escaper and SpeakerProfiles' store escaper.
+    /// (The doc comment once claimed cli.cpp parity, but whisper-cli's own
+    /// writer never lets raw controls through either.)
     static func escapeJSON(_ text: String) -> String {
-        text
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
+        var out = ""
+        for character in text.unicodeScalars {
+            switch character {
+            case "\"": out += "\\\""
+            case "\\": out += "\\\\"
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            default:
+                if character.value < 0x20 {
+                    out += String(format: "\\u%04x", character.value)
+                } else {
+                    out.unicodeScalars.append(character)
+                }
+            }
+        }
+        return out
     }
 
     /// Log-window line for a recognized segment: `[00:41 → 00:55]  text`.

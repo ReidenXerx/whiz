@@ -361,6 +361,9 @@ struct NativeTranscriptionBackend: TranscriptionBackend {
                 width: frameWidth,
                 onProgress: { fraction in
                     onEvent(.progress(0.92 + 0.03 * fraction))
+                },
+                onLog: { message in
+                    onEvent(.log(message))
                 })
             // Opt-in OCR (config.py:ocr — never auto, it is the slowest
             // stage). One pass over the captured frames, texts aligned by
