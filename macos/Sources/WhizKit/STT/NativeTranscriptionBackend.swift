@@ -288,8 +288,19 @@ struct NativeTranscriptionBackend: TranscriptionBackend {
                         guard let match = matches[cid] ?? nil,
                               let embedding = clusterEmbeddings[cid]
                         else { continue }
-                        _ = try? SpeakerProfiles.saveProfile(name: match.name, embedding: embedding, samples: 1)
-                        log("profile: updated \(match.name)")
+                        // M3: auto-matches save with provenance "auto" and can
+                        // only CREATE a profile — an existing one is returned
+                        // untouched (create-never-merge), so no drift flows
+                        // back into the shared store from an unconfirmed match.
+                        do {
+                            _ = try SpeakerProfiles.saveProfile(
+                                name: match.name, embedding: embedding, samples: 1,
+                                autoMatch: true)
+                            log("profile: \(match.name) — auto-match")
+                        } catch {
+                            log("profile: save failed for \(match.name) — "
+                                + error.localizedDescription)
+                        }
                     }
                 }
             }
@@ -319,12 +330,16 @@ struct NativeTranscriptionBackend: TranscriptionBackend {
         // `load_manifest`, so `whiz analyze` reads either side's output.
         let framesDir = outputDirectory.appendingPathComponent("\(stem).frames")
         var frameEntries: [FrameExtractor.Entry]? = nil
-        let assigned = diarSegments.isEmpty
-            ? segments.map { LabeledSegment(segment: $0, speaker: "Speaker") }
+        let (assignment, fallbacks) = diarSegments.isEmpty
+            ? (segments.map { LabeledSegment(segment: $0, speaker: "Speaker") }, 0)
             : LabeledTranscript.assignSpeakers(segments: segments, diar: diarSegments)
+        if fallbacks > 0 {
+            log("speakers: \(fallbacks) segment(s) overlap no diarization "
+                + "segment; labeled by nearest-in-time diarization segment.")
+        }
         // cli.py:670-672 parity: profile names apply to the merged list itself
         // so the frames manifest, HTML, TXT and labeled SRT all carry them.
-        let labeled = nameMap.isEmpty ? assigned : LabeledTranscript.relabel(assigned, nameMap)
+        let labeled = nameMap.isEmpty ? assignment : LabeledTranscript.relabel(assignment, nameMap)
         if segments.isEmpty {
             log("frames: skipped — no segments to capture")
         } else if !hasVideo {

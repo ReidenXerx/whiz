@@ -43,15 +43,59 @@ struct TranscriptMergeTests {
             DiarSegment(start: 4.0, end: 8.0, speaker: 1),    // Speaker B
             DiarSegment(start: 9.0, end: 13.0, speaker: 0),   // Speaker A again
         ]
-        let merged = LabeledTranscript.assignSpeakers(segments: whisper, diar: diar)
+        let (merged, fallbacks) = LabeledTranscript.assignSpeakers(segments: whisper, diar: diar)
         #expect(merged.map(\.speaker) == ["Speaker A", "Speaker B", "Speaker A"])
+        #expect(fallbacks == 0)   // every segment overlaps something
     }
 
     @Test("with no diarization segments everything falls back to Speaker A")
     func assignSpeakersNoDiar() {
         let whisper = [seg(0.0, 1.0, "x"), seg(2.0, 3.0, "y")]
-        let merged = LabeledTranscript.assignSpeakers(segments: whisper, diar: [])
+        let (merged, fallbacks) = LabeledTranscript.assignSpeakers(segments: whisper, diar: [])
         #expect(merged.allSatisfy { $0.speaker == "Speaker A" })
+        #expect(fallbacks == 0)   // no diarization at all — not a fallback path
+    }
+
+    @Test("zero-overlap segments label by nearest-in-time diarization, with a count")
+    func assignSpeakersNearestFallback() {
+        // The whisper segment at 5-6s overlaps nothing; the nearest diarization
+        // segment (4-4.5s, Speaker B) is 0.5s away — closer than 0-1s (Speaker A,
+        // 4s away). The old code silently assigned diar.first (Speaker A).
+        let whisper = [
+            seg(0.0, 0.5, "overlapping"),   // overlaps A (0-1s) → labeled A
+            seg(5.0, 6.0, "in the gap"),      // overlaps nothing → nearest = B
+        ]
+        let diar = [
+            DiarSegment(start: 0.0, end: 1.0, speaker: 0),   // Speaker A
+            DiarSegment(start: 4.0, end: 4.5, speaker: 1),     // Speaker B
+        ]
+        let (merged, fallbacks) = LabeledTranscript.assignSpeakers(segments: whisper, diar: diar)
+        #expect(merged.map(\.speaker) == ["Speaker A", "Speaker B"])
+        #expect(fallbacks == 1)
+    }
+
+    @Test("nearest-in-time gaps are measured between interval edges")
+    func intervalGapMath() {
+        // merge.py:_interval_gap — the distance between two intervals (0 when
+        // they touch or overlap).
+        #expect(LabeledTranscript.intervalGap(0, 1, 1, 2) == 0.0)   // touching
+        #expect(LabeledTranscript.intervalGap(0, 2, 1, 3) == 0.0)   // overlapping
+        #expect(LabeledTranscript.intervalGap(0, 1, 3, 4) == 2.0)   // a before b
+        #expect(LabeledTranscript.intervalGap(3, 4, 0, 1) == 2.0)   // b before a
+    }
+
+    @Test("ties in nearest-in-time break toward the earlier diarization entry")
+    func nearestFallbackTieBreak() {
+        // Equidistant from two diarization segments — the FIRST wins (strict
+        // `<` in the comparison loop), matching Python's deterministic tie.
+        let whisper = [seg(10.0, 11.0, "equidistant")]
+        let diar = [
+            DiarSegment(start: 0.0, end: 1.0, speaker: 0),    // 9s away
+            DiarSegment(start: 20.0, end: 21.0, speaker: 1),  // 9s away — tie
+        ]
+        let (merged, fallbacks) = LabeledTranscript.assignSpeakers(segments: whisper, diar: diar)
+        #expect(merged[0].speaker == "Speaker A")   // the earlier entry
+        #expect(fallbacks == 1)
     }
 
     // MARK: - Speaker ordering (merge.py:speakers_by_talk_time / _in_order)

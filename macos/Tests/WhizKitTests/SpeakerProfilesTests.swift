@@ -77,6 +77,7 @@ struct SpeakerProfilesTests {
         #expect((data?["name"] as? String) == "Alice")
         #expect((data?["samples"] as? NSNumber)?.intValue == 1)
         #expect((data?["dim"] as? NSNumber)?.intValue == 3)
+        #expect((data?["source"] as? String) == "user")   // M3 default
         let embedding = (data?["embedding"] as? [Any])?.compactMap { ($0 as? NSNumber)?.doubleValue }
         #expect(embedding == [0.1, 0.2, 0.3])
     }
@@ -163,6 +164,78 @@ struct SpeakerProfilesTests {
         #expect((object?["name"] as? String) == "A\nB\tC")
     }
 
+    // MARK: - M3 provenance (wave-1: create-never-merge for auto-matches)
+
+    @Test("an auto-match creates a NEW profile marked source=auto")
+    func autoMatchCreates() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        _ = try SpeakerProfiles.saveProfile(name: "Dana", embedding: [0.5], samples: 1,
+                                            autoMatch: true, in: dir)
+        let profiles = SpeakerProfiles.loadProfiles(in: dir)
+        #expect(profiles[0].source == "auto")
+        #expect(profiles[0].embedding == [0.5])
+    }
+
+    @Test("an auto-match never merges into an existing profile — no drift")
+    func autoMatchNeverMerges() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // A human-confirmed profile (the user named this speaker).
+        try SpeakerProfiles.saveProfile(name: "Eve", embedding: [1.0], samples: 1, in: dir)
+
+        // An auto-match tries to adopt the same name with a DIFFERENT
+        // embedding — the M3 contract returns the existing path untouched:
+        // no merge, no drift, no provenance overwrite.
+        let path = try SpeakerProfiles.saveProfile(name: "Eve", embedding: [9.0], samples: 1,
+                                                  autoMatch: true, in: dir)
+        let profiles = SpeakerProfiles.loadProfiles(in: dir)
+        #expect(profiles[0].embedding == [1.0])   // NOT [9.0]
+        #expect(profiles[0].samples == 1)          // NOT 2
+        #expect(profiles[0].source == "user")     // NOT "auto"
+
+        // An auto-match against an AUTO-sourced profile also stays out.
+        try SpeakerProfiles.saveProfile(name: "Fay", embedding: [2.0], samples: 1,
+                                        autoMatch: true, in: dir)   // creates, source=auto
+        _ = try SpeakerProfiles.saveProfile(name: "Fay", embedding: [7.0], samples: 1,
+                                            autoMatch: true, in: dir)
+        let fay = SpeakerProfiles.loadProfiles(in: dir).first { $0.name == "Fay" }!
+        #expect(fay.embedding == [2.0])   // NOT merged with 7.0
+    }
+
+    @Test("a user-confirmed save upgrades an auto profile to user")
+    func userSaveUpgradesAuto() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        // Auto-match creates, then a human confirms — the merge is normal and
+        // the provenance upgrades to "user" (profiles.py:183-185).
+        try SpeakerProfiles.saveProfile(name: "Gina", embedding: [1.0], samples: 1,
+                                        autoMatch: true, in: dir)
+        try SpeakerProfiles.saveProfile(name: "Gina", embedding: [3.0], samples: 1,
+                                        autoMatch: false, in: dir)
+        let profiles = SpeakerProfiles.loadProfiles(in: dir)
+        #expect(profiles[0].source == "user")    // upgraded
+        #expect(profiles[0].samples == 2)         // merged
+        #expect(abs(profiles[0].embedding[0] - 2.0) < 1e-12)  // (1+3)/2
+    }
+
+    @Test("old profiles without a source field load as user")
+    func missingSourceDefaultsToUser() throws {
+        // Python's load_profiles defaults source to "user" for files written
+        // before M3; Swift must do the same so both readers agree.
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try """
+            {"name": "Legacy", "embedding": [1.0], "dim": 1, "samples": 1}
+            """.data(using: .utf8)!.write(to: dir.appendingPathComponent("Legacy.json"))
+
+        let profiles = SpeakerProfiles.loadProfiles(in: dir)
+        #expect(profiles[0].source == "user")
+    }
+
     @Test("a profile without a name falls back to the file stem")
     func loadFallsBackToStemName() throws {
         let dir = tempDir()
@@ -205,9 +278,9 @@ struct SpeakerProfilesTests {
     @Test("matching is greedy and exclusive — no name serves two clusters")
     func matchingIsGreedyAndExclusive() {
         let alice = SpeakerProfiles.Profile(
-            name: "Alice", embedding: [1, 0, 0], dim: 3, created: "", samples: 1)
+            name: "Alice", embedding: [1, 0, 0], dim: 3, created: "", samples: 1, source: "user")
         let bob = SpeakerProfiles.Profile(
-            name: "Bob", embedding: [0, 1, 0], dim: 3, created: "", samples: 1)
+            name: "Bob", embedding: [0, 1, 0], dim: 3, created: "", samples: 1, source: "user")
         // Cluster 0 is very close to Alice, cluster 1 somewhat close to Alice
         // too — the greedy order must let cluster 0 claim Alice, and cluster 1
         // can only take Bob if it actually clears the threshold.
@@ -224,7 +297,7 @@ struct SpeakerProfilesTests {
     @Test("below-threshold clusters stay unnamed")
     func belowThresholdStaysUnnamed() {
         let profile = SpeakerProfiles.Profile(
-            name: "Alice", embedding: [1, 0], dim: 2, created: "", samples: 1)
+            name: "Alice", embedding: [1, 0], dim: 2, created: "", samples: 1, source: "user")
         let matches = SpeakerProfiles.matchSpeakers(
             clusterEmbeddings: [0: [0.0, 1.0]], profiles: [profile], threshold: 0.8)
         #expect((matches[0] ?? nil) == nil)
@@ -238,7 +311,7 @@ struct SpeakerProfilesTests {
     @Test("autoAssignNames keys the map by speaker label")
     func autoAssignNamesUsesLabels() {
         let profile = SpeakerProfiles.Profile(
-            name: "Alice", embedding: [1, 0], dim: 2, created: "", samples: 1)
+            name: "Alice", embedding: [1, 0], dim: 2, created: "", samples: 1, source: "user")
         let (nameMap, matches) = SpeakerProfiles.autoAssignNames(
             clusterEmbeddings: [2: [1.0, 0.0]], threshold: 0.8, profiles: [profile])
         #expect(nameMap["Speaker C"] == "Alice")
@@ -280,7 +353,7 @@ struct SpeakerProfilesTests {
         // scores 1.0.
         let first = embeddings[embeddings.keys.min()!]
         let profile = SpeakerProfiles.Profile(
-            name: "Self", embedding: first!, dim: first!.count, created: "", samples: 1)
+            name: "Self", embedding: first!, dim: first!.count, created: "", samples: 1, source: "user")
         let matches = SpeakerProfiles.matchSpeakers(
             clusterEmbeddings: embeddings, profiles: [profile], threshold: 0.9)
         #expect((matches[embeddings.keys.min()!] ?? nil)?.name == "Self")

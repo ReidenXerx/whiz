@@ -32,6 +32,11 @@ enum SpeakerProfiles {
         var dim: Int
         var created: String
         var samples: Int
+        /// "user" (named interactively) or "auto" (adopted from a profile
+        /// auto-match). Auto-sourced profiles are derived data: a later run
+        /// cannot silently merge into a profile that was never actually
+        /// confirmed by a human (M3, wave-1).
+        var source: String
     }
 
     // MARK: - Store
@@ -82,7 +87,8 @@ enum SpeakerProfiles {
                 embedding: vector,
                 dim: (object["dim"] as? NSNumber)?.intValue ?? vector.count,
                 created: (object["created"] as? String) ?? "",
-                samples: (object["samples"] as? NSNumber)?.intValue ?? 0))
+                samples: (object["samples"] as? NSNumber)?.intValue ?? 0,
+                source: (object["source"] as? String) ?? "user"))
         }
         return out
     }
@@ -106,22 +112,42 @@ enum SpeakerProfiles {
         return (merged, oldSamples + newSamples)
     }
 
-    /// profiles.py:save_profile — persist (and merge with) a profile. Same
-    /// embedding dimension merges; a different dimension (embedding model
-    /// swapped) replaces the old profile.
+    /// profiles.py:save_profile — persist a voice profile, merging with any
+    /// existing one.
+    ///
+    /// M3 (wave-1): `autoMatch: true` marks this save as sourced from a
+    /// profile auto-match rather than a user-confirmed name. An auto-match
+    /// can CREATE a profile (first sighting, provenance "auto") but can
+    /// never MERGE into or REPLACE an existing one — a chain of
+    /// self-confirming matches silently drifted stored centroids before
+    /// this contract existed. An existing profile is returned untouched
+    /// (the caller decides whether to warn), and a new file is marked
+    /// `source: "auto"` so a later human confirmation (`autoMatch: false`)
+    /// still merges normally and upgrades the provenance to "user".
+    /// Dim-mismatch on a user-confirmed save replaces the old profile
+    /// (incompatible embedding model); an auto-match never gets that far.
     static func saveProfile(
         name: String,
         embedding: [Double],
         samples: Int = 1,
+        autoMatch: Bool = false,
         in directory: URL = profilesDirectory
     ) throws -> URL {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
+        let path = profilePath(name: name, in: directory)
+        let prior = loadRawProfile(name: name, in: directory)
+
+        // An auto-match must not adopt an existing profile's slot — return
+        // the path untouched, whether the prior was human-confirmed or
+        // itself auto-sourced (profiles.py:167-169).
+        if autoMatch, prior != nil {
+            return path
+        }
+
         var finalEmbedding = embedding
         var totalSamples = samples
-        let path = profilePath(name: name, in: directory)
-        if let data = try? Data(contentsOf: path),
-           let prior = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+        if let prior,
            let oldEmbedding = prior["embedding"] as? [Any],
            let oldVector = oldEmbedding.compactMap({ ($0 as? NSNumber)?.doubleValue })
                 as? [Double],
@@ -135,11 +161,11 @@ enum SpeakerProfiles {
             finalEmbedding = merged
             totalSamples = total
         }
-        // Dimension mismatch (or unreadable prior): the new profile replaces.
 
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
         let created = formatter.string(from: Date())
+        let source = autoMatch ? "auto" : "user"
 
         var json = "{"
         json += "\"name\": \(jsonString(name)), "
@@ -148,7 +174,8 @@ enum SpeakerProfiles {
         json += finalEmbedding.map { "\($0)" }.joined(separator: ", ")
         json += "], "
         json += "\"created\": \(jsonString(created)), "
-        json += "\"samples\": \(totalSamples)"
+        json += "\"samples\": \(totalSamples), "
+        json += "\"source\": \(jsonString(source))"
         json += "}"
         if let data = json.data(using: .utf8) {
             try data.write(to: path, options: .atomic)
@@ -156,6 +183,16 @@ enum SpeakerProfiles {
             throw SpeakerProfilesError.writeFailed(path.path)
         }
         return path
+    }
+
+    /// profiles.py:_load_profile_raw — the raw JSON of a single stored
+    /// profile, or nil when it doesn't exist or can't be parsed.
+    private static func loadRawProfile(name: String, in directory: URL) -> [String: Any]? {
+        let path = profilePath(name: name, in: directory)
+        guard let data = try? Data(contentsOf: path),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return nil }
+        return object
     }
 
     /// profiles.py:forget_profile — delete by name.

@@ -115,22 +115,29 @@ enum LabeledTranscript {
     }
 
     /// merge.py:assign_speakers — label each whisper segment by whichever
-    /// diarization segment it overlaps most. No diarization at all means
-    /// every segment falls back to the first speaker's label, exactly like
-    /// Python's diar_segs[0].speaker base case.
+    /// diarization segment it overlaps most. A segment that overlaps NO
+    /// diarization segment falls back to the nearest-in-time one (M4, wave-1:
+    /// the old `diar_segs[0].speaker` default was an arbitrary and silent
+    /// choice — the fallback is now deterministic and its count is surfaced).
+    /// No diarization at all means every segment gets Speaker A.
+    ///
+    /// Returns the merged list; `fallbackCount` in the tuple is the number of
+    /// segments that needed the nearest-in-time fallback (0 when all overlap
+    /// something) — callers surface the warning the way merge.py:135-140 does.
     static func assignSpeakers(
         segments: [WhisperBatchTranscriber.Segment],
         diar: [DiarSegment]
-    ) -> [LabeledSegment] {
-        guard let fallback = diar.first else {
-            return segments.map {
+    ) -> (merged: [LabeledSegment], fallbackCount: Int) {
+        guard let first = diar.first else {
+            return (segments.map {
                 LabeledSegment(segment: $0, speaker: speakerLabel(0))
-            }
+            }, 0)
         }
         var merged: [LabeledSegment] = []
+        var fallbacks = 0
         merged.reserveCapacity(segments.count)
         for segment in segments {
-            var bestSpeaker = fallback.speaker
+            var bestSpeaker = first.speaker
             var bestOverlap = 0.0
             for diarEntry in diar {
                 let overlap = max(
@@ -141,9 +148,50 @@ enum LabeledTranscript {
                     bestSpeaker = diarEntry.speaker
                 }
             }
+            if bestOverlap <= 0.0 {
+                bestSpeaker = nearestDiarSpeaker(to: segment, in: diar).speaker
+                fallbacks += 1
+            }
             merged.append(LabeledSegment(segment: segment, speaker: speakerLabel(bestSpeaker)))
         }
-        return merged
+        return (merged, fallbacks)
+    }
+
+    /// merge.py:_nearest_diar_speaker — the diarization segment closest in
+    /// time to the given whisper segment. Distance is the temporal gap
+    /// between the two intervals (0 when they touch); ties break toward the
+    /// earlier entry in `diar` (strict `<`, callers pass them in time order),
+    /// so the fallback is deterministic.
+    static func nearestDiarSpeaker(
+        to segment: WhisperBatchTranscriber.Segment,
+        in diar: [DiarSegment]
+    ) -> DiarSegment {
+        guard let first = diar.first else {
+            return DiarSegment(start: 0, end: 0, speaker: 0)
+        }
+        var best = first
+        var bestGap = intervalGap(
+            segment.start, segment.end, first.start, first.end)
+        for entry in diar.dropFirst() {
+            let gap = intervalGap(
+                segment.start, segment.end, entry.start, entry.end)
+            if gap < bestGap {
+                bestGap = gap
+                best = entry
+            }
+        }
+        return best
+    }
+
+    /// merge.py:_interval_gap — seconds between two intervals (0 if they
+    /// touch or overlap).
+    static func intervalGap(
+        _ aStart: Double, _ aEnd: Double,
+        _ bStart: Double, _ bEnd: Double
+    ) -> Double {
+        if aEnd < bStart { return bStart - aEnd }
+        if bEnd < aStart { return aStart - bEnd }
+        return 0.0
     }
 
     // MARK: - Output formats

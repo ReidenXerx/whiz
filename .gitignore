@@ -60,3 +60,6 @@ htmlcov/
 docs/ARCHITECTURE.gitnexus.md
 .agents/skills/
 # --- end bearing ---
+# Local agent-tooling artifacts — not part of the repo.
+.claude/
+CLAUDE.md
