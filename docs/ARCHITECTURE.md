@@ -1,257 +1,163 @@
 # Architecture
 
-How the pieces fit, and the rules they follow when they don't fit identically.
+How the pieces fit, and the rules they follow.
 
-whiz has grown from a single Python package into a system where the same
-behavior must hold on three implementations: the Python CLI (installed
-everywhere today), the native macOS app (`macos/`), and a Rust core that will
-power both a Linux daemon and a cross-platform UI. The architecture problem
-is not any one component — it is keeping independent implementations from
-drifting apart. The `whiz config` compatibility story (`WhizConfig.swift`
-mirroring `whiz/config.py`) showed how silent that drift can be, and the PR #1
-review caught a live instance of it in the dictation gates (0.03 vs 0.010).
+As of September 2026 whiz is one product: a transcription CLI. A recording goes
+in — audio or video — and a labeled, named, frame-illustrated transcript plus
+an optional AI analysis comes out, all on the user's machine.
 
-This document defines:
+Dictation used to live here too. It moved out and became
+[mynah](https://github.com/ReidenXerx/mynah) — a product that runs from login
+to shutdown, with a hotkey, a tray icon and its own release cycle. The things
+this repo used to own for it (the segmentation engine, the tuning contract
+`tuning/tuning.toml`, the golden corpus, the macOS Swift app, the vendored
+whisper.cpp submodule) all moved with it, including their history. This
+document describes what is left, and what the split owed the user on the way
+out.
 
-1. What the implementations must agree on, and how that agreement is enforced
-   (`tuning/tuning.toml` + test pins, no runtime coupling).
-2. The target Rust layout for the Linux/analyze/UI work, and its phases.
-3. Known divergences — the places where the implementations deliberately do
-   NOT agree, so nobody "fixes" them into agreement by accident.
+## The split, and what it owes
 
-## The components today
+Dictation and transcription turned out to be two tools that happened to share
+a speech engine. The handoff is deliberately gentle, because `whiz dictate` is
+in people's muscle memory, their LaunchAgents and their shell history:
 
-| Component | Language | Path | Role |
-|---|---|---|---|
-| `whiz` CLI | Python | `whiz/` | analyze pipeline (whisper-cli + diarization + AI analysis), models, config; dictation on macOS via PyObjC |
-| macOS app | Swift | `macos/` | native menu-bar dictation (replacing the PyObjC daemon; see SWIFT-APP.md) |
-| Tuning contract | data | `tuning/` | the constants every implementation is pinned against |
-| Golden corpus | data | `tuning/golden/` | the segmentation behavior every implementation must reproduce |
-| Rust core | Rust | `rust/` (P1) | shared pipeline for the Linux daemon, CLI parity, and UI |
+- `whiz dictate` (and the `d` alias) still parse and run — for a release or
+  two — and print where it went (`cli.py`, `MYNAH_MOVED`), exiting nonzero.
+- The `dictate_*` config keys stay readable in an existing `config.toml`:
+  `save()` preserves keys it does not know, so nothing is stripped on a
+  routine config write before Mynah's first run has imported them
+  (`config.py`). Mynah reads them once and owns them from then on.
+- `whiz upgrade` lost the extra and the LaunchAgent to look after; it now
+  does the one thing it is still for — reinstall, re-inject the `diarize`
+  extra when that one was already there, re-verify.
 
-## The shared tuning contract
+The tuning contract and the golden corpus that used to live under `tuning/`
+were about dictation segmentation — utterance ends, energy gates, calibration.
+Nothing in whiz segments audio at session speed anymore; transcription is a
+batch pipeline whose speech segmentation is whisper-cli's VAD plus sherpa-onnx
+diarization. The contract moved to mynah unchanged.
 
-`tuning/tuning.toml` is the single source of truth for the dictate
-segmentation pipeline's constants: energy floors, adaptive-noise calibration,
-utterance shaping, and the Whisper hallucination phrase list.
+## The components
 
-The important design decision: **it is data, not code, and it is never read
-at runtime.** Each implementation hardcodes the values in its own language;
-tests in every implementation pin the compiled constants against the file:
+One Python package, ~6,000 lines, no compiled parts:
 
-- Python: `tests/test_tuning.py` (engine constants, `Config` defaults,
-  `DictateSettings` defaults, hallucination set equality — both arrays,
-  file shape).
-- Swift: `macos/Tests/WhizAppTests/TuningTests.swift` (TranscriptFilter,
-  WhizConfig defaults, `UtteranceDetector.trailingPadding`, hallucination
-  set equality — both arrays — full-key parse), and
-  `macos/Tests/WhizAppTests/TranscriptFilterTests.swift` (the two match
-  modes' behavior, mirror of the engine.py tests).
-- Rust (when it exists): the same pins against `whiz-core`'s constants.
+| Module | Role |
+|---|---|
+| `cli.py` | command surface: `transcribe`, `merge`, `analyze`, `models`, `config`, `speakers`, `upgrade`, the `dictate` stub; video-input defaults (speakers/screenshots/name-speakers auto-on) |
+| `audio.py` | ffmpeg extraction to 16 kHz mono PCM WAV — the only container whisper-cli accepts |
+| `models.py` | ggml model discovery, alias resolution (`turbo`, `large-v3`), download; the NS-15 preference order |
+| `diarize.py` | sherpa-onnx diarization (pyannote segmentation + 3D-Speaker embedding), model download, the fingerprinted result cache |
+| `merge.py` | maximum-temporal-overlap assignment of whisper segments to diarization speakers; labeled SRT/TXT/HTML emission |
+| `profiles.py` | speaker voice profiles: cosine matching, sample-weighted merging, provenance |
+| `screenshots.py` | one frame per segment into `<stem>.frames/` + the `frames.json` manifest (the join key for vision analysis and HTML) |
+| `ai.py` | OpenAI-compatible chat API (Ollama by default): classifier probe, rolling-context map-reduce, retries, the Essentials section |
+| `config.py` | `~/.config/whiz/config.toml`: flat-TOML read/write, tri-state consent key, foreign-key preservation |
+| `ui.py` | rich terminal output; degrades to clean plain text when piped |
 
-A value changed here must be changed in every implementation or the tests
-fail. The file is flat (no tables, no nesting) so stdlib `tomllib` and the
-Swift `FlatTOML` parser read the exact same bytes; the flat shape is itself
-pinned by tests in both languages.
+Everything shells out or calls optional dependencies rather than bundling:
+whisper-cli and ffmpeg from PATH, sherpa-onnx as an optional extra installed
+on demand (with consent), the chat model over HTTP. The only vendored artifact
+left is nothing — the whisper.cpp submodule moved to mynah with the app that
+needed it.
 
-Why not a runtime read? A dictate engine must not acquire a config-file
-dependency for its safety constants: the file may be absent, unreadable, or
-edited mid-session, and the failure mode would be inconsistent behavior
-across platforms, not a test failure. Compiled constants with a test-enforced
-contract fail loudly at build time and cost nothing at runtime.
-
-## The golden corpus
-
-`tuning/golden/` holds eight deterministic WAV fixtures and `expected.json`,
-generated by `tuning/golden/generate.py` (pure stdlib, byte-identical on
-regeneration — enforced by `test_golden_corpus_is_regenerable`). The
-reference logic in the generator is transcribed from `engine.py`; the
-Python test drives the REAL engine's audio callback, and the Swift test
-drives the REAL `UtteranceDetector`, so the corpus pins behavior, not
-documentation.
-
-What `expected.json` pins per region:
-
-- `start` / `end` — speech-region boundaries. `end` is the start time of the
-  frame that closed the region; the buffered utterance spans
-  `[start, end + 0.03)`. Python keeps all trailing silence; Swift trims to
-  `trailing_padding` (0.2 s). The boundary definition is the reconciliation
-  point between the two policies.
-- `rejected_by_energy_gate` — the whole-buffer RMS gate run before
-  transcription. The generator computes the verdict under BOTH padding
-  policies and refuses to emit the corpus if they disagree, so a case where
-  policies diverge on the gate must be redesigned, not pinned.
-
-The eight cases: two utterances in a quiet room; speech at t=0 filling the
-calibration window (pinned post-fix: segmented AND accepted — the first
-word survives); speech late in the window; steady noise above the static
-floor (only calibration rejects it); a short click; the exact 27-frame
-close; a 26-frame gap that must NOT close (the two phrases merge into one
-utterance); and speech over fan noise inside the window (the exclusion
-median itself — speech frames must not disable noise adaptation).
-
-Regenerate after changing `tuning/tuning.toml` or any segmentation logic:
+## The pipeline
 
 ```
-python3 tuning/golden/generate.py
+transcribe ──► audio.py ──► whisper-cli ──► diarize.py ──► merge.py ──► outputs
+   │                          (SRT/JSON)     (cacheable)    (labels)   (srt, speakers.*, html)
+   │                                                                      │
+   └── video input: screenshots.py ──► frames.json ──────────────┤
+                                                                  ▼
+analyze ──► ai.py (frames + transcript ──► map-reduce ──► .analysis.md)
 ```
 
-## Speech-aware calibration
+`whiz merge` re-runs only the diarization + merge against an existing whisper
+JSON, reusing the diarization cache, so tuning speaker count/threshold/names
+after a first run is instant. `whiz analyze` consumes the artifacts either
+path produced.
 
-Calibration is speech-aware in every implementation: a calibration frame
-with RMS ≥ `calibration_speech_floor` (0.03) is speech, not noise, and is
-excluded from the median; if fewer than `noise_min_samples` quiet frames
-remain in the window, calibration aborts and the static gates stay in
-force for the session. The median may never be measured on speech.
+## The contracts
 
-This fixes the poisoned-calibration defect: a user who pressed the
-hotkey and talked immediately filled the 1 s window with speech, the
-"ambient noise" median was measured on that speech, the utterance gate
-rose to ~3x the speech RMS, and the first word was silently dropped by
-the energy gate — in both implementations. The corpus pins the fix
-(`speech_during_calibration`, `rejected_by_energy_gate: false`) and the
-mechanism (`speech_over_noise_in_calibration`: speech excluded, gates
-still raised by the noise frames). A tuning change to the floor is a
-contract change — it moves the speech/noise discrimination line in both
-engines and must ship with the corpus regenerated in the same commit.
+These are the rules a change must respect. Each is enforced by a test — a
+rule without a pin is a wish.
 
-Since wave-2 (M13) the raised gates are capped: the median's
-**contribution** is clamped at `calibration_speech_floor`
-(`max(floor, min(median × multiplier, floor))`), so a calibrated gate can
-never demand speech louder than speech. Before the cap, a measured fan
-median of 0.02 raised the frame gate to 0.07 — above normal talking
-(~0.05-0.06 RMS) — and no `frame_energy`/`min_energy` setting could
-counter it, because the static floors are minimums and `max()` kept the
-calibrated gate dominant; the documented remedy ("lower `frame_energy`")
-silently did nothing. The cap applies to the contribution, not the whole
-gate: the static floors stay true minimums, so a floor set above 0.03
-applies exactly as set. It cannot misfire — the median is measured only on
-quiet frames (below the floor), so the contribution only ever rises toward
-the cap from below.
+**Model preference (NS-15).** Whisper models are used unquantized, always:
+quantization corrupts transcription quality. Within each model class the
+unquantized variant ranks first and every `-q*` variant is reachable only
+when its own class's unquantized model is absent (preference is per-class,
+never blocking a quantized model behind an unrelated class). `tiny` is
+excluded from `KNOWN_MODELS`/`PREFERENCE` entirely. Pinned by
+`tests/test_models.py` against `models.py:PREFERENCE` + alias resolution.
+Quantized files stay runnable when named explicitly — informed use is never
+blocked, it is just never the default.
 
-Accepted trade-off: steady noise at or above the speech floor (loud
-fans, HVAC) can no longer be calibrated against — by energy alone it is
-indistinguishable from speech. That regime is owned by the secondary
-VAD (webrtcvad in Python, Silero in Swift) and the hallucination
-filter, though the ownership is only as strong as those layers:
-webrtcvad's documented failure mode is steady noise misclassified as
-speech (the reason the energy pre-filter runs in front of it), it fails
-open when uninstalled, and the hallucination filter is a known-phrase
-blocklist with two match modes (NS-6: distinctive artifacts by substring,
-ordinary vocabulary only as the whole utterance) — it catches the known
-artifacts, not novel ones. Swift's post-gate
-Silero VAD rejecting whole utterances is the stronger half of that
-story. Real fan/cooler levels (~0.02 RMS, measured on a MacBook under
-load) sit well below the 0.03 floor and keep the adaptive path.
+**Voice-profile provenance.** A profile save knows where it came from:
+`save_profile(..., auto_match=True)` (a machine match) may *create* a profile
+marked `source: "auto"` but may never *merge into* an existing one — a chain
+of self-confirming auto-matches would silently drift the stored centroid. A
+human confirmation (`auto_match=False`) merges normally and upgrades an auto
+profile to `source: "user"`. Pinned by `tests/test_profiles.py`. The same
+contract covers the embedding dimension: a profile saved against a different
+embedding model is discarded, not averaged.
 
-A second residual is accepted: speech below the floor (RMS < 0.03 —
-very quiet talking) still enters the median and can poison it exactly
-as the loud case did. The floor is a discrimination line, not a
-detector — it buys speech/noise separation at the cost of a
-quiet-speech hole; the abort threshold bounds the damage only when so
-few quiet frames remain that calibration aborts outright.
+**Diarization cache identity.** The cache (`<file>.wav.diar.json`) is keyed on
+the parameters that produced it *and* a fingerprint of the input it was
+produced from — a stale cache can never be reused against different audio or
+a different `--speakers`/`--cluster-threshold` combination. Pinned by
+`tests/test_diarize_cache.py`.
 
-Why an absolute floor rather than a relative discriminator (frames
-well above the window's own median, say)? Any statistic computed over
-the whole window — mean, median, min — is itself measured on speech
-when speech fills the window: a relative discriminator degenerates at
-precisely the moment it must discriminate. The absolute line draws the
-boundary from the microphone's physics (cooler noise ~0.02 vs quiet
-speech ~0.04) instead of from whatever the window happened to capture,
-so it still works when the window is 100% speech.
+**Degraded-run contract.** When diarization cannot run (setup declined or
+failed): an explicit `--speakers` degrades loudly and — when the run writes no
+speaker-labeled artifacts at all — exits nonzero, so `|| alert` wrappers can
+tell; an explicitly passed `--outputs html` is never silently dropped (generic
+`Speaker` labels + a note line in the page); existing outputs carrying *real*
+speaker labels are never clobbered by a degraded re-run, while existing
+degraded files are refreshed in place; names passed via `--speakers-names` are
+never silently discarded — the warning says so. Pinned by `tests/test_cli.py` /
+`tests/test_merge.py`. A `whiz merge` whose only outcome is keeping existing
+outputs is rc=0, not a false alarm.
 
-## Known divergences
+**Consent on the setup path.** The one-time diarization setup (sherpa-onnx
+install + model download) asks once on an interactive terminal and persists
+the answer in the tri-state `auto_diarization_setup` key (`bool | None`;
+unset is omitted from emitted TOML, never clobbered). Non-TTY runs proceed
+without asking and without persisting; `--no-auto-diarization-setup`
+short-circuits before any prompt. Pinned by `tests/test_cli.py`.
 
-These are deliberate, documented, and pinned as divergences — do not
-"fix" one implementation to match the other without deciding here first.
+**Analysis contract.** Every `whiz analyze` run — any mode, single-call or
+map-reduced — appends a dense `## Essentials` section to the same
+`.analysis.md`; long inputs are chunked with a rolling-context map-reduce
+(sliding window of prior partials, frames carried per-chunk so the model sees
+a coherent visual timeline, not a bag of images); transient HTTP failures
+(429/5xx, connection errors) retry with backoff, permanent errors surface
+immediately with the server's body. Pinned by `tests/test_ai.py`.
 
-**Trailing silence.** Python buffers everything up to the close (0.8 s of
-silence belongs to the utterance); Swift trims the buffer to 0.2 s of kept
-silence before emitting. The divergence exists because the whole-buffer
-energy gate (which Python runs after buffering) averages the speech away
-when the padding dominates — Swift moved the gate after the trim, so its
-utterances stay short. The golden corpus reconciles the two by pinning the
-region boundary, not the buffer contents.
+**Config compatibility.** `config.toml` is written flat; `save()` preserves
+every key it does not know — including the `dictate_*` keys Mynah has not
+imported yet, and anything else a future reader puts there. A new key must
+round-trip through TOML's value space (the reason `None` is omitted, not
+emitted). Pinned by `tests/test_config.py`.
 
-**min-utterance length gate.** Python applies `min_utterance` to the padded
-buffer (speech + 0.81 s mandatory trailing silence, so the gate can never
-reject a silence-closed utterance — it is effectively dead for anything
-but end-of-session flushes). Swift applies it to the trimmed utterance
-(0.2 s padding), so the gate actually bites there. Both pass the corpus's
-click case (a 0.12 s click trims to 0.32 s ≥ 0.25 s), so the corpus does
-not pin this gate at all; the length-gate outcome for a case where they
-differ is out of the contract.
+## Testing
 
-**Secondary VAD.** Python: webrtcvad in front of the energy pre-filter
-(implementation may reject frames the energy gate would pass). Swift:
-Silero VAD after the gates, rejecting whole utterances before
-transcription. Either is fine — the golden contract covers only the
-energy-gate state machine.
+Pure-Python suite, no sherpa-onnx, ffmpeg, models or network required; runs in
+under a second:
 
-**Menu bar (`dictate_menu_bar`).** Python honors `false` by not installing
-the rumps menu. The Swift app always shows its `MenuBarExtra`: hiding it
-would orphan Settings and Quit, the menu being the only route to both
-(`WhizApp.swift`), so the key is accepted-but-ignored there. An extra menu
-item is the lesser evil (M2, wave-2); revisit only alongside a
-settings-independent quit path.
+```
+uv run --extra test pytest tests/ -q
+```
 
-**Whisper decoder thresholds.** Since wave-2 (M12) both engines pin
-`no_speech_threshold` (0.35) and `logprob_threshold` (-0.5) against
-`tuning/tuning.toml` — `mlx.py` (`NO_SPEECH_THRESHOLD`/`LOGPROB_THRESHOLD`)
-and `WhisperEngine.swift` (`noSpeechThreshold`/`logprobThreshold`, applied
-as whisper.cpp's `no_speech_thold`/`logprob_thold`). One asymmetry
-remains: mlx also passes `hallucination_silence_threshold=2.0`, for which
-whisper.cpp has no equivalent parameter — Python-only by capability, not
-by choice.
+(264 tests at the time of the split.) Filesystem isolation via `monkeypatch`/
+`tmp_path` keeps host-installed models out of discovery assertions.
 
-**Auto-stop on silence** used to be a fourth divergence — Python honored
-`dictate_auto_stop_silence`, the Swift app round-tripped the config value
-without reading it. Wave-2 (M1) implemented it in `SessionController` on
-top of `UtteranceDetector`'s `continuousSilence` accumulator, so both
-engines now end a session after the configured silence; the divergence is
-recorded here only so the wave-1 audit trail stays legible.
+## Where the old contract went
 
-## Known shared defects
-
-**The min-utterance gate is dead in Python for silence-closed utterances**
-(see divergences above) — it only bites on flushes shorter than the close
-threshold. If clicks slipping through Python matter, the fix is gating on
-the speech-content duration, which is what the region boundary exposes.
-
-## The Rust core (P1-P3 target)
-
-The Linux adapter and the UI share one Rust pipeline so there are never
-three copies of the segmentation logic. Crates:
-
-- `whiz-core` — config, tuning constants (pinned against tuning.toml),
-  model resolution, whisper.cpp FFI, utterance detection, hallucination
-  filter; the analyze pipeline shells to the pinned `whisper-cli` binary
-  exactly as Python does today, with sherpa-onnx diarization last.
-- `whiz-cli` — thin arg parsing over `whiz-core`; `whiz analyze` behavior
-  parity is the acceptance bar.
-- `whiz-daemon` — the Linux dictation adapter (see LINUX-APP.md).
-- `whiz-ui` — Tauri app over `whiz-core` (macOS + Linux).
-
-Phases (each independently shippable, in order):
-
-1. **P1 — daemon**: `whiz-daemon` on Wayland (portals, PipeWire, SNI,
-   systemd --user). Acceptance: dictate end-to-end on a Wayland session,
-   golden corpus green through `whiz-core`'s detector.
-2. **P2 — analyze port**: `whiz-core` + `whiz-cli` reproduce `whiz analyze`
-   output (SRT/JSON/diarization) on the same inputs. Acceptance: byte-stable
-   outputs against the Python pipeline on the same fixtures.
-3. **P3 — UI**: Tauri `whiz-ui` over the same core on both platforms.
-
-The Python CLI stays the reference implementation until P2's acceptance bar
-is met; nothing here removes it.
-
-## Test matrix
-
-| What | Python | Swift | Rust |
-|---|---|---|---|
-| Constants pinned to tuning.toml | `tests/test_tuning.py` | `TuningTests.swift` | P1 |
-| Golden corpus through the real engine | `tests/test_segmentation_golden.py` | `TuningTests.swift` | P1 |
-| Corpus regenerates byte-identically | `tests/test_tuning.py` | — (consumes) | P1 |
-| Config defaults co-owned by two apps | `tests/test_config.py` | `ConfigTests.swift` | P1 |
-
-A segmentation change ships with all three green or it does not ship.
+The tuning contract, golden corpus, cross-implementation divergence rules
+(trailing-silence policies, min-utterance gate placement, secondary VAD,
+decoder thresholds) and the Rust core plan all described *dictation
+segmentation across Python/Swift implementations*. That problem — keeping
+independent implementations of one engine from drifting — is now mynah's; its
+`tuning/tuning.toml` carried every value over byte-for-byte at the split. If
+whiz ever grows a second implementation of the pipeline above, the pattern
+moves with the need: constants in a pinned data file, no runtime reads, a
+corpus that refuses to encode a divergence.
