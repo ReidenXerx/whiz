@@ -477,7 +477,18 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
                 "No models found. Run `whiz models download turbo` to get a fast one."
             )
 
-    # Extract audio if it's a video container.
+    # Reject invalid formats before creating a temporary WAV.
+    raw_outputs = args.outputs if args.outputs else ",".join(config.outputs)
+    outputs = [o.strip() for o in raw_outputs.split(",") if o.strip()]
+    for o in outputs:
+        if o not in OUTPUT_FLAGS:
+            raise SystemExit(f"Unknown output format '{o}'. Valid: {', '.join(OUTPUT_FLAGS)}")
+
+    whisper_cli = _find_whisper_cli(config.whisper_cli)
+
+    # Extract video audio as before. Diarization has a stricter contract than
+    # whisper-cli: it always receives 16 kHz mono 16-bit PCM WAV, while plain
+    # transcription continues to pass supported audio formats through.
     keep_wav = args.keep_wav
     if aud.needs_extraction(in_path):
         if args.dry_run:
@@ -489,18 +500,42 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
             wav = aud.extract_audio(in_path, aud.find_ffmpeg(config.ffmpeg))
             ui.kv("Audio", str(wav))
     elif aud.is_audio(in_path):
-        wav = in_path
+        if diarize_enabled:
+            if aud.is_diarization_wav(in_path):
+                wav = in_path
+            elif args.dry_run:
+                wav = aud.prepare_diarization_audio(
+                    in_path, aud.find_ffmpeg(config.ffmpeg), dry_run=True,
+                )
+                if wav != in_path:
+                    print(f"DRY-RUN: would normalize audio ->> {wav}")
+            else:
+                ui.phase("normalizing audio")
+                wav = aud.prepare_diarization_audio(in_path, aud.find_ffmpeg(config.ffmpeg))
+                ui.kv("Audio", str(wav))
+        else:
+            wav = in_path
     else:
-        # Unknown extension — let whisper-cli try; it may still work.
-        ui.info(f"Unrecognized extension {in_path.suffix}; passing directly to whisper-cli.")
-        wav = in_path
+        # Unknown extensions remain whisper-cli's responsibility unless
+        # diarization is requested, in which case its WAV-only contract wins.
+        if diarize_enabled:
+            if args.dry_run:
+                wav = aud.prepare_diarization_audio(
+                    in_path, aud.find_ffmpeg(config.ffmpeg), dry_run=True,
+                )
+                print(f"DRY-RUN: would normalize input ->> {wav}")
+            else:
+                ui.phase("normalizing input audio")
+                wav = aud.prepare_diarization_audio(in_path, aud.find_ffmpeg(config.ffmpeg))
+                ui.kv("Audio", str(wav))
+        else:
+            ui.info(f"Unrecognized extension {in_path.suffix}; passing directly to whisper-cli.")
+            wav = in_path
 
     # Threads.
     threads = args.threads if args.threads and args.threads > 0 else (config.threads or _auto_threads())
 
-    # Outputs. Normalize to a list (the flag/config may be a comma string).
-    raw_outputs = args.outputs if args.outputs else ",".join(config.outputs)
-    outputs = [o.strip() for o in raw_outputs.split(",") if o.strip()]
+    # Outputs.
     # We need a parseable whisper JSON to merge diarization against, to drive
     # the per-segment screenshots path (even without diarization), AND to build
     # the HTML transcript (even with no speaker labels at all). Force JSON
@@ -509,17 +544,22 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
         outputs = outputs + ["json"]
     out_flags = []
     for o in outputs:
-        flag = OUTPUT_FLAGS.get(o)
-        if flag is None:
-            raise SystemExit(f"Unknown output format '{o}'. Valid: {', '.join(OUTPUT_FLAGS)}")
+        flag = OUTPUT_FLAGS[o]
         if flag == "__whiz_html__":
             continue  # html is a whiz post-merge output, not a whisper-cli flag
         out_flags.append(flag)
 
     # Output base path.
     of_flag: list[str] = []
-    of_base = Path(args.output).expanduser() if args.output else wav.with_suffix("")
-    if args.output:
+    of_base = Path(args.output).expanduser() if args.output else in_path.with_suffix("")
+    normalized_audio_input = wav != in_path and not aud.needs_extraction(in_path)
+    if normalized_audio_input and not args.output:
+        of_base = in_path
+    # A temporary normalized WAV may be deleted after the run. Give whisper
+    # the original source path as its output base, preserving the names it
+    # uses for direct audio (e.g. recording.mp3.json, not recording.wav.json).
+    # Video keeps its established ``<stem>.wav.*`` naming.
+    if args.output or normalized_audio_input:
         of_flag = ["-of", str(of_base)]
 
     # Language.
@@ -548,7 +588,7 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
             vad_flags += ["--vad-model", "<PATH-TO-VAD-MODEL>"]
 
     cmd = [
-        _find_whisper_cli(config.whisper_cli),
+        whisper_cli,
         "-m", str(model_path),
         "-f", str(wav),
         "-t", str(threads),
@@ -581,6 +621,17 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
         cmd += args.extra
 
     return cmd, model_path, wav, in_path, keep_wav, of_base, diarize_enabled, screenshots
+
+
+def _remove_intermediate_audio(path: Path, source: Path) -> None:
+    """Remove generated audio while preserving the user's source file."""
+    if path == source or not path.exists():
+        return
+    try:
+        path.unlink()
+        ui.muted(f"Removed intermediate {path}")
+    except OSError:
+        pass
 
 
 def _find_whisper_json(of_base: Path, wav: Path, of_passed: bool) -> Path | None:
@@ -1086,7 +1137,23 @@ def _run_diarize_or_fallback(wav: Path, config: cfg.Config, args: argparse.Names
 
 def cmd_transcribe(args: argparse.Namespace) -> int:
     config = cfg.load()
-    cmd, model_path, wav, in_path, keep_wav, of_base, diarize_enabled, screenshots = _build_transcribe_args(args, config)
+    prepared = _build_transcribe_args(args, config)
+    _cmd, _model, wav, in_path, keep_wav, *_rest = prepared
+    try:
+        return _cmd_transcribe_prepared(args, config, prepared)
+    finally:
+        if not keep_wav and not args.dry_run:
+            _remove_intermediate_audio(wav, in_path)
+
+
+def _cmd_transcribe_prepared(args: argparse.Namespace, config: cfg.Config, prepared: tuple) -> int:
+    cmd, model_path, wav, in_path, _keep_wav, of_base, diarize_enabled, screenshots = prepared
+    of_passed = bool(args.output) or (
+        wav != in_path and not aud.needs_extraction(in_path)
+    )
+    # Whisper's raw JSON keeps the source extension; speaker artifacts use
+    # the input stem unless the user explicitly chose an output base.
+    artifact_base = of_base if args.output else in_path.with_suffix("")
 
     ui.header("whiz", f"transcription · v{__version__}")
     ui.kv("Model", model_path)
@@ -1118,7 +1185,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     # --resume lets you re-run `whiz transcribe` to redo diarization + merge
     # (e.g. with a different --speakers count) without re-running whisper-cli.
     # It's an ergonomic alias for `whiz merge` triggered from transcribe.
-    json_path = _find_whisper_json(of_base, wav, of_passed=bool(args.output))
+    json_path = _find_whisper_json(of_base, wav, of_passed=of_passed)
     resuming = bool(getattr(args, "resume", False) and json_path.exists())
     diar_segments: list[D.DiarSegment] = []
     if resuming:
@@ -1149,7 +1216,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     want_frames = screenshots and aud.needs_extraction(in_path)
     whisper_segs: list[MR.WhisperSeg] = []
     if (diarize_enabled or want_frames or want_html) and rc == 0:
-        json_path = _find_whisper_json(of_base, wav, of_passed=bool(args.output))
+        json_path = _find_whisper_json(of_base, wav, of_passed=of_passed)
         if not json_path.exists():
             ui.status(f"Warning: expected whisper JSON output at {json_path} but it's missing; skipping merge.",
                       kind="warn")
@@ -1182,7 +1249,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             # inlined; for the diarized path we extract after the labeled
             # outputs but before HTML if both are requested.
             srt_out, txt_out, html_out, name_map = _write_labeled_outputs(
-                merged, of_base,
+                merged, artifact_base,
                 name_speakers=_name_speakers_enabled(args, diarize_enabled),
                 speakers_names=args.speakers_names,
                 html=want_html and not want_frames,
@@ -1279,7 +1346,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             if explicit_html:
                 ui.phase("writing HTML transcript")
                 fallback_written, fallback_kept = _write_html_transcript(
-                    unlabeled, of_base, frames_dir, in_path.name,
+                    unlabeled, artifact_base, frames_dir, in_path.name,
                     note=_GENERIC_LABEL_NOTE,
                     transcript_txt=not want_frames,
                 )
@@ -1307,14 +1374,6 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                 "generic-label transcript anyway.",
                 kind="hint",
             )
-
-    # Clean up the intermediate WAV unless asked to keep it.
-    if wav != in_path and not keep_wav and wav.exists():
-        try:
-            wav.unlink()
-            ui.muted(f"Removed intermediate {wav}")
-        except OSError:
-            pass
 
     ui.summary(written)
 
@@ -1769,6 +1828,15 @@ def cmd_merge(args: argparse.Namespace) -> int:
     expensive whisper-cli transcription. The whisper JSON (produced by a
     prior `whiz transcribe --speakers` or `--outputs json`) is reused.
     """
+    cleanup: list[tuple[Path, Path]] = []
+    try:
+        return _cmd_merge_prepared(args, cleanup)
+    finally:
+        for wav, source in cleanup:
+            _remove_intermediate_audio(wav, source)
+
+
+def _cmd_merge_prepared(args: argparse.Namespace, cleanup: list[tuple[Path, Path]]) -> int:
     config = cfg.load()
     in_path = Path(args.file).expanduser()
     if not in_path.exists():
@@ -1835,6 +1903,24 @@ def cmd_merge(args: argparse.Namespace) -> int:
     if json_path.name.endswith(".wav.json"):
         of_base = json_path.with_name(json_path.name[: -len(".json")])  # ...16.03.40.wav
         of_base = of_base.with_suffix("")  # ...16.03.40
+
+    # ``merge`` can start from a compressed file whose JSON was produced by
+    # an earlier direct whisper run. Keep JSON discovery tied to that source,
+    # then normalize only the audio passed to sherpa-onnx (and profile
+    # embedding extraction). Existing compatible WAVs pass through.
+    diarization_source = wav
+    normalized_for_diarization = False
+    if speakers_requested and not aud.is_diarization_wav(wav):
+        ui.phase("normalizing audio")
+        if not aud.needs_extraction(in_path):
+            ui.kv("Input", in_path.name)
+        wav = aud.prepare_diarization_audio(
+            wav, aud.find_ffmpeg(config.ffmpeg),
+        )
+        normalized_for_diarization = wav != diarization_source
+        if normalized_for_diarization:
+            cleanup.append((wav, diarization_source))
+            ui.kv("Audio", str(wav))
 
     # Diarization params.
     num_sp = args.speakers if args.speakers else 0
@@ -2174,55 +2260,73 @@ def cmd_speakers_match(args: argparse.Namespace) -> int:
             "Run manually: pipx inject whiz 'whiz[diarize]' && "
             "whiz models download-diarization"
         )
-    ui.phase("diarizing")
-    diar_segments = D.run_diarization(wav, config, num_speakers=num_sp, threshold=thr)
-    if not diar_segments:
-        raise SystemExit("Diarization produced no segments.")
 
-    profiles = P.load_profiles()
-    if not profiles:
-        ui.info(f"No stored voice profiles in {P.profiles_dir()}; nothing to match against.")
-        return 0
-
-    cluster_embeddings = P.compute_speaker_embeddings(wav, diar_segments, config)
-    from whiz.merge import speaker_label
-    matches = P.match_speakers(cluster_embeddings, profiles, threshold=config.speaker_match_threshold)
-    rows = []
-    for cid, emb in sorted(cluster_embeddings.items()):
-        # M3 (wave-1 audit): cosine_similarity returns None when a stored
-        # profile's dim doesn't match the run's embeddings (embedding model
-        # swapped) — the pair is NOT comparable, so it renders n/a instead of
-        # crashing the sort (None vs float) or the score format. When every
-        # profile is incomparable there is no best score at all.
-        scored: list[tuple[float, str]] = []
-        skipped: list[str] = []
-        for prof in profiles:
-            s = P.cosine_similarity(emb, prof.embedding)
-            if s is None:
-                skipped.append(prof.name)
-            else:
-                scored.append((s, prof.name))
-        scored.sort(reverse=True)
-        all_str = ", ".join(
-            [f"{nm}={s:.3f}" for s, nm in scored]
-            + [f"{nm}=n/a" for nm in skipped]
+    diarization_source = wav
+    normalized_for_diarization = False
+    if not aud.is_diarization_wav(wav):
+        ui.phase("normalizing audio")
+        if not aud.needs_extraction(in_path):
+            ui.kv("Input", in_path.name)
+        wav = aud.prepare_diarization_audio(
+            wav, aud.find_ffmpeg(config.ffmpeg),
         )
-        m = matches.get(cid)
-        best = f"{m[0]}" if m else "(no match)"
-        if m:
-            best_score = f"{m[1]:.3f}"
-        elif scored:
-            best_score = f"{scored[0][0]:.3f}"
-        else:
-            best_score = "n/a"
-        rows.append([speaker_label(cid), best, best_score, all_str])
-    ui.table(
-        "Speaker match (dry run)",
-        [("Cluster", "left"), ("Best name", "left"), ("Best score", "right"), ("All scores", "left")],
-        rows,
-    )
-    ui.muted(f"Threshold: {config.speaker_match_threshold}")
-    return 0
+        normalized_for_diarization = wav != diarization_source
+        if normalized_for_diarization:
+            ui.kv("Audio", str(wav))
+
+    try:
+        ui.phase("diarizing")
+        diar_segments = D.run_diarization(wav, config, num_speakers=num_sp, threshold=thr)
+        if not diar_segments:
+            raise SystemExit("Diarization produced no segments.")
+
+        profiles = P.load_profiles()
+        if not profiles:
+            ui.info(f"No stored voice profiles in {P.profiles_dir()}; nothing to match against.")
+            return 0
+
+        cluster_embeddings = P.compute_speaker_embeddings(wav, diar_segments, config)
+        from whiz.merge import speaker_label
+        matches = P.match_speakers(cluster_embeddings, profiles, threshold=config.speaker_match_threshold)
+        rows = []
+        for cid, emb in sorted(cluster_embeddings.items()):
+            # M3 (wave-1 audit): cosine_similarity returns None when a stored
+            # profile's dim doesn't match the run's embeddings (embedding model
+            # swapped) — the pair is NOT comparable, so it renders n/a instead of
+            # crashing the sort (None vs float) or the score format. When every
+            # profile is incomparable there is no best score at all.
+            scored: list[tuple[float, str]] = []
+            skipped: list[str] = []
+            for prof in profiles:
+                s = P.cosine_similarity(emb, prof.embedding)
+                if s is None:
+                    skipped.append(prof.name)
+                else:
+                    scored.append((s, prof.name))
+            scored.sort(reverse=True)
+            all_str = ", ".join(
+                [f"{nm}={s:.3f}" for s, nm in scored]
+                + [f"{nm}=n/a" for nm in skipped]
+            )
+            m = matches.get(cid)
+            best = f"{m[0]}" if m else "(no match)"
+            if m:
+                best_score = f"{m[1]:.3f}"
+            elif scored:
+                best_score = f"{scored[0][0]:.3f}"
+            else:
+                best_score = "n/a"
+            rows.append([speaker_label(cid), best, best_score, all_str])
+        ui.table(
+            "Speaker match (dry run)",
+            [("Cluster", "left"), ("Best name", "left"), ("Best score", "right"), ("All scores", "left")],
+            rows,
+        )
+        ui.muted(f"Threshold: {config.speaker_match_threshold}")
+        return 0
+    finally:
+        if normalized_for_diarization:
+            _remove_intermediate_audio(wav, diarization_source)
 
 
 # ---------- config ----------
