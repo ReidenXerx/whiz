@@ -199,14 +199,75 @@ struct MainView: View {
     }
 
     private var emptyPane: some View {
-        VStack {
-            Spacer()
-            Text("Choose a file and press Transcribe.\nOutput appears here while the run is live.")
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-            Spacer()
+        VStack(spacing: 16) {
+            VStack {
+                Spacer()
+                Text("Choose a file and press Transcribe.\nOutput appears here while the run is live.")
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            if let lastRun = model.lastRun {
+                lastRunPane(lastRun)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// The previous run's results, offered in a fresh window.
+    ///
+    /// A window that never ran anything used to look exactly like "no run
+    /// ever happened", including seconds after a finished run's window was
+    /// closed. The artifacts are on disk; this pane says so. Reuses the same
+    /// artifact row the live pane uses — Reveal/Open behave identically —
+    /// but renders from the persisted record, so it works across launches.
+    private func lastRunPane(_ record: LastRunRecord) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text("Last run")
+                    .font(.headline)
+                Text("· " + URL(fileURLWithPath: record.inputPath).lastPathComponent)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(record.inputPath)
+                Spacer()
+                Text(record.finishedAt.formatted(date: .abbreviated, time: .shortened))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
+            List(record.artifacts) { artifact in
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(artifact.label)
+                        Text(artifact.url.lastPathComponent)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(artifact.url.path)
+                    }
+                    Spacer()
+                    Text(Artifact(label: artifact.label, url: artifact.url).kind.badge)
+                        .font(.caption2)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(.quaternary, in: Capsule())
+                    Button("Reveal") {
+                        NSWorkspace.shared.activateFileViewerSelecting([artifact.url])
+                    }
+                    Button("Open") {
+                        NSWorkspace.shared.open(artifact.url)
+                    }
+                }
+                .padding(.vertical, 1)
+            }
+            .frame(maxHeight: 180)
+        }
+        .frame(maxWidth: 720)
+        .frame(maxWidth: .infinity)
+        .overlay(alignment: .top) { Divider() }
     }
 
     private var missingWhizBanner: some View {

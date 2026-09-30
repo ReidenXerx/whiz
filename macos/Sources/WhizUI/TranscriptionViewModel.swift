@@ -34,12 +34,25 @@ final class TranscriptionViewModel: ObservableObject {
     /// True when whiz could not be located — the views then show install
     /// guidance instead of letting the user press Transcribe into a wall.
     @Published private(set) var whizMissing = false
+    /// The last finished run's artifacts, loaded from `LastRunStore` so a
+    /// fresh window can offer the previous run's results instead of looking
+    /// empty. A window that has run something shows its own artifacts; this
+    /// is the fresh-window state (see MainView's empty state).
+    @Published private(set) var lastRun: LastRunRecord?
 
     /// The log pane is a transcript, not a ledger: keep the tail.
     static let logLineCap = 400
 
     private var backend: CLIBackend?
     private var runTask: Task<Void, Never>?
+    /// Injectable for tests: a suite-backed store rather than the real
+    /// domain (see LastRunStore for why the real domain must stay untouched).
+    private let lastRunStore: LastRunStore
+
+    init(lastRunStore: LastRunStore = LastRunStore()) {
+        self.lastRunStore = lastRunStore
+        lastRun = lastRunStore.load()
+    }
 
     var hasError: Bool { errorMessage != nil }
 
@@ -92,6 +105,13 @@ final class TranscriptionViewModel: ObservableObject {
             await consumer.value
             isRunning = false
             phase = nil
+            // Persist the results only when the run actually produced
+            // something: a failed or stopped run keeps the previous record
+            // (saveReturning returns nil for empty lists), so a fresh
+            // window never advertises a run that wrote nothing.
+            if !artifacts.isEmpty {
+                lastRun = lastRunStore.saveReturning(artifacts: artifacts, input: input)
+            }
         }
     }
 
