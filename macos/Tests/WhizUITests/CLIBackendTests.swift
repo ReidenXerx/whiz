@@ -253,6 +253,37 @@ struct CLIBackendRunTests {
         #expect(artifacts.count == 1, "the flush after exit must emit the partial line")
         #expect(artifacts.first?.kind == .analysis)
     }
+
+    @Test("cancelling terminates the process instead of waiting it out")
+    func cancellationTerminates() async throws {
+        // A 30-second script must end promptly after cancel() — and surface
+        // as CancellationError, not as a bogus success (the script exits 0 if
+        // left alone) or as a failed(code:summary) the user would read as a
+        // pipeline problem. NS-4 makes degraded runs exit nonzero on
+        // purpose; a user stop is neither degraded nor a run.
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let script = directory.appendingPathComponent("whiz")
+        try "#!/bin/sh\nsleep 30\nexit 0\n".write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: script.path)
+
+        let backend = CLIBackend(executable: script)
+        let box = EventBox()
+        let started = Date()
+        let task = Task {
+            try await backend.run(
+                TranscriptionRequest(input: URL(fileURLWithPath: "/tmp/a.mp4")),
+                onEvent: { box.append($0) })
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        backend.cancel()
+        await #expect(throws: CancellationError.self) { try await task.value }
+        #expect(Date().timeIntervalSince(started) < 10,
+                "cancel() must terminate the script, not wait out its sleep")
+    }
 }
 
 /// Events arrive on the reader queue, so collection needs a lock.

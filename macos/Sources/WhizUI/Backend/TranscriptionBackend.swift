@@ -52,6 +52,8 @@ struct TranscriptionRequest: Equatable, Sendable {
 /// Anything that can run a transcription.
 ///
 /// The seam that keeps this package from caring whether whiz is a subprocess.
+/// When the shared core becomes C++ a second conformance replaces
+/// `CLIBackend` and the UI does not change.
 protocol TranscriptionBackend: Sendable {
     /// Run to completion, reporting progress through `onEvent`.
     ///
@@ -63,6 +65,20 @@ protocol TranscriptionBackend: Sendable {
         _ request: TranscriptionRequest,
         onEvent: @escaping @Sendable (TranscriptionEvent) -> Void
     ) async throws
+
+    /// Ask the run to stop at the next safe point.
+    ///
+    /// `run` then throws `CancellationError` rather than
+    /// `TranscriptionFailure`: a stop is a stop, not a degraded run (NS-4).
+    /// Not throwing at all — finishing normally where it was — is acceptable;
+    /// the caller treats cancellation and completion alike for cleanup.
+    func cancel()
+}
+
+extension TranscriptionBackend {
+    /// Backends that cannot force a stop (an in-process core stops through
+    /// Swift task cancellation instead) get a no-op.
+    func cancel() {}
 }
 
 enum TranscriptionFailure: LocalizedError, Equatable {
