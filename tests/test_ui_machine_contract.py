@@ -130,3 +130,32 @@ def test_every_artifact_label_still_exists_in_the_cli():
     assert not missing, (
         f"artifact labels the UI parses no longer emitted by cli.py: {sorted(missing)}"
     )
+
+
+def test_transcribe_parses_the_argv_the_ui_sends():
+    """The flags the native UI builds must exist on the real parser.
+
+    The Swift side pins its argv against stub scripts, which cannot notice a
+    flag the CLI does not define: the first revision of the UI sent
+    `--ai-model` before `whiz transcribe` had it, and every UI run with an
+    analysis model died at spawn with argparse exit 2. Only the real parser
+    is the contract.
+    """
+    from whiz.cli import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "transcribe", "/tmp/a.mp4",
+            "--language", "ru",
+            "--speakers", "3",
+            "--no-screenshots",
+            "--analyze",
+            "--ai-model", "qwen3.5:9b",
+        ]
+    )
+    assert args.language == "ru"
+    assert args.speakers == 3
+    assert args.no_screenshots is True
+    assert args.analyze is True
+    assert args.ai_model == "qwen3.5:9b"
