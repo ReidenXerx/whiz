@@ -3,6 +3,7 @@
 Subcommands:
   whiz transcribe <file>   Transcribe an audio/video file.
     --analyze              Chain into AI analysis after transcription.
+    --ai-model NAME        AI model for the chained analysis (default: config).
   whiz merge <file>        Re-run diarization + merge against an existing JSON.
   whiz models list         Show discovered models.
   whiz models download N   Download a model from HuggingFace.
@@ -1343,7 +1344,10 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
         from types import SimpleNamespace
         analyze_args = SimpleNamespace(
             file=str(in_path),
-            model="",
+            # --ai-model (the native-UI flag) rides along as the analyze
+            # subcommand's --model; getattr keeps hand-built Namespaces in
+            # tests working when the flag is absent.
+            model=getattr(args, "ai_model", "") or "",
             base_url="",
             api_key=None,
             max_frames=None,
@@ -2422,6 +2426,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--analyze", action="store_true", help="After transcription, run AI analysis (auto-detect: summary+actions or implementation plan). Equivalent to a follow-up `whiz analyze <file>`. For video inputs this auto-enables vision when the AI model is vision-capable.")
     t.add_argument("--vision", action="store_true", help="With --analyze, force sending on-screen frames to a vision model (auto-enabled for video when the model is vision-capable; this flag forces it on for audio/non-video runs)")
     t.add_argument("--no-vision", dest="no_vision", action="store_true", help="With --analyze, opt out of the auto-enabled vision analysis (stay text-only even for a video with frames)")
+    t.add_argument("--ai-model", dest="ai_model", default="", help="With --analyze, the AI model for the chained analysis (default: config ai_model, e.g. llava, qwen3.5:9b). Mirrors --model on `whiz analyze`; the native macOS UI passes it.")
     t.set_defaults(func=cmd_transcribe)
 
     # merge
