@@ -17,7 +17,7 @@ propose diffs, never edit silently.
 ## Settled — decided, do not relitigate
 
 - **NS-7** — The split (2026-09): whiz is a transcription CLI; dictation (engine, tuning contract, golden corpus, Swift app, whisper.cpp submodule) moved to mynah with its history. `whiz dictate` remains a nonzero-exit pointer for a release or two; `dictate_*` keys stay readable until Mynah imports them. Do not re-propose re-merging the products. — src: commit a92c8d3, README.md
-- **NS-8** — The dictation segmentation stars (old NS-1..NS-6, NS-9..NS-14: tuning contract, golden corpus, cross-implementation divergences, poisoned-calibration fix) moved with the product to mynah. whiz does not segment audio at session speed; its pipeline is batch (whisper-cli VAD + sherpa-onnx diarization). If those stars are wanted in mynah — especially against its C++ rework — they should be ported THERE, not kept here as dead letters. — src: mynah/tuning/tuning.toml (byte-equal values at split)
+- **NS-8** — The dictation segmentation stars (old NS-1..NS-6, NS-9..NS-14: tuning contract, golden corpus, cross-implementation divergences, poisoned-calibration fix) moved with the product to mynah. whiz does not segment audio at session speed; its pipeline is batch (whisper-cli VAD + sherpa-onnx diarization). The port was carried out 2026-09-30: mynah `.bearing/northstars.md` now holds them under the OLD numbering (mynah PR #1) — old numbers kept deliberately, because mynah code (engine.py, TranscriptFilter.swift, WhisperModel.swift, ModelDownloader.swift) and its C++ branch (core/src/models/resolve.hpp, core/tests/test_filter.cpp) already cite NS-6/NS-15 by number. Stars with no mynah code (this repo's NS-2..NS-5, NS-9) stay HERE as whiz invariants; do not duplicate them there. — src: mynah/tuning/tuning.toml (byte-equal values at split), ReidenXerx/mynah PR #1
 
 ## Graveyard — tried and rejected / validated
 
@@ -26,4 +26,4 @@ propose diffs, never edit silently.
 
 ## Open — explicitly unresolved (do NOT assume either way)
 
-- Whether the C++ mynah rework should port the segmentation north-stars (NS-1..NS-6 old numbering) into that repo — outside whiz's scope; flagged for the mynah track, not decided here.
+(none — the mynah port question resolved 2026-09-30, see NS-8)
