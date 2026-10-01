@@ -169,6 +169,12 @@ struct MainView: View {
                     .help("0 = the CLI decides (auto-detect for video).")
             }
             HStack(spacing: 4) {
+                Text("Names").foregroundStyle(.secondary)
+                TextField("Alice,Bob,Carol", text: $model.speakerNames)
+                    .frame(width: 110)
+                    .help("Comma-separated names, assigned by total talk time (most talkative first). Sent as --speakers-names. Leave empty to let the CLI keep default labels or auto-name from your voice profiles.")
+            }
+            HStack(spacing: 4) {
                 Text("Frames").foregroundStyle(.secondary)
                 Picker("", selection: $model.screenshots) {
                     ForEach(ScreenshotsMode.allCases) { mode in

@@ -17,6 +17,10 @@ final class TranscriptionViewModel: ObservableObject {
     /// 0 = auto-detect; the CLI is better placed to decide for video input,
     /// which auto-enables diarization on its own.
     @Published var speakers = 0
+    /// Names for the CLI's `--speakers-names`: comma-separated, assigned by
+    /// total talk time (most talkative first). Empty = keep default labels —
+    /// the CLI still auto-names from voice profiles when it can.
+    @Published var speakerNames = ""
     @Published var screenshots: ScreenshotsMode = .auto
     @Published var analyze = false
     /// Only sent when `analyze` is on and the field is non-empty — an empty
@@ -94,6 +98,8 @@ final class TranscriptionViewModel: ObservableObject {
         var request = TranscriptionRequest(input: input)
         request.language = language.isEmpty ? nil : language
         request.speakers = speakers > 0 ? speakers : nil
+        request.speakerNames = speakerNames.trimmingCharacters(in: .whitespaces).isEmpty
+            ? nil : speakerNames
         request.screenshots = screenshots.requestValue
         request.analyze = analyze
         request.aiModel = (analyze && !aiModel.isEmpty) ? aiModel : nil

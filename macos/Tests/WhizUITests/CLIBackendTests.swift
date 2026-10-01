@@ -91,12 +91,14 @@ struct CLIArgumentTests {
         var request = TranscriptionRequest(input: URL(fileURLWithPath: "/tmp/a.mp4"))
         request.language = "ru"
         request.speakers = 3
+        request.speakerNames = "Alice,Bob,Carol"
         request.screenshots = false
         request.analyze = true
         request.aiModel = "qwen3.5:9b"
         let argv = CLIBackend.arguments(for: request)
         #expect(argv.firstIndex(of: "--language").map { argv[$0 + 1] } == "ru")
         #expect(argv.firstIndex(of: "--speakers").map { argv[$0 + 1] } == "3")
+        #expect(argv.firstIndex(of: "--speakers-names").map { argv[$0 + 1] } == "Alice,Bob,Carol")
         #expect(argv.contains("--no-screenshots"))
         #expect(argv.contains("--analyze"))
         #expect(argv.firstIndex(of: "--ai-model").map { argv[$0 + 1] } == "qwen3.5:9b")
@@ -110,6 +112,15 @@ struct CLIArgumentTests {
         var request = TranscriptionRequest(input: URL(fileURLWithPath: "/tmp/a.mp4"))
         request.speakers = 0
         #expect(!CLIBackend.arguments(for: request).contains("--speakers"))
+    }
+
+    @Test("an empty speaker-names field sends no flag, not an empty name")
+    func emptyNamesMeansAuto() {
+        // Empty means "CLI decides" for every field; a literal empty-string
+        // name would clobber a real speaker's label.
+        var request = TranscriptionRequest(input: URL(fileURLWithPath: "/tmp/a.mp4"))
+        request.speakerNames = ""
+        #expect(!CLIBackend.arguments(for: request).contains("--speakers-names"))
     }
 }
 

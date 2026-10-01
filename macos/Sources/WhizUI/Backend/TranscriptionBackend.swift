@@ -44,6 +44,10 @@ struct TranscriptionRequest: Equatable, Sendable {
     var input: URL
     var language: String?
     var speakers: Int?
+    /// Speaker names for the CLI's `--speakers-names`, comma-separated in
+    /// one token (the CLI flattens either form). Assigned by total talk time,
+    /// most talkative first; extra speakers keep their default label.
+    var speakerNames: String?
     var screenshots: Bool?
     var analyze: Bool = false
     var aiModel: String?
