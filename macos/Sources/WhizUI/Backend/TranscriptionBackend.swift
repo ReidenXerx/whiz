@@ -14,6 +14,22 @@ enum TranscriptionEvent: Equatable, Sendable {
     case log(String)
     /// An artifact landed on disk.
     case artifact(Artifact)
+    /// The run is asking the user to name a speaker. Backends must answer it
+    /// through the channel their UI holds (the CLI's stdin); the CLI treats
+    /// '-' as "keep the default label", even over a suggestion.
+    case speakerName(SpeakerNamePrompt)
+}
+
+/// One naming question from the run: which speaker, what it said, and the
+/// name the CLI would suggest — a voice-profile auto-match or a
+/// `--speakers-names` default. Submitting the suggestion counts as a human
+/// confirmation of it.
+struct SpeakerNamePrompt: Equatable, Sendable, Identifiable {
+    var id: String { label }
+    var label: String
+    var quote: String
+    /// Empty when nothing suggests a name — the speaker is simply unknown.
+    var suggestion: String
 }
 
 /// A file a run produced, named the way the CLI announced it.
@@ -44,6 +60,10 @@ struct TranscriptionRequest: Equatable, Sendable {
     var input: URL
     var language: String?
     var speakers: Int?
+    /// Speaker names for the CLI's `--speakers-names`, comma-separated in
+    /// one token (the CLI flattens either form). Assigned by total talk time,
+    /// most talkative first; extra speakers keep their default label.
+    var speakerNames: String?
     var screenshots: Bool?
     var analyze: Bool = false
     var aiModel: String?
@@ -66,6 +86,10 @@ protocol TranscriptionBackend: Sendable {
         onEvent: @escaping @Sendable (TranscriptionEvent) -> Void
     ) async throws
 
+    /// Answer a `speakerName` event. Each pending prompt is answered once;
+    /// answering one nobody asked is a no-op.
+    func answerSpeakerName(_ answer: String, for prompt: SpeakerNamePrompt)
+
     /// Ask the run to stop at the next safe point.
     ///
     /// `run` then throws `CancellationError` rather than
@@ -79,6 +103,10 @@ extension TranscriptionBackend {
     /// Backends that cannot force a stop (an in-process core stops through
     /// Swift task cancellation instead) get a no-op.
     func cancel() {}
+
+    /// Backends that ask through some other channel (or never ask) get a
+    /// no-op.
+    func answerSpeakerName(_ answer: String, for prompt: SpeakerNamePrompt) {}
 }
 
 enum TranscriptionFailure: LocalizedError, Equatable {

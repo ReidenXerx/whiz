@@ -3,10 +3,12 @@ import Foundation
 /// Runs the `whiz` CLI and turns its output into `TranscriptionEvent`s.
 ///
 /// The CLI is the contract. `whiz/ui.py` degrades to escape-free plain text
-/// when stderr is not a TTY, and two of those line shapes are machine-readable:
+/// when stderr is not a TTY, and three of those line shapes are
+/// machine-readable:
 ///
 ///     ▸ <phase label>
 ///     ✓ <artifact label>: <path>
+///     ? speaker-name: <label> | <quote>[ | <suggested name>]
 ///
 /// Those shapes are pinned by `tests/test_ui_machine_contract.py` on the Python
 /// side, so an edit to `ui.wrote` that would break this parser fails a test
@@ -30,6 +32,7 @@ final class CLIBackend: TranscriptionBackend, @unchecked Sendable {
     /// stated in exactly one place on this side too.
     private static let phaseMarker = "▸ "
     private static let artifactMarker = "✓ "
+    private static let speakerNameMarker = "? speaker-name: "
 
     /// The live process and the cancelled flag — see `ProcessState`.
     private let state = ProcessState()
@@ -60,6 +63,13 @@ final class CLIBackend: TranscriptionBackend, @unchecked Sendable {
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
+        // The CLI names speakers over stdin. A Pipe never EOFs until closed,
+        // so a piped run that asks and receives no answer blocks forever
+        // inside `input()` — the stdin side stays OPEN while the run is live
+        // and answers arrive the moment the user gives one. A run that never
+        // asks is unaffected: it never reads stdin.
+        let stdinPipe = Pipe()
+        process.standardInput = stdinPipe
         // No TTY on a pipe, which is exactly what selects ui.py's plain-text
         // branch — the parser below depends on that.
         process.environment = ProcessInfo.processInfo.environment
@@ -73,6 +83,7 @@ final class CLIBackend: TranscriptionBackend, @unchecked Sendable {
 
         try process.run()
         state.setProcess(process)
+        state.setStdin(stdinPipe.fileHandleForWriting)
         // A cancel() that landed between entry and the spawn has no process to
         // terminate; honour it now rather than letting the run finish anyway.
         if state.isCancelled, process.isRunning {
@@ -85,6 +96,7 @@ final class CLIBackend: TranscriptionBackend, @unchecked Sendable {
         }
         pipe.fileHandleForReading.readabilityHandler = nil
         collector.flush()
+        state.setStdin(nil)
 
         // A cancelled run is a stop, not a failure: NS-4 makes a degraded run
         // exit nonzero on purpose, and conflating the two would report "the
@@ -108,6 +120,14 @@ final class CLIBackend: TranscriptionBackend, @unchecked Sendable {
         state.cancel()
     }
 
+    /// Answer a pending speaker-naming prompt by writing one line to the CLI's
+    /// stdin. The prompt's own answer semantics live in the CLI: a name names
+    /// the speaker, an empty line confirms the suggestion, and '-' declines
+    /// it, keeping the default label.
+    func answerSpeakerName(_ answer: String, for prompt: SpeakerNamePrompt) {
+        state.writeLine(answer + "\n")
+    }
+
     /// Build the argv for a request.
     ///
     /// Only flags the UI actually exposes. Anything omitted keeps the CLI's own
@@ -121,6 +141,11 @@ final class CLIBackend: TranscriptionBackend, @unchecked Sendable {
         }
         if let speakers = request.speakers, speakers > 0 {
             argv += ["--speakers", String(speakers)]
+        }
+        // One comma-joined token: the CLI flattens either form, and a single
+        // token keeps argv readable in the log.
+        if let names = request.speakerNames, !names.isEmpty {
+            argv += ["--speakers-names", names]
         }
         if let screenshots = request.screenshots {
             argv.append(screenshots ? "--screenshots" : "--no-screenshots")
@@ -154,6 +179,25 @@ final class CLIBackend: TranscriptionBackend, @unchecked Sendable {
             guard !path.isEmpty else { return nil }
             return .artifact(Artifact(label: label, url: URL(fileURLWithPath: path)))
         }
+        if line.hasPrefix(speakerNameMarker) {
+            let body = String(line.dropFirst(speakerNameMarker.count))
+            // Segments are joined on " | ": label | quote [| suggestion].
+            // The emitter substitutes a lookalike glyph (U+01C0) for " | "
+            // inside fields, so no field can contain the separator; taking
+            // the label before the FIRST and the suggestion after the LAST
+            // is exact, and a separator-shaped quote cannot tear the line.
+            guard let labelRange = body.range(of: " | ") else { return nil }
+            let label = String(body[..<labelRange.lowerBound])
+            var quote = String(body[labelRange.upperBound...])
+            guard !label.isEmpty, !quote.isEmpty else { return nil }
+            var suggestion = ""
+            if let suggestionRange = quote.range(of: " | ", options: .backwards) {
+                suggestion = String(quote[suggestionRange.upperBound...])
+                quote = String(quote[..<suggestionRange.lowerBound])
+            }
+            return .speakerName(SpeakerNamePrompt(
+                label: label, quote: quote, suggestion: suggestion))
+        }
         return nil
     }
 }
@@ -167,12 +211,31 @@ final class CLIBackend: TranscriptionBackend, @unchecked Sendable {
 private final class ProcessState: @unchecked Sendable {
     private let lock = NSLock()
     private var process: Process?
+    private var stdin: FileHandle?
     private var cancelled = false
 
     func setProcess(_ process: Process?) {
         lock.lock()
         defer { lock.unlock() }
         self.process = process
+    }
+
+    func setStdin(_ handle: FileHandle?) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.stdin = handle
+    }
+
+    /// Write one answer line. A closed handle (the run ended between the
+    /// prompt arriving and the user answering) silently no-ops — the CLI's
+    /// own EOF path keeps the default label. `write(_:)` is the non-throwing
+    /// legacy API on this SDK; a throwing call would need `try`, but there
+    /// is nothing to recover from on a dead pipe.
+    func writeLine(_ text: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let stdin else { return }
+        stdin.write(text.data(using: .utf8) ?? Data())
     }
 
     var isCancelled: Bool {

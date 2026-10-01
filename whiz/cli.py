@@ -645,36 +645,67 @@ def _apply_speaker_names_list(
 def _prompt_speaker_names(
     merged: list[tuple[MR.WhisperSeg, str]],
     default_names: dict[str, str] | None = None,
-) -> dict[str, str]:
+) -> dict[str, str | None]:
     """Interactively ask the user to name each detected speaker.
 
     Shows one representative quote per speaker (the longest utterance) and
-    prompts for a real name. Returns a {"Speaker A": "Alice", ...} map.
-    Blank input keeps the default label. When ``default_names`` is supplied
-    (from ``--speakers-names``), the suggested name is shown in the prompt
-    and used as the value if the user presses Enter.
+    prompts for a real name. Returns a ``{"Speaker A": "Alice", ...}`` map
+    whose values may be None: None is the explicit decline from an answer
+    of ``-``, and the caller must DROP any name the label already carries —
+    the default_names here are suggestions, and an auto-match seeded before
+    the prompt would otherwise survive a rejection of it. Blank input keeps
+    the default label; when ``default_names`` is supplied (from
+    ``--speakers-names`` or a voice-profile auto-match), the suggested name
+    is shown in the prompt and used as the value if the user presses Enter.
+
+    The prompt works unchanged over a pipe (the macOS UI's world): each
+    question is emitted as a ``? speaker-name:`` machine line by
+    ``ui.speaker_prompt`` and the answer is read from stdin with ``input()`` —
+    a UI holding the pipe open answers it by writing one line per question.
+    The ``input()`` prompt TEXT is TTY-only: on a pipe it would echo to
+    stdout (flushed, unterminated) and corrupt the merged stream the UI
+    parses — see the loop body. An answer of ``-`` declines: the default
+    label is kept even when a suggestion exists (a UI needs a way to reject
+    a wrong voice-profile auto-match; confirming it would merge the wrong
+    name into the profile as user-confirmed).
     """
     speakers = MR.speakers_in_order(merged)
     quotes = MR.representative_quotes(merged)
-    name_map: dict[str, str] = {}
+    name_map: dict[str, str | None] = {}
     ui.header("whiz", "name the speakers")
-    ui.muted("A representative quote is shown for each. Enter a real name")
-    ui.muted("(or press Enter to keep the default).")
+    ui.muted("A representative quote is shown for each. Type a real name, or")
+    ui.muted("press Enter to accept the suggestion; '-' keeps the default label.")
     for label in speakers:
         quote = quotes.get(label, "(no quote)")
         suggestion = (default_names or {}).get(label)
         ui.note("")
-        ui.speaker_label_line(label)
-        ui.muted(f'  "{quote}"')
+        # One call renders both worlds: the TTY's colored label + quote, or
+        # the piped machine line the UI turns into its naming bar.
+        ui.speaker_prompt(label, quote, suggestion)
         prompt_text = f"Name for {label}"
         if suggestion:
             prompt_text = f"Name for {label} [{suggestion}]"
+        # TTY-only prompt text. Over a pipe, input() echoes its prompt to
+        # stdout — flushed, no trailing newline — and the UI merges stdout
+        # and stderr into one stream, so that echo would glue itself onto
+        # the NEXT ? speaker-name: machine line and the run would deadlock
+        # waiting on an answer the UI never saw. The machine line already
+        # told the UI everything; stdin stays the answer channel either way.
+        displayed = prompt_text + ": " if sys.stdin.isatty() else ""
         try:
-            name = input(prompt_text + ": ").strip()
+            name = input(displayed).strip()
         except (EOFError, KeyboardInterrupt):
             print(file=sys.stderr)
             break
-        if name:
+        # '-' declines: keep the default label even when a suggestion
+        # exists. Without it there is no way to reject a wrong voice-profile
+        # auto-match — every 'no name' answer would confirm it, upgrading
+        # the wrong match to user-confirmed and merging it into the profile.
+        # None (not a missing key) so the caller can tell "explicitly
+        # rejected" from "never asked" and drop any seeded auto-match.
+        if name == "-":
+            name_map[label] = None
+        elif name:
             name_map[label] = name
         elif suggestion:
             name_map[label] = suggestion
@@ -848,7 +879,9 @@ def _write_labeled_outputs(
     2. ``--speakers-names`` supplies a non-interactive list (assigned by total
        talk time) that overrides profile matches.
     3. ``--name-speakers`` then prompts interactively, with the combined names
-       shown as defaults.
+       shown as defaults. An answer of '-' declines: the label's name is
+       removed entirely (sources 1 and 2 included) and the default
+       ``Speaker X`` label stays.
 
     When ``save_profiles`` is True and ``cluster_embeddings`` is provided, a
     voice profile is saved for each speaker that ended up with a real name
@@ -880,9 +913,18 @@ def _write_labeled_outputs(
     # 3. Interactive prompt overrides/augments when both are given.
     if name_speakers and merged:
         interactive_map = _prompt_speaker_names(merged, default_names=name_map or None)
-        if interactive_map:
-            name_map.update(interactive_map)
-            auto_labels.difference_update(interactive_map)
+        for label, name in interactive_map.items():
+            if name is None:
+                # '-': an explicit decline — the label keeps its default
+                # letter even over an auto-match or --speakers-names name,
+                # and no voice profile is saved for it. A plain update()
+                # would leave the rejected auto-match in place.
+                name_map.pop(label, None)
+            else:
+                # Any human answer — including Enter confirming the
+                # suggestion — upgrades provenance (M3): out of auto_labels.
+                name_map[label] = name
+            auto_labels.discard(label)
     # Apply the combined names to the merged list so labels reflect every
     # source (profile matches alone wouldn't relabel otherwise).
     if name_map and merged:
@@ -1616,7 +1658,17 @@ def _pick_model_interactive(config: cfg.Config, *, prefer_vision: bool) -> str |
     # Loop until the user picks a live model (or accepts the live default).
     while True:
         try:
-            choice = input(f"Choose a model [1-{len(models)}] (default {rec_idx + 1} = {default_name}): ").strip()
+            # Same pipe discipline as the speaker prompt: input() echoes a
+            # non-empty prompt to stdout when stdin is not a TTY, and a piped
+            # caller (the native UI) merges both streams into one log — the
+            # echo would glue itself onto whatever line follows and corrupt
+            # it. Over a pipe there is nothing to read the echo anyway.
+            displayed = (
+                f"Choose a model [1-{len(models)}] "
+                f"(default {rec_idx + 1} = {default_name}): "
+                if sys.stdin.isatty() else ""
+            )
+            choice = input(displayed).strip()
         except EOFError:
             choice = ""
         if not choice:

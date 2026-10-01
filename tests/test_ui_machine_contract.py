@@ -3,28 +3,32 @@
 `ui.py` deliberately degrades to escape-free plain text when stderr is not a
 TTY — that branch exists so logs and redirects stay clean. The macOS app turns
 that into an interface: it runs the `whiz` CLI as a subprocess and reads the
-two line shapes below to drive its progress view and to learn which artifacts a
-run produced.
+three line shapes below to drive its progress view, to learn which artifacts
+a run produced, and to answer the run's speaker-naming questions.
 
 Nothing pinned those shapes before. A reasonable-looking edit to `ui.wrote`
 (dropping the colon, reordering label and path, switching the marker) would
-leave every Python test green and silently break the UI, which has no way to
-notice beyond showing no artifacts. These tests are the pin.
+leave every Python test green and silently break the UI, which has no way
+to notice beyond showing no artifacts. These tests are the pin.
 
-The contract is deliberately narrow — two prefixes and a separator — so the
-prose inside a label stays free to change:
+The contract is deliberately narrow — three prefixes and a separator — so
+the prose inside a label stays free to change:
 
     ▸ <phase label>
     ✓ <artifact label>: <path>
+    ? speaker-name: <label> | <quote>[ | <suggestion>]
 """
 
 from __future__ import annotations
 
 import io
+import os
 import re
+import sys
 
 import pytest
 
+from whiz import cli
 from whiz import ui
 
 
@@ -159,3 +163,172 @@ def test_transcribe_parses_the_argv_the_ui_sends():
     assert args.no_screenshots is True
     assert args.analyze is True
     assert args.ai_model == "qwen3.5:9b"
+
+
+def test_speaker_prompt_emits_question_marker_label_quote_suggestion(piped):
+    """`? speaker-name: <label> | <quote>[ | <suggestion>]` — how the UI learns
+    the run wants a speaker named, and what it would suggest.
+
+    Third machine line after ▸ and ✓. The suggestion is a voice-profile
+    auto-match: the UI pre-fills it, and writing it back is a human
+    confirmation (M3 provenance).
+    """
+    ui.speaker_prompt("Speaker A", "hello world", "Alice")
+    line = piped.read().strip()
+    assert line.startswith("? speaker-name: "), f"prompt marker changed: {line!r}"
+    body = line[len("? speaker-name: "):]
+    parts = body.split(" | ")
+    assert parts[0] == "Speaker A"
+    assert parts[1] == "hello world"
+    assert parts[2] == "Alice"
+
+
+def test_speaker_prompt_without_suggestion_has_no_third_segment(piped):
+    """An unknown speaker is two segments — an empty trailing ' | ' would
+    parse as a suggestion of "".
+    """
+    ui.speaker_prompt("Speaker B", "some words", None)
+    body = piped.read().strip()[len("? speaker-name: "):]
+    assert body == "Speaker B | some words"
+
+
+def test_speaker_prompt_substitutes_the_separator_inside_fields(piped):
+    """A quote containing the separator itself cannot tear the line's field
+    structure: every field has ' | ' substituted with the lookalike U+01C0
+    stroke (visually identical to a pipe), so the UI's split — label before
+    the first separator, suggestion after the last — is exact for any
+    speech. The exact body is pinned: this is the emit side, and the literal
+    IS the contract.
+    """
+    ui.speaker_prompt("Speaker A", "he said ' | ' out loud", "Bob")
+    body = piped.read().strip()[len("? speaker-name: "):]
+    assert body == "Speaker A | he said ' ǀ ' out loud | Bob"
+
+
+def test_prompted_name_answer_flows_through_stdin_pipe(monkeypatch):
+    """The piped prompt's whole reason to exist: a UI holding the pipe answers
+    it by writing one line per question, exactly as the macOS naming bar does
+    — through the REAL input() and a REAL pipe, not a monkeypatched stand-in
+    (GP-1: a claim from reading is unverified).
+    """
+    merged = [
+        (cli.MR.WhisperSeg(start=0.0, end=2.0, text="hello there"), "Speaker A"),
+        (cli.MR.WhisperSeg(start=2.0, end=4.0, text="general kenobi"), "Speaker B"),
+    ]
+
+    read_fd, write_fd = os.pipe()
+    try:
+        monkeypatch.setattr(sys, "stdin", os.fdopen(read_fd, "r"))
+        # Non-TTY stdin is the machine world; the `piped` fixture covers
+        # ui.speaker_prompt's renderer, this drives the prompt LOOP.
+        monkeypatch.setattr(ui, "_is_tty", lambda: False)
+        os.write(write_fd, b"Alice\n")
+        os.write(write_fd, b"\n")  # second speaker: Enter keeps the default
+        os.close(write_fd)
+
+        name_map = cli._prompt_speaker_names(merged)
+    finally:
+        sys.stdin.close()
+
+    assert name_map == {"Speaker A": "Alice"}
+
+
+def test_piped_enter_confirms_the_suggestion(monkeypatch):
+    """M3 provenance over the pipe: an empty answer CONFIRMS the suggested
+    name — pressing Enter on a voice-profile match is a human confirmation,
+    exactly as on a TTY. This is the upgrade path auto-matches rely on.
+    """
+    merged = [
+        (cli.MR.WhisperSeg(start=0.0, end=2.0, text="hello there"), "Speaker A"),
+    ]
+    read_fd, write_fd = os.pipe()
+    try:
+        monkeypatch.setattr(sys, "stdin", os.fdopen(read_fd, "r"))
+        monkeypatch.setattr(ui, "_is_tty", lambda: False)
+        os.write(write_fd, b"\n")  # just Enter
+        os.close(write_fd)
+
+        name_map = cli._prompt_speaker_names(
+            merged, default_names={"Speaker A": "Alice"})
+    finally:
+        sys.stdin.close()
+
+    assert name_map == {"Speaker A": "Alice"}
+
+
+def test_decline_sentinel_beats_the_suggestion(monkeypatch):
+    """'-' declines: the answer is None — the signal the caller must read as
+    "drop any name this label already has". Without it the GUI could not
+    reject a WRONG voice-profile auto-match — every 'no name' answer would
+    confirm it, merging the wrong name into the profile as user-confirmed
+    where it would stick for every future run.
+    """
+    merged = [
+        (cli.MR.WhisperSeg(start=0.0, end=2.0, text="hello there"), "Speaker A"),
+    ]
+    read_fd, write_fd = os.pipe()
+    try:
+        monkeypatch.setattr(sys, "stdin", os.fdopen(read_fd, "r"))
+        monkeypatch.setattr(ui, "_is_tty", lambda: False)
+        os.write(write_fd, b"-\n")
+        os.close(write_fd)
+
+        name_map = cli._prompt_speaker_names(
+            merged, default_names={"Speaker A": "WrongName"})
+    finally:
+        sys.stdin.close()
+
+    assert name_map == {"Speaker A": None}
+
+
+def test_piped_prompt_writes_no_stdout_echo(monkeypatch, capsys):
+    """The deadlock half of the contract: with piped stdin, the prompt loop
+    must write its prompt text NOWHERE. input() echoes a non-empty prompt to
+    stdout — flushed, without a trailing newline — and the UI merges stdout
+    and stderr into one stream, so the echo would glue itself onto the next
+    ? speaker-name: machine line and the run would block on an answer the UI
+    never saw. On a TTY the echo IS the prompt; over a pipe the machine line
+    is.
+    """
+    merged = [
+        (cli.MR.WhisperSeg(start=0.0, end=2.0, text="hello there"), "Speaker A"),
+    ]
+
+    read_fd, write_fd = os.pipe()
+    try:
+        monkeypatch.setattr(sys, "stdin", os.fdopen(read_fd, "r"))
+        monkeypatch.setattr(ui, "_is_tty", lambda: False)
+        os.close(write_fd)  # EOF at the first question: the loop breaks
+
+        cli._prompt_speaker_names(merged)
+    finally:
+        sys.stdin.close()
+
+    captured = capsys.readouterr()
+    assert "Name for Speaker A" not in captured.out, (
+        "piped stdin must not echo the prompt to stdout — it corrupts the merged stream"
+    )
+    assert "Name for Speaker A" not in captured.err
+
+
+def test_prompt_loop_ends_on_eof_over_pipe(monkeypatch):
+    """The UI went away (stopped run, killed app): its end of the pipe closes
+    and the CLI reads EOF mid-question. The loop must end — never hang — with
+    no half-answered state.
+    """
+    merged = [
+        (cli.MR.WhisperSeg(start=0.0, end=2.0, text="hello there"), "Speaker A"),
+        (cli.MR.WhisperSeg(start=2.0, end=4.0, text="general kenobi"), "Speaker B"),
+    ]
+
+    read_fd, write_fd = os.pipe()
+    try:
+        monkeypatch.setattr(sys, "stdin", os.fdopen(read_fd, "r"))
+        monkeypatch.setattr(ui, "_is_tty", lambda: False)
+        os.close(write_fd)  # EOF at the first question
+
+        name_map = cli._prompt_speaker_names(merged)
+    finally:
+        sys.stdin.close()
+
+    assert name_map == {}

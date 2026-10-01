@@ -17,6 +17,10 @@ final class TranscriptionViewModel: ObservableObject {
     /// 0 = auto-detect; the CLI is better placed to decide for video input,
     /// which auto-enables diarization on its own.
     @Published var speakers = 0
+    /// Names for the CLI's `--speakers-names`: comma-separated, assigned by
+    /// total talk time (most talkative first). Empty = keep default labels —
+    /// the CLI still auto-names from voice profiles when it can.
+    @Published var speakerNames = ""
     @Published var screenshots: ScreenshotsMode = .auto
     @Published var analyze = false
     /// Only sent when `analyze` is on and the field is non-empty — an empty
@@ -34,12 +38,52 @@ final class TranscriptionViewModel: ObservableObject {
     /// True when whiz could not be located — the views then show install
     /// guidance instead of letting the user press Transcribe into a wall.
     @Published private(set) var whizMissing = false
+    /// The last finished run's artifacts, loaded from `LastRunStore` so a
+    /// fresh window can offer the previous run's results instead of looking
+    /// empty. A window that has run something shows its own artifacts; this
+    /// is the fresh-window state (see MainView's empty state).
+    @Published private(set) var lastRun: LastRunRecord?
+    /// What the control bar's status chip says about the last run in THIS
+    /// window: running, or how it ended. A window shows its own run; the
+    /// persisted record above is what fresh windows see.
+    @Published private(set) var lastOutcome: RunOutcome?
+    /// When the current run started — drives the running clock.
+    @Published private(set) var runStartedAt: Date?
+    /// How long the last run took, in seconds. Recorded for every ending,
+    /// including stops and failures.
+    @Published private(set) var lastDuration: Double?
+    /// The speaker-naming prompt the run is currently waiting on, if any.
+    /// Prompts arrive one at a time (the CLI asks sequentially); answering
+    /// releases the run to continue.
+    @Published private(set) var pendingSpeakerPrompt: SpeakerNamePrompt?
 
     /// The log pane is a transcript, not a ledger: keep the tail.
     static let logLineCap = 400
 
+    /// Human clock for the status chip: `3:12`, `1:47:30`. Zero-pads seconds,
+    /// shows hours only when hours exist, and clamps a clock-skewed negative
+    /// to zero rather than printing nonsense.
+    static func formatDuration(_ seconds: Double) -> String {
+        let total = max(Int(seconds.rounded()), 0)
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        let secs = total % 60
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, secs)
+        }
+        return String(format: "%d:%02d", minutes, secs)
+    }
+
     private var backend: CLIBackend?
     private var runTask: Task<Void, Never>?
+    /// Injectable for tests: a suite-backed store rather than the real
+    /// domain (see LastRunStore for why the real domain must stay untouched).
+    private let lastRunStore: LastRunStore
+
+    init(lastRunStore: LastRunStore = LastRunStore()) {
+        self.lastRunStore = lastRunStore
+        lastRun = lastRunStore.load()
+    }
 
     var hasError: Bool { errorMessage != nil }
 
@@ -58,6 +102,8 @@ final class TranscriptionViewModel: ObservableObject {
         var request = TranscriptionRequest(input: input)
         request.language = language.isEmpty ? nil : language
         request.speakers = speakers > 0 ? speakers : nil
+        request.speakerNames = speakerNames.trimmingCharacters(in: .whitespaces).isEmpty
+            ? nil : speakerNames
         request.screenshots = screenshots.requestValue
         request.analyze = analyze
         request.aiModel = (analyze && !aiModel.isEmpty) ? aiModel : nil
@@ -68,6 +114,10 @@ final class TranscriptionViewModel: ObservableObject {
         artifacts = []
         errorMessage = nil
         backend = resolved
+        runStartedAt = Date()
+        lastDuration = nil
+        lastOutcome = .running
+        pendingSpeakerPrompt = nil
 
         // The backend reports events from the pipe's reader queue; a stream
         // moves them onto the main actor without polling. `onEvent` is only
@@ -79,19 +129,32 @@ final class TranscriptionViewModel: ObservableObject {
             let consumer = Task {
                 for await event in events { apply(event) }
             }
+            var outcome: RunOutcome = .finished
             do {
                 try await resolved.run(request) { continuation.yield($0) }
             } catch is CancellationError {
+                outcome = .stopped
                 appendLog("Stopped.")
             } catch let failure as TranscriptionFailure {
+                outcome = .failed
                 errorMessage = failure.errorDescription
             } catch {
+                outcome = .failed
                 errorMessage = error.localizedDescription
             }
             continuation.finish()
             await consumer.value
             isRunning = false
             phase = nil
+            lastOutcome = outcome
+            lastDuration = Date().timeIntervalSince(runStartedAt ?? Date())
+            // Persist the results only when the run actually produced
+            // something: a failed or stopped run keeps the previous record
+            // (saveReturning returns nil for empty lists), so a fresh
+            // window never advertises a run that wrote nothing.
+            if !artifacts.isEmpty {
+                lastRun = lastRunStore.saveReturning(artifacts: artifacts, input: input)
+            }
         }
     }
 
@@ -105,6 +168,17 @@ final class TranscriptionViewModel: ObservableObject {
         whizMissing = false
     }
 
+    /// Answer the pending speaker-naming prompt, unblocking the run. The
+    /// CLI's answer semantics apply: a name names the speaker, and '-' is
+    /// the decline sentinel — the default label is kept even when a
+    /// suggestion exists, which is how the UI rejects a wrong voice-profile
+    /// auto-match instead of confirming it.
+    func answerSpeakerName(_ name: String) {
+        guard let prompt = pendingSpeakerPrompt else { return }
+        backend?.answerSpeakerName(name, for: prompt)
+        pendingSpeakerPrompt = nil
+    }
+
     // MARK: - Events
 
     private func apply(_ event: TranscriptionEvent) {
@@ -115,6 +189,8 @@ final class TranscriptionViewModel: ObservableObject {
             appendLog(line)
         case .artifact(let artifact):
             artifacts.append(artifact)
+        case .speakerName(let prompt):
+            pendingSpeakerPrompt = prompt
         }
     }
 
@@ -124,6 +200,14 @@ final class TranscriptionViewModel: ObservableObject {
             logLines.removeFirst(logLines.count - Self.logLineCap)
         }
     }
+}
+
+/// How the last run in this window ended — the control bar's status chip.
+enum RunOutcome: Equatable, Sendable {
+    case running
+    case finished
+    case failed
+    case stopped
 }
 
 /// The tri-state behind the screenshots control: the CLI's own default for
@@ -142,6 +226,16 @@ enum ScreenshotsMode: String, CaseIterable, Identifiable {
         case .auto: return nil
         case .on: return true
         case .off: return false
+        }
+    }
+
+    /// Compact label for the segmented control — the raw values are whole
+    /// sentences meant for the old form's pickers.
+    var shortLabel: String {
+        switch self {
+        case .auto: return "Auto"
+        case .on: return "On"
+        case .off: return "Off"
         }
     }
 }

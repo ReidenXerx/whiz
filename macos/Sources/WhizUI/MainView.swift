@@ -1,32 +1,39 @@
 import SwiftUI
+import Combine
 import UniformTypeIdentifiers
 
-/// The single window: request form, run controls, log pane, artifacts.
+/// The single window: one control bar up top, the run below it.
 ///
-/// Layout stays plain on purpose — the log pane is the main character, because
-/// a transcription run is minutes of waiting and the verbatim output is the
-/// most honest progress indicator there is.
+/// The control bar answers the three questions a user actually asks —
+/// what file (the pill: click, ⌘O, or drop), what state (the status chip:
+/// live phase + elapsed while running, the outcome after), what to do
+/// (Transcribe / Stop) — and the options sit in one compact row under it.
+///
+/// The area below shows only what exists: log and artifacts during and after
+/// a run, the last run's card when idle. Never an empty pane pretending to
+/// be content. The log pane stays the main character, because a run is
+/// minutes of waiting and the verbatim output is the most honest progress
+/// indicator there is.
 struct MainView: View {
     @StateObject private var model = TranscriptionViewModel()
     @State private var showingPicker = false
+    /// Ticks once a second so the running chip's clock moves.
+    @State private var now = Date()
+    /// The name being typed into the naming bar. Re-initialized from the
+    /// prompt's suggestion so accepting a voice-profile match is one Enter.
+    @State private var nameDraft = ""
+    /// Focuses the naming bar's field the moment a prompt arrives.
+    @FocusState private var namingBarFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
-            Form {
-                inputSection
-                optionsSection
-                runSection
-            }
-            .formStyle(.grouped)
-
+            controlBar
             Divider()
-
-            if model.whizMissing {
-                missingWhizBanner
-            } else if model.artifacts.isEmpty && model.logLines.isEmpty {
-                emptyPane
-            } else {
-                outputSection
+            ZStack {
+                contentArea
+                if model.pendingSpeakerPrompt != nil {
+                    namingBar
+                }
             }
         }
         .navigationTitle("whiz — Transcribe")
@@ -52,94 +59,269 @@ struct MainView: View {
         }
     }
 
-    // MARK: - Form sections
+    // MARK: - Control bar
 
-    private var inputSection: some View {
-        Section("Input") {
-            HStack {
-                Button("Choose File…") { showingPicker = true }
-                    .disabled(model.isRunning)
-                Text(model.inputURL?.lastPathComponent ?? "No file selected")
-                    .foregroundStyle(model.inputURL == nil ? .secondary : .primary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(model.inputURL?.path ?? "")
-                Spacer()
-            }
-        }
-    }
-
-    private var optionsSection: some View {
-        Section("Options") {
-            TextField("Language (empty = auto)", text: $model.language)
-                .disabled(model.isRunning)
-            Stepper(
-                "Speakers \(model.speakers == 0 ? "(auto-detect)" : String(model.speakers))",
-                value: $model.speakers, in: 0...10
-            )
-            .disabled(model.isRunning)
-            Picker("Screenshots", selection: $model.screenshots) {
-                ForEach(ScreenshotsMode.allCases) { mode in
-                    Text(mode.rawValue).tag(mode)
+    private var controlBar: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 10) {
+                inputPill
+                if model.lastOutcome != nil {
+                    statusChip
                 }
+                Spacer(minLength: 0)
+                runControls
             }
-            .pickerStyle(.segmented)
-            .disabled(model.isRunning)
-            Toggle("Analyze after transcription (--analyze)", isOn: $model.analyze)
-                .disabled(model.isRunning)
-            if model.analyze {
-                TextField("AI model (empty = config)", text: $model.aiModel)
-                    .disabled(model.isRunning)
-                    .help("Sent as --ai-model. Configure the default with: whiz config set ai_model=…")
-            }
+            optionsRow
         }
+        .padding(12)
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { now = $0 }
+        // A keyboard shortcut needs a button to live on; this one is invisible.
+        .background(
+            Button("Choose File…") { showingPicker = true }
+                .keyboardShortcut("o", modifiers: .command)
+                .frame(width: 0)
+                .opacity(0)
+                .disabled(model.isRunning)
+        )
     }
 
-    private var runSection: some View {
-        Section {
-            HStack {
-                if model.isRunning {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text(model.phase.map { "Phase: \($0)" } ?? "Running…")
+    /// The input file, as a pill. Click (or ⌘O) to choose.
+    private var inputPill: some View {
+        HStack(spacing: 8) {
+            Image(systemName: model.inputURL == nil ? "film" : "waveform")
+                .foregroundStyle(.secondary)
+            Text(model.inputURL?.lastPathComponent ?? "Choose a file…")
+                .foregroundStyle(model.inputURL == nil ? .secondary : .primary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(model.inputURL?.path ?? "Click to choose — or drop a file when idle")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .frame(maxWidth: 280)
+        .background(.quinary, in: RoundedRectangle(cornerRadius: 6))
+        .contentShape(Rectangle())
+        .onTapGesture { if !model.isRunning { showingPicker = true } }
+    }
+
+    /// What the last run in this window is doing / how it ended.
+    private var statusChip: some View {
+        Group {
+            switch model.lastOutcome {
+            case .running:
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text(model.phase ?? "Running…")
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
-                    Spacer()
-                    Button("Stop") { model.stop() }
-                        .tint(.red)
-                } else {
-                    Button("Transcribe") { model.start() }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(model.inputURL == nil)
-                    Spacer()
+                        .truncationMode(.middle)
+                        .help(model.phase ?? "")
+                    Text(TranscriptionViewModel.formatDuration(
+                        now.timeIntervalSince(model.runStartedAt ?? now)))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
                 }
+            case .finished:
+                Group {
+                    if let duration = model.lastDuration {
+                        Label("Finished · \(TranscriptionViewModel.formatDuration(duration))",
+                              systemImage: "checkmark.circle.fill")
+                    } else {
+                        Label("Finished", systemImage: "checkmark.circle.fill")
+                    }
+                }
+                .foregroundStyle(.green)
+            case .failed:
+                Label("Failed", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .help(model.errorMessage ?? "See the alert for details")
+            case .stopped:
+                Label("Stopped", systemImage: "stop.circle.fill")
+                    .foregroundStyle(.secondary)
+            case nil:
+                EmptyView()
             }
-        } footer: {
-            Text("The CLI is the contract: this app runs `whiz transcribe` and reads its output. Everything it prints appears below.")
-                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(.quinary, in: Capsule())
+        .lineLimit(1)
+    }
+
+    @ViewBuilder
+    private var runControls: some View {
+        if model.isRunning {
+            Button("Stop") { model.stop() }
+                .keyboardShortcut(".", modifiers: .command)
+                .tint(.red)
+        } else {
+            Button("Transcribe") { model.start() }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut("r", modifiers: .command)
+                .disabled(model.inputURL == nil)
         }
     }
 
-    // MARK: - Output
+    /// Every option on one row: the old grouped form spent the top half of
+    /// the window on controls that are set once and never touched again.
+    private var optionsRow: some View {
+        HStack(spacing: 14) {
+            HStack(spacing: 4) {
+                Text("Language").foregroundStyle(.secondary)
+                TextField("auto", text: $model.language)
+                    .frame(width: 50)
+                    .help("BCP-47 tag, e.g. ru or en. Empty = auto-detect.")
+            }
+            HStack(spacing: 4) {
+                Text("Speakers").foregroundStyle(.secondary)
+                Stepper(model.speakers == 0 ? "auto" : String(model.speakers),
+                        value: $model.speakers, in: 0...10)
+                    .help("0 = the CLI decides (auto-detect for video).")
+            }
+            HStack(spacing: 4) {
+                Text("Names").foregroundStyle(.secondary)
+                TextField("Alice,Bob,Carol", text: $model.speakerNames)
+                    .frame(width: 110)
+                    .help("Comma-separated names, assigned by total talk time (most talkative first). Sent as --speakers-names. Leave empty to let the CLI keep default labels or auto-name from your voice profiles.")
+            }
+            HStack(spacing: 4) {
+                Text("Frames").foregroundStyle(.secondary)
+                Picker("", selection: $model.screenshots) {
+                    ForEach(ScreenshotsMode.allCases) { mode in
+                        Text(mode.shortLabel).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 170)
+                .help("Auto = frames only for video input. On/Off force it.")
+            }
+            HStack(spacing: 4) {
+                Toggle("Analyze", isOn: $model.analyze)
+                    .help("Runs an AI pass over the transcript (--analyze).")
+                if model.analyze {
+                    TextField("AI model (config default)", text: $model.aiModel)
+                        .frame(width: 130)
+                        .help("Sent as --ai-model when non-empty. Default: whiz config set ai_model=…")
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .disabled(model.isRunning)
+    }
 
-    private var outputSection: some View {
+    // MARK: - Content area
+
+    /// The run is asking "who is this?" — answer it without leaving the
+    /// window. The draft starts from the suggestion (a voice-profile match:
+    /// one Enter confirms it, which the CLI counts as a human confirmation);
+    /// an emptied field submits the CLI's '-' decline, keeping the default
+    /// label even over a suggestion.
+    private var namingBar: some View {
+        VStack(spacing: 8) {
+            if let prompt = model.pendingSpeakerPrompt {
+                HStack(spacing: 10) {
+                    Image(systemName: "person.crop.circle.badge.questionmark")
+                        .font(.title2)
+                        .foregroundStyle(.tint)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Name this speaker — \(prompt.label)")
+                            .font(.headline)
+                        Text("“\(prompt.quote)”")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                    Spacer(minLength: 8)
+                    TextField(
+                        model.pendingSpeakerPrompt?.suggestion.isEmpty == false
+                            ? model.pendingSpeakerPrompt!.suggestion : "Type a name…",
+                        text: $nameDraft
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 180)
+                    .focused($namingBarFocused)
+                    .onSubmit { submitName() }
+                    Button("Submit") { submitName() }
+                        .buttonStyle(.borderedProminent)
+                    Button("Keep \(prompt.label)") {
+                        // Same path as clearing the field: '-' declines,
+                        // keeping the default label even over a suggestion.
+                        nameDraft = ""
+                        submitName()
+                    }
+                }
+                .padding(14)
+                .background(.background, in: RoundedRectangle(cornerRadius: 10))
+                .shadow(radius: 8)
+                .padding(.horizontal, 24)
+                Text("\(prompt.label) is one of the speakers this run detected. Voice-profile matches arrive pre-filled — press Enter to confirm one; clear the field or press Keep to leave the default label.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: 560)
+                    .multilineTextAlignment(.center)
+            }
+            Spacer()
+        }
+        .padding(.top, 24)
+        .onAppear {
+            nameDraft = model.pendingSpeakerPrompt?.suggestion ?? ""
+            namingBarFocused = true
+        }
+    }
+
+    private func submitName() {
+        var draft = nameDraft.trimmingCharacters(in: .whitespaces)
+        // The machine line substitutes a lookalike glyph (U+01C0) for " | "
+        // inside fields so the split stays exact; undo it on the way back
+        // so confirming a suggestion restores the name the user actually
+        // gave, pipes included.
+        draft = draft.replacingOccurrences(of: "\u{01C0}", with: "|")
+        // An emptied field is a decline, not an accept: the draft starts as
+        // the suggestion, so clearing it means "not this name". '-' is the
+        // CLI's keep-the-default sentinel — it beats a suggestion too.
+        model.answerSpeakerName(draft.isEmpty ? "-" : draft)
+        nameDraft = ""
+    }
+
+    /// Only what exists: install guidance, the run (live or finished), or the
+    /// idle area. Never an empty pane.
+    @ViewBuilder
+    private var contentArea: some View {
+        if model.whizMissing {
+            missingWhizBanner
+        } else if model.isRunning || !model.logLines.isEmpty || !model.artifacts.isEmpty {
+            runArea
+        } else {
+            idleArea
+        }
+    }
+
+    private var runArea: some View {
         HSplitView {
             logPane
-                .frame(minWidth: 320)
+                .frame(minWidth: 300)
             if !model.artifacts.isEmpty {
                 Divider()
                 artifactPane
-                    .frame(minWidth: 220, idealWidth: 280)
+                    .frame(minWidth: 210, idealWidth: 270)
             }
         }
     }
 
     private var logPane: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Log")
-                .font(.headline)
-                .padding(.horizontal, 12)
-                .padding(.top, 8)
+            HStack {
+                Text("Log").font(.headline)
+                Spacer()
+                if model.logLines.count >= TranscriptionViewModel.logLineCap {
+                    Text("showing the last \(TranscriptionViewModel.logLineCap) lines")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+                openFolderButton
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
@@ -165,48 +347,145 @@ struct MainView: View {
 
     private var artifactPane: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Artifacts")
-                .font(.headline)
-                .padding(.horizontal, 12)
-                .padding(.top, 8)
+            HStack {
+                Text("Artifacts").font(.headline)
+                Spacer()
+                openFolderButton
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
             List(model.artifacts) { artifact in
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(artifact.label)
-                        Text(artifact.url.lastPathComponent)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .help(artifact.url.path)
-                    }
-                    Spacer()
-                    Text(artifact.kind.badge)
-                        .font(.caption2)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(.quaternary, in: Capsule())
-                    Button("Reveal") {
-                        NSWorkspace.shared.activateFileViewerSelecting([artifact.url])
-                    }
-                    Button("Open") {
-                        NSWorkspace.shared.open(artifact.url)
-                    }
-                }
-                .padding(.vertical, 1)
+                artifactRow(label: artifact.label, url: artifact.url)
             }
         }
     }
 
-    private var emptyPane: some View {
-        VStack {
+    /// The artifacts live next to the input file; this is the one click that
+    /// gets the user to them in Finder.
+    private var openFolderButton: some View {
+        Button {
+            let dir = model.artifacts.first?.url.deletingLastPathComponent()
+                ?? model.inputURL?.deletingLastPathComponent()
+            if let dir { NSWorkspace.shared.open(dir) }
+        } label: {
+            Image(systemName: "folder")
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help("Open the folder holding this run's output")
+        .disabled(model.artifacts.isEmpty && model.inputURL == nil)
+    }
+
+    private func artifactRow(label: String, url: URL) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label)
+                Text(url.lastPathComponent)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(url.path)
+            }
             Spacer()
-            Text("Choose a file and press Transcribe.\nOutput appears here while the run is live.")
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-            Spacer()
+            Text(Artifact(label: label, url: url).kind.badge)
+                .font(.caption2)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(.quaternary, in: Capsule())
+            Button("Reveal") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+            Button("Open") { NSWorkspace.shared.open(url) }
+        }
+        .padding(.vertical, 1)
+    }
+
+    // MARK: - Idle area
+
+    private var idleArea: some View {
+        ZStack {
+            if let record = model.lastRun {
+                lastRunCard(record)
+            } else {
+                firstRunHint
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .onTapGesture { if !model.isRunning { showingPicker = true } }
+        .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
+            acceptDrop(providers)
+        }
+    }
+
+    private var firstRunHint: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "square.and.arrow.down")
+                .font(.system(size: 34))
+                .foregroundStyle(.secondary)
+            Text("Drop a media file here, or click to choose one")
+                .foregroundStyle(.secondary)
+            Text("whiz transcribes, labels speakers, grabs frames and can analyze — the log shows the run verbatim. ⌘R starts, ⌘O browses, ⌘. stops.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 460)
+        }
+        .padding(24)
+    }
+
+    /// The previous run's results, offered in a fresh window. A window that
+    /// never ran anything used to look exactly like "no run ever happened",
+    /// including seconds after a finished run's window was closed. The
+    /// artifacts are on disk; this card says so.
+    private func lastRunCard(_ record: LastRunRecord) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Text("Last run").font(.headline)
+                Text("·").foregroundStyle(.tertiary)
+                Text(URL(fileURLWithPath: record.inputPath).lastPathComponent)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(record.inputPath)
+                Spacer()
+                Text(record.finishedAt.formatted(date: .abbreviated, time: .shortened))
+                    .foregroundStyle(.secondary)
+            }
+            List(record.artifacts) { artifact in
+                artifactRow(label: artifact.label, url: artifact.url)
+            }
+            .frame(height: min(120 + CGFloat(record.artifacts.count) * 32, 220))
+            HStack {
+                Spacer()
+                Button("Open Folder") {
+                    let dir = record.artifacts.first?.url.deletingLastPathComponent()
+                        ?? URL(fileURLWithPath: record.inputPath).deletingLastPathComponent()
+                    NSWorkspace.shared.open(dir)
+                }
+                .controlSize(.small)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: 520)
+        .background(.quinary, in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    /// A dropped file chooses the input and starts the run — the fastest path
+    /// from "I have a recording" to "it's running". Folders are ignored; the
+    /// CLI is the contract on which media it can read, not this view.
+    private func acceptDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first else { return false }
+        _ = provider.loadObject(ofClass: URL.self) { url, _ in
+            guard let url = url else { return }
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+                  !isDirectory.boolValue else { return }
+            Task { @MainActor in
+                guard !model.isRunning else { return }
+                model.inputURL = url
+                model.start()
+            }
+        }
+        return true
     }
 
     private var missingWhizBanner: some View {
