@@ -265,6 +265,94 @@ struct CLIBackendRunTests {
         #expect(artifacts.first?.kind == .analysis)
     }
 
+    @Test("a speaker-name prompt line yields a prompt event")
+    func speakerPromptLine() {
+        let event = CLIBackend.classify("? speaker-name: Speaker A | hello world | Alice")
+        #expect(event == .speakerName(SpeakerNamePrompt(
+            label: "Speaker A", quote: "hello world", suggestion: "Alice")))
+
+        let unknown = CLIBackend.classify("? speaker-name: Speaker B | some words")
+        #expect(unknown == .speakerName(SpeakerNamePrompt(
+            label: "Speaker B", quote: "some words", suggestion: "")))
+
+        // The emitter substitutes the lookalike U+01C0 stroke for " | "
+        // inside fields, so a separator-shaped quote arrives intact and the
+        // first/last split stays exact.
+        let tricky = CLIBackend.classify("? speaker-name: Speaker A | he said ' ǀ ' loud | Bob")
+        let parts: SpeakerNamePrompt? = {
+            if case .speakerName(let p) = tricky { return p }
+            return nil
+        }()
+        #expect(parts?.quote == "he said ' ǀ ' loud")
+        #expect(parts?.suggestion == "Bob")
+
+        // Malformed shapes are not events — a log line is not a question.
+        #expect(CLIBackend.classify("? speaker-name: ") == nil)
+        #expect(CLIBackend.classify("? speaker-name: Speaker A") == nil)
+    }
+
+    @Test("a naming answer reaches the run's stdin")
+    func answersReachStdin() async throws {
+        // A stub that replays a machine prompt and then reads one stdin line:
+        // answering prompts through the process's stdin pipe is exactly how
+        // the naming bar talks to a live run. `read -t` bounds the wait so a
+        // backend that never writes fails the assertion instead of hanging
+        // the suite; `cat` and /usr/bin/printf are external processes so
+        // their output reaches the pipe immediately (sh's builtin printf
+        // would buffer until exit — after the read that needs it).
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let script = directory.appendingPathComponent("whiz")
+        // A local first: method-call syntax binds to the last operand of a
+        // chained +, so `.write` directly on the concatenation does not even
+        // compile (String + Void is not String).
+        let body = "#!/bin/sh\n"
+            + "cat <<'WHIZEOF'\n"
+            + "? speaker-name: Speaker A | hello there | Alice\n"
+            + "WHIZEOF\n"
+            + "read -t 10 name\n"
+            + "/usr/bin/printf 'named: %s\\n' \"$name\"\n"
+            + "exit 0\n"
+        try body.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: script.path)
+
+        let box = EventBox()
+        let backend = CLIBackend(executable: script)
+        let runTask = Task {
+            try await backend.run(
+                TranscriptionRequest(input: URL(fileURLWithPath: "/tmp/a.mp4")),
+                onEvent: { box.append($0) })
+        }
+
+        // The prompt must arrive before there is anything to answer.
+        var prompt: SpeakerNamePrompt?
+        for _ in 0..<100 {
+            prompt = box.events.compactMap {
+                if case .speakerName(let p) = $0 { return p } else { return nil }
+            }.first
+            if prompt != nil { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        guard let prompt else {
+            backend.cancel()
+            _ = try? await runTask.value
+            Issue.record("prompt never arrived")
+            return
+        }
+
+        backend.answerSpeakerName("Vadim", for: prompt)
+
+        // The script only finishes once stdin delivered the answer, so a
+        // clean completion is itself part of the claim.
+        try await runTask.value
+        let logs = box.events.compactMap { if case .log(let l) = $0 { return l } else { return nil } }
+        #expect(logs.contains { $0.contains("named: Vadim") },
+                "the answer must reach the run's stdin, got \(logs)")
+    }
+
     @Test("cancelling terminates the process instead of waiting it out")
     func cancellationTerminates() async throws {
         // A 30-second script must end promptly after cancel() — and surface

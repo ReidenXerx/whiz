@@ -19,12 +19,22 @@ struct MainView: View {
     @State private var showingPicker = false
     /// Ticks once a second so the running chip's clock moves.
     @State private var now = Date()
+    /// The name being typed into the naming bar. Re-initialized from the
+    /// prompt's suggestion so accepting a voice-profile match is one Enter.
+    @State private var nameDraft = ""
+    /// Focuses the naming bar's field the moment a prompt arrives.
+    @FocusState private var namingBarFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
             controlBar
             Divider()
-            contentArea
+            ZStack {
+                contentArea
+                if model.pendingSpeakerPrompt != nil {
+                    namingBar
+                }
+            }
         }
         .navigationTitle("whiz — Transcribe")
         .fileImporter(
@@ -200,6 +210,78 @@ struct MainView: View {
     }
 
     // MARK: - Content area
+
+    /// The run is asking "who is this?" — answer it without leaving the
+    /// window. The draft starts from the suggestion (a voice-profile match:
+    /// one Enter confirms it, which the CLI counts as a human confirmation);
+    /// an emptied field submits the CLI's '-' decline, keeping the default
+    /// label even over a suggestion.
+    private var namingBar: some View {
+        VStack(spacing: 8) {
+            if let prompt = model.pendingSpeakerPrompt {
+                HStack(spacing: 10) {
+                    Image(systemName: "person.crop.circle.badge.questionmark")
+                        .font(.title2)
+                        .foregroundStyle(.tint)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Name this speaker — \(prompt.label)")
+                            .font(.headline)
+                        Text("“\(prompt.quote)”")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                    Spacer(minLength: 8)
+                    TextField(
+                        model.pendingSpeakerPrompt?.suggestion.isEmpty == false
+                            ? model.pendingSpeakerPrompt!.suggestion : "Type a name…",
+                        text: $nameDraft
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 180)
+                    .focused($namingBarFocused)
+                    .onSubmit { submitName() }
+                    Button("Submit") { submitName() }
+                        .buttonStyle(.borderedProminent)
+                    Button("Keep \(prompt.label)") {
+                        // Same path as clearing the field: '-' declines,
+                        // keeping the default label even over a suggestion.
+                        nameDraft = ""
+                        submitName()
+                    }
+                }
+                .padding(14)
+                .background(.background, in: RoundedRectangle(cornerRadius: 10))
+                .shadow(radius: 8)
+                .padding(.horizontal, 24)
+                Text("\(prompt.label) is one of the speakers this run detected. Voice-profile matches arrive pre-filled — press Enter to confirm one; clear the field or press Keep to leave the default label.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: 560)
+                    .multilineTextAlignment(.center)
+            }
+            Spacer()
+        }
+        .padding(.top, 24)
+        .onAppear {
+            nameDraft = model.pendingSpeakerPrompt?.suggestion ?? ""
+            namingBarFocused = true
+        }
+    }
+
+    private func submitName() {
+        var draft = nameDraft.trimmingCharacters(in: .whitespaces)
+        // The machine line substitutes a lookalike glyph (U+01C0) for " | "
+        // inside fields so the split stays exact; undo it on the way back
+        // so confirming a suggestion restores the name the user actually
+        // gave, pipes included.
+        draft = draft.replacingOccurrences(of: "\u{01C0}", with: "|")
+        // An emptied field is a decline, not an accept: the draft starts as
+        // the suggestion, so clearing it means "not this name". '-' is the
+        // CLI's keep-the-default sentinel — it beats a suggestion too.
+        model.answerSpeakerName(draft.isEmpty ? "-" : draft)
+        nameDraft = ""
+    }
 
     /// Only what exists: install guidance, the run (live or finished), or the
     /// idle area. Never an empty pane.

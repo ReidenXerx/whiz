@@ -166,6 +166,46 @@ def speaker_label_line(label: str) -> None:
     _console.print(f"  [{hex_color}]●[/] [bold]{label}[/] said:")
 
 
+# U+01C0 LATIN LETTER DENTAL CLICK — a vertical stroke visually identical
+# to '|' but never produced by speech or typed into a name. Piped machine
+# lines substitute it for the separator inside fields so the UI's split
+# stays exact for any speech.
+_PIPE_LOOKALIKE = "ǀ"
+
+
+def _machine_field(text: str) -> str:
+    """One field of a piped machine line: the separator cannot occur in it."""
+    return str(text).replace(" | ", f" {_PIPE_LOOKALIKE} ")
+
+
+def speaker_prompt(label: str, quote: str, suggestion: str | None) -> None:
+    """Render one interactive speaker-naming prompt's context.
+
+    On a TTY: the colored label line and its representative quote — the name
+    itself comes from ``input()`` in the caller. When piped, this is the
+    machine contract the macOS UI parses instead (it cannot see a terminal
+    prompt, so it asks the user itself and writes the answer back to this
+    process's stdin):
+
+        ? speaker-name: <label> | <quote>[ | <suggested name>]
+
+    The suggestion is the voice-profile auto-match (or the
+    ``--speakers-names`` default): the UI pre-fills it, and submitting it
+    back counts as a human confirmation (M3 provenance). Every field passes
+    through ``_machine_field`` so none can contain the ``" | "`` separator
+    — the UI takes the label before the first separator and the suggestion
+    after the last, and both halves are exact for any speech.
+    """
+    if not _is_tty():
+        line = f"? speaker-name: {_machine_field(label)} | {_machine_field(quote)}"
+        if suggestion:
+            line += f" | {_machine_field(suggestion)}"
+        print(line, file=sys.stderr)
+        return
+    speaker_label_line(label)
+    muted(f'  "{quote}"')
+
+
 def tally(counts: list[tuple[str, int]]) -> None:
     """Render the speaker tally with per-speaker colors matching the HTML palette."""
     if not counts:

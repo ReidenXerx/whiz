@@ -52,6 +52,10 @@ final class TranscriptionViewModel: ObservableObject {
     /// How long the last run took, in seconds. Recorded for every ending,
     /// including stops and failures.
     @Published private(set) var lastDuration: Double?
+    /// The speaker-naming prompt the run is currently waiting on, if any.
+    /// Prompts arrive one at a time (the CLI asks sequentially); answering
+    /// releases the run to continue.
+    @Published private(set) var pendingSpeakerPrompt: SpeakerNamePrompt?
 
     /// The log pane is a transcript, not a ledger: keep the tail.
     static let logLineCap = 400
@@ -113,6 +117,7 @@ final class TranscriptionViewModel: ObservableObject {
         runStartedAt = Date()
         lastDuration = nil
         lastOutcome = .running
+        pendingSpeakerPrompt = nil
 
         // The backend reports events from the pipe's reader queue; a stream
         // moves them onto the main actor without polling. `onEvent` is only
@@ -163,6 +168,17 @@ final class TranscriptionViewModel: ObservableObject {
         whizMissing = false
     }
 
+    /// Answer the pending speaker-naming prompt, unblocking the run. The
+    /// CLI's answer semantics apply: a name names the speaker, and '-' is
+    /// the decline sentinel — the default label is kept even when a
+    /// suggestion exists, which is how the UI rejects a wrong voice-profile
+    /// auto-match instead of confirming it.
+    func answerSpeakerName(_ name: String) {
+        guard let prompt = pendingSpeakerPrompt else { return }
+        backend?.answerSpeakerName(name, for: prompt)
+        pendingSpeakerPrompt = nil
+    }
+
     // MARK: - Events
 
     private func apply(_ event: TranscriptionEvent) {
@@ -173,6 +189,8 @@ final class TranscriptionViewModel: ObservableObject {
             appendLog(line)
         case .artifact(let artifact):
             artifacts.append(artifact)
+        case .speakerName(let prompt):
+            pendingSpeakerPrompt = prompt
         }
     }
 
