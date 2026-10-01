@@ -39,9 +39,32 @@ final class TranscriptionViewModel: ObservableObject {
     /// empty. A window that has run something shows its own artifacts; this
     /// is the fresh-window state (see MainView's empty state).
     @Published private(set) var lastRun: LastRunRecord?
+    /// What the control bar's status chip says about the last run in THIS
+    /// window: running, or how it ended. A window shows its own run; the
+    /// persisted record above is what fresh windows see.
+    @Published private(set) var lastOutcome: RunOutcome?
+    /// When the current run started — drives the running clock.
+    @Published private(set) var runStartedAt: Date?
+    /// How long the last run took, in seconds. Recorded for every ending,
+    /// including stops and failures.
+    @Published private(set) var lastDuration: Double?
 
     /// The log pane is a transcript, not a ledger: keep the tail.
     static let logLineCap = 400
+
+    /// Human clock for the status chip: `3:12`, `1:47:30`. Zero-pads seconds,
+    /// shows hours only when hours exist, and clamps a clock-skewed negative
+    /// to zero rather than printing nonsense.
+    static func formatDuration(_ seconds: Double) -> String {
+        let total = max(Int(seconds.rounded()), 0)
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        let secs = total % 60
+        if hours > 0 {
+            return String(format: "%d:%02d:%02d", hours, minutes, secs)
+        }
+        return String(format: "%d:%02d", minutes, secs)
+    }
 
     private var backend: CLIBackend?
     private var runTask: Task<Void, Never>?
@@ -81,6 +104,9 @@ final class TranscriptionViewModel: ObservableObject {
         artifacts = []
         errorMessage = nil
         backend = resolved
+        runStartedAt = Date()
+        lastDuration = nil
+        lastOutcome = .running
 
         // The backend reports events from the pipe's reader queue; a stream
         // moves them onto the main actor without polling. `onEvent` is only
@@ -92,19 +118,25 @@ final class TranscriptionViewModel: ObservableObject {
             let consumer = Task {
                 for await event in events { apply(event) }
             }
+            var outcome: RunOutcome = .finished
             do {
                 try await resolved.run(request) { continuation.yield($0) }
             } catch is CancellationError {
+                outcome = .stopped
                 appendLog("Stopped.")
             } catch let failure as TranscriptionFailure {
+                outcome = .failed
                 errorMessage = failure.errorDescription
             } catch {
+                outcome = .failed
                 errorMessage = error.localizedDescription
             }
             continuation.finish()
             await consumer.value
             isRunning = false
             phase = nil
+            lastOutcome = outcome
+            lastDuration = Date().timeIntervalSince(runStartedAt ?? Date())
             // Persist the results only when the run actually produced
             // something: a failed or stopped run keeps the previous record
             // (saveReturning returns nil for empty lists), so a fresh
@@ -146,6 +178,14 @@ final class TranscriptionViewModel: ObservableObject {
     }
 }
 
+/// How the last run in this window ended — the control bar's status chip.
+enum RunOutcome: Equatable, Sendable {
+    case running
+    case finished
+    case failed
+    case stopped
+}
+
 /// The tri-state behind the screenshots control: the CLI's own default for
 /// video input, forced on, or forced off.
 enum ScreenshotsMode: String, CaseIterable, Identifiable {
@@ -162,6 +202,16 @@ enum ScreenshotsMode: String, CaseIterable, Identifiable {
         case .auto: return nil
         case .on: return true
         case .off: return false
+        }
+    }
+
+    /// Compact label for the segmented control — the raw values are whole
+    /// sentences meant for the old form's pickers.
+    var shortLabel: String {
+        switch self {
+        case .auto: return "Auto"
+        case .on: return "On"
+        case .off: return "Off"
         }
     }
 }
