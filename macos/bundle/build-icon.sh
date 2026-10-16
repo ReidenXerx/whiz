@@ -1,36 +1,35 @@
 #!/bin/bash
 #
-# build-icon.sh — render the whiz mark into AppIcon.icns.
+# build-icon.sh — render the Whiz icon into AppIcon.icns (and the README's PNG).
 #
-# No rsvg/inkscape/ImageMagick dependency: qlmanage rasterizes the SVG (the
-# same renderer Finder uses for previews) and iconutil packs the PNGs. Every
-# rendered PNG is verified at its expected pixel size and force-resampled
-# with sips when QuickLook ignored the requested size — the sizes inside an
-# iconset are a contract, iconutil rejects the set otherwise.
+# The icon is drawn by render-icon.swift with CoreGraphics — geometry in one
+# file, every size drawn rather than resampled, nothing to install (the old
+# SVG path depended on qlmanage, which can hang without a GUI session).
+# iconutil packs the PNGs; each is checked at its expected pixel size, since
+# iconutil rejects a set whose sizes are off.
 #
-# Output: macos/bundle/AppIcon.icns (committed; small, stable, and it means
-# a fresh clone ships the icon without needing this script to run first).
+# Output: macos/bundle/AppIcon.icns and docs/assets/whiz-icon.png (both
+# committed, so a fresh clone ships the icon without running this script).
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-SRC="$REPO_ROOT/docs/assets/whiz-mark.svg"
+RENDERER_SRC="$SCRIPT_DIR/render-icon.swift"
 OUT_ICNS="$SCRIPT_DIR/AppIcon.icns"
+OUT_PNG="$REPO_ROOT/docs/assets/whiz-icon.png"
 WORK="$(mktemp -d)"
 ICONSET="$WORK/AppIcon.iconset"
 trap 'rm -rf "$WORK"' EXIT
 
-for tool in qlmanage iconutil sips; do
+for tool in swiftc iconutil sips; do
   command -v "$tool" >/dev/null 2>&1 || { echo "build-icon.sh: $tool not found" >&2; exit 1; }
 done
-[ -f "$SRC" ] || { echo "build-icon.sh: no mark at $SRC" >&2; exit 1; }
 
+swiftc -O -o "$WORK/render-icon" "$RENDERER_SRC"
 mkdir -p "$ICONSET"
 
-# iconset filename -> pixel size. The @2x entries are the retina doublings
-# of the row above them; every size the format can ask for, so the icns is
-# crisp from the Dock at 16px to a 512pt About window.
+# iconset filename -> pixel size; the @2x entries are retina doublings.
 pairs=(
   "icon_16x16.png 16"
   "icon_16x16@2x.png 32"
@@ -47,19 +46,12 @@ pairs=(
 for pair in "${pairs[@]}"; do
   name="${pair%% *}"
   size="${pair##* }"
-
-  # qlmanage exits nonzero for trivia on some systems while still writing
-  # the thumbnail, so its status is not trusted — the mv and the size
-  # check below are the real failure signals.
-  qlmanage -t -s "$size" -o "$WORK" "$SRC" >/dev/null 2>&1 || true
-  mv "$WORK/whiz-mark.svg.png" "$ICONSET/$name"
-
+  "$WORK/render-icon" "$ICONSET/$name" "$size"
   got="$(sips -g pixelWidth "$ICONSET/$name" | /usr/bin/awk '/pixelWidth/ {print $2}')"
-  if [ "$got" != "$size" ]; then
-    echo "build-icon.sh: QuickLook produced ${got}px for ${size}px, resampling with sips"
-    sips -z "$size" "$size" "$ICONSET/$name" >/dev/null
-  fi
+  [ "$got" = "$size" ] || { echo "build-icon.sh: $name is ${got}px, expected ${size}px" >&2; exit 1; }
 done
 
-iconutil -c icns "$ICONSET" -o "$OUT_ICNS"
-echo "Wrote $OUT_ICNS"
+iconutil -c icns -o "$OUT_ICNS" "$ICONSET"
+mkdir -p "$(dirname "$OUT_PNG")"
+"$WORK/render-icon" "$OUT_PNG" 256
+echo "Wrote $OUT_ICNS and $OUT_PNG"
