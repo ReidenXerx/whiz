@@ -56,7 +56,8 @@ struct OptionsStoreTests {
         // Act: a model born on that store restores the form...
         let model = TranscriptionViewModel(
             lastRunStore: LastRunStore(defaults: makeSuite()),
-            optionsStore: store)
+            optionsStore: store,
+            makeBackend: { CLIBackend(executable: URL(fileURLWithPath: "/usr/bin/true")) })
         #expect(model.language == "ru")
         #expect(model.speakers == 3)
         #expect(model.speakerNames == "Alice,Bob")
@@ -64,10 +65,10 @@ struct OptionsStoreTests {
         #expect(model.analyze == true)
         #expect(model.aiModel == "qwen3.5:9b")
 
-        // ...and a start() writes the form back for the next launch. A real
-        // CLIBackend spawn fails (no whiz in the test world) and start()
-        // returns early — but not before the options are saved, so the save
-        // is observable exactly when it happens in the real app too.
+        // ...and a start() writes the form back for the next launch. The
+        // backend is a stub (/usr/bin/true): discovering a real whiz would
+        // run the developer's own pipeline mid-suite, and on a machine
+        // without one start() would return before saving.
         model.inputURL = URL(fileURLWithPath: "/tmp/a.mp4")
         model.start()
         #expect(store.load() == record)

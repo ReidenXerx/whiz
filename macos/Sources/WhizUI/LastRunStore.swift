@@ -60,22 +60,40 @@ struct LastRunStore {
         loadHistory().first
     }
 
+    /// Where an undecodable history blob is set aside before the first save
+    /// over it — see `loadHistory`.
+    static let historyBackupKey = "dev.reidenxerx.whiz.runHistory.undecodable"
+
     /// The recent-run list, newest first. An empty list when nothing has
     /// ever been recorded.
+    ///
+    /// Three cases, chosen to never lose data silently:
+    /// - history decodes: that is the list.
+    /// - history is ABSENT: the pre-history single record (if any) is
+    ///   migrated once and its legacy key deleted, so it cannot resurface.
+    /// - history is PRESENT but undecodable (a newer app's schema, a damaged
+    ///   domain): read as empty, and the blob is left exactly where it is.
+    ///   The legacy record is NOT substituted — the history is newer than it,
+    ///   and saving would have overwritten the whole list with that one old
+    ///   run. The first save afterwards copies the blob to
+    ///   `historyBackupKey` before writing, so it stays recoverable.
     func loadHistory() -> [LastRunRecord] {
-        guard let data = defaults.data(forKey: Self.historyKey),
-              let records = try? JSONDecoder().decode([LastRunRecord].self, from: data)
-        else { return migrateLegacy() }
-        return records
+        guard let data = defaults.data(forKey: Self.historyKey) else {
+            return migrateLegacy()
+        }
+        return (try? JSONDecoder().decode([LastRunRecord].self, from: data)) ?? []
     }
 
     /// The pre-history app stored one record under `key`. A user upgrading
-    /// must not lose that run: it becomes the single entry of the new list.
+    /// must not lose that run: it becomes the single entry of the new list,
+    /// and the legacy key goes away once the list holds it. An undecodable
+    /// legacy record is left untouched.
     private func migrateLegacy() -> [LastRunRecord] {
         guard let data = defaults.data(forKey: Self.key),
               let record = try? JSONDecoder().decode(LastRunRecord.self, from: data)
         else { return [] }
         saveHistory([record])
+        defaults.removeObject(forKey: Self.key)
         return [record]
     }
 
@@ -85,6 +103,7 @@ struct LastRunStore {
 
     func saveHistory(_ records: [LastRunRecord]) {
         guard let data = try? JSONEncoder().encode(records) else { return }
+        preserveUndecodableHistory()
         defaults.set(data, forKey: Self.historyKey)
     }
 
@@ -111,5 +130,13 @@ struct LastRunStore {
         var history = loadHistory().filter { $0.inputPath != record.inputPath }
         history.insert(record, at: 0)
         saveHistory(Array(history.prefix(Self.historyCap)))
+    }
+
+    /// Before a save replaces an undecodable history, keep a copy of it.
+    private func preserveUndecodableHistory() {
+        guard let data = defaults.data(forKey: Self.historyKey),
+              (try? JSONDecoder().decode([LastRunRecord].self, from: data)) == nil
+        else { return }
+        defaults.set(data, forKey: Self.historyBackupKey)
     }
 }

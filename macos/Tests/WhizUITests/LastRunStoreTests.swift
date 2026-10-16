@@ -197,4 +197,51 @@ struct RunHistoryTests {
         // And it persisted — a second load reads the written history.
         #expect(LastRunStore(defaults: defaults).loadHistory() == [legacy])
     }
+
+    private func legacyData() -> (LastRunRecord, Data)? {
+        let legacy = LastRunRecord(
+            inputPath: "/tmp/legacy.mov",
+            finishedAt: Date(timeIntervalSince1970: 1_765_000_000),
+            artifacts: [
+                StoredArtifact(label: "Wrote labeled SRT", url: URL(fileURLWithPath: "/tmp/legacy.speakers.srt")),
+            ])
+        guard let data = try? JSONEncoder().encode(legacy) else { return nil }
+        return (legacy, data)
+    }
+
+    @Test("a migrated legacy record's key is deleted, so it cannot resurface")
+    func legacyKeyDeletedAfterMigration() {
+        let defaults = makeSuite()
+        guard let (legacy, data) = legacyData() else { Issue.record("encode"); return }
+        defaults.set(data, forKey: LastRunStore.key)
+
+        #expect(LastRunStore(defaults: defaults).loadHistory() == [legacy])
+        #expect(defaults.data(forKey: LastRunStore.key) == nil,
+                "a migrated legacy key left behind is a resurrection waiting to happen")
+    }
+
+    @Test("an undecodable history is not replaced by the stale legacy record")
+    func corruptHistoryDoesNotFallBackToLegacy() throws {
+        // The old bug: a decode failure fell back to the never-deleted legacy
+        // key, and the next save overwrote the whole history with that one
+        // old run.
+        let defaults = makeSuite()
+        guard let (_, data) = legacyData() else { Issue.record("encode"); return }
+        defaults.set(data, forKey: LastRunStore.key)
+        let corrupt = Data("not a history".utf8)
+        defaults.set(corrupt, forKey: LastRunStore.historyKey)
+
+        let store = LastRunStore(defaults: defaults)
+        #expect(store.loadHistory().isEmpty)
+        // Reading touched nothing: the blob stays where it was.
+        #expect(defaults.data(forKey: LastRunStore.historyKey) == corrupt)
+
+        // The first save keeps a copy of the blob before writing over it,
+        // and the new list holds only the new run — never the legacy one.
+        let fresh = try #require(store.saveReturning(
+            artifacts: [Artifact(label: "Wrote analysis", url: URL(fileURLWithPath: "/tmp/new.analysis.md"))],
+            input: URL(fileURLWithPath: "/tmp/new.mov")))
+        #expect(defaults.data(forKey: LastRunStore.historyBackupKey) == corrupt)
+        #expect(store.loadHistory() == [fresh])
+    }
 }

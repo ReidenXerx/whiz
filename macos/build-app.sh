@@ -6,7 +6,14 @@
 # builds the release binary, copies the bundle directory around it, stamps
 # the version from pyproject.toml (one version for the project, not two),
 # and ad-hoc codesigns so a locally built app runs without any signing
-# identity. No notarization — this is a local/CI artifact, not a store one.
+# identity.
+#
+# FOR THIS MAC ONLY. The signature is ad-hoc (`codesign --sign -`): there is
+# no Developer ID signing and no notarization here. Gatekeeper accepts the
+# app on the machine that built it; copied to another Mac (AirDrop, a
+# download, a DMG) it is quarantined and blocked as "damaged" or "from an
+# unidentified developer". Distributing it needs a Developer ID certificate
+# plus `notarytool`, which this script deliberately does not attempt.
 #
 # Output: dist/WhizUI.app (dist/ is gitignored — artifacts, not sources).
 
@@ -55,4 +62,4 @@ fi
 codesign --force --sign - "$APP"
 codesign --verify "$APP"
 
-echo "Wrote $APP ($VERSION)"
+echo "Wrote $APP ($VERSION) — ad-hoc signed, runs on THIS Mac only (not notarized)."

@@ -2,8 +2,14 @@
 #
 # build-dmg.sh — pack WhizUI.app into a drag-to-install DMG.
 #
-# The artifact a user can hand to another Mac: a volume that opens showing
-# the app next to an Applications shortcut, drag once, done. Runs
+# A volume that opens showing the app next to an Applications shortcut,
+# drag once, done.
+#
+# FOR THIS MAC ONLY. The app inside is ad-hoc signed by build-app.sh — no
+# Developer ID signature, no notarization, and the DMG itself is unsigned.
+# Opened on another Mac, Gatekeeper quarantines it and refuses to launch the
+# app. Shipping to other machines needs Developer ID signing + notarytool +
+# stapling, which these scripts deliberately do not do. Runs
 # build-app.sh first so the DMG always matches the tree, and verifies the
 # app bundle exists because hdiutil on a stale DMG would ship an old app
 # with a fresh name.
@@ -35,4 +41,4 @@ rm -f "$DMG"
 hdiutil create -volname "WhizUI" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
 hdiutil verify "$DMG" >/dev/null
 
-echo "Wrote $DMG"
+echo "Wrote $DMG — for THIS Mac only: ad-hoc signed, not notarized; Gatekeeper blocks it elsewhere."

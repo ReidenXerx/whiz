@@ -3,12 +3,16 @@ import Foundation
 /// Runs the `whiz` CLI and turns its output into `TranscriptionEvent`s.
 ///
 /// The CLI is the contract. `whiz/ui.py` degrades to escape-free plain text
-/// when stderr is not a TTY, and three of those line shapes are
+/// when stderr is not a TTY, and four of those line shapes are
 /// machine-readable:
 ///
 ///     ▸ <phase label>
-///     ✓ <artifact label>: <path>
+///     ✓ <artifact label>: <absolute path>
 ///     ? speaker-name: <label> | <quote>[ | <suggested name>]
+///     ~ progress: <N>%
+///
+/// Speaker prompts arrive over a pipe only because the child's environment
+/// carries `WHIZ_UI_PIPE=1` (see `childEnvironment`).
 ///
 /// Those shapes are pinned by `tests/test_ui_machine_contract.py` on the Python
 /// side, so an edit to `ui.wrote` that would break this parser fails a test
@@ -48,6 +52,14 @@ final class CLIBackend: TranscriptionBackend, @unchecked Sendable {
         self.executable = found
     }
 
+    /// How long `run` keeps reading after the process exits before it stops
+    /// waiting for EOF. A grandchild (whisper-cli, ffmpeg, pip) inherits the
+    /// pipe's write end and can hold it open after its parent died — most
+    /// often after a `terminate()`, which only signals the direct child. The
+    /// bound keeps such a run from wedging; whatever is buffered by then is
+    /// still drained.
+    static let eofGraceAfterExit: TimeInterval = 2
+
     func run(
         _ request: TranscriptionRequest,
         onEvent: @escaping @Sendable (TranscriptionEvent) -> Void
@@ -72,38 +84,56 @@ final class CLIBackend: TranscriptionBackend, @unchecked Sendable {
         let stdinPipe = Pipe()
         process.standardInput = stdinPipe
         // No TTY on a pipe, which is exactly what selects ui.py's plain-text
-        // branch — the parser below depends on that.
-        process.environment = ProcessInfo.processInfo.environment
+        // branch — the parser below depends on that. See `childEnvironment`
+        // for PATH and the WHIZ_UI_PIPE opt-in.
+        process.environment = Self.childEnvironment(
+            from: ProcessInfo.processInfo.environment,
+            home: FileManager.default.homeDirectoryForCurrentUser.path)
 
         let collector = LineCollector(onEvent: onEvent)
-        pipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            collector.ingest(data)
-        }
+        let reader = PipeReader(handle: pipe.fileHandleForReading, collector: collector)
+        let exited = OneShotSignal()
+        // Before `run()`: a process that exits instantly must still be seen.
+        process.terminationHandler = { _ in exited.fire() }
 
-        try process.run()
+        reader.start()
+        do {
+            try process.run()
+        } catch {
+            reader.stop()
+            process.terminationHandler = nil
+            throw error
+        }
         state.setProcess(process)
         state.setStdin(stdinPipe.fileHandleForWriting)
         // A cancel() that landed between entry and the spawn has no process to
         // terminate; honour it now rather than letting the run finish anyway.
-        if state.isCancelled, process.isRunning {
-            process.terminate()
-        }
+        state.terminateIfCancelRequested()
 
-        // `waitUntilExit` blocks, so keep it off the caller's thread.
-        await withCheckedContinuation { continuation in
-            process.terminationHandler = { _ in continuation.resume() }
-        }
-        pipe.fileHandleForReading.readabilityHandler = nil
+        // The run is over when the process has exited AND the pipe hit EOF —
+        // in either order. Exit alone is not enough: the last lines (the
+        // failure reason, the final artifact) can still sit in the pipe when
+        // the termination handler fires. EOF alone is not enough either: a
+        // grandchild can keep the write end open, so after exit the wait is
+        // bounded and the remainder is drained without blocking.
+        await exited.wait()
+        let sawEOF = await reader.eof.wait(timeout: Self.eofGraceAfterExit)
+        if !sawEOF { reader.drainAvailable() }
+        reader.stop()
         collector.flush()
+        // Nothing is emitted past this point: the handler is gone, the drain
+        // is done, and the reader refuses late callbacks (see PipeReader).
+        state.setProcess(nil)
         state.setStdin(nil)
 
         // A cancelled run is a stop, not a failure: NS-4 makes a degraded run
         // exit nonzero on purpose, and conflating the two would report "the
         // user pressed Stop" as a pipeline problem (or worse, a cancelled
-        // failure as success).
-        if state.isCancelled { throw CancellationError() }
+        // failure as success). Only a terminate() actually delivered to a
+        // live process counts, and a clean exit 0 is a success even then —
+        // Stop pressed as a run finishes must not relabel it "Stopped".
+        let cleanExit = process.terminationReason == .exit && process.terminationStatus == 0
+        if state.didTerminate, !cleanExit { throw CancellationError() }
 
         guard process.terminationStatus == 0 else {
             // NS-4: a degraded run exits nonzero deliberately. Surfacing the
@@ -113,6 +143,46 @@ final class CLIBackend: TranscriptionBackend, @unchecked Sendable {
                 code: process.terminationStatus,
                 summary: collector.lastMeaningfulLine)
         }
+    }
+
+    /// Directories a Finder-launched app's PATH lacks but whiz's tools live
+    /// in: Homebrew (Apple silicon, then Intel) for whisper-cli and ffmpeg,
+    /// pipx/uv's `~/.local/bin` for whiz itself.
+    static func toolDirectories(home: String) -> [String] {
+        ["/opt/homebrew/bin", "/usr/local/bin", (home as NSString).appendingPathComponent(".local/bin")]
+    }
+
+    /// The child's environment: the app's own, with PATH repaired and the
+    /// GUI-pipe opt-in set.
+    ///
+    /// An app launched from Finder or the Dock gets launchd's minimal PATH
+    /// (`/usr/bin:/bin:/usr/sbin:/sbin`), so whiz — which shells out to
+    /// whisper-cli and ffmpeg by name — would fail to find them although
+    /// everything works from Terminal. Missing tool directories are
+    /// PREPENDED (a Homebrew ffmpeg should win over nothing at all, and an
+    /// already-present entry keeps its position); duplicates and empty
+    /// entries are dropped, otherwise the existing order is untouched.
+    ///
+    /// `WHIZ_UI_PIPE=1` tells the CLI its non-TTY stdin is this app's answer
+    /// channel. Without it, the CLI does not issue `? speaker-name:` prompts
+    /// over a pipe — so a shell loop piping into whiz never has its stdin
+    /// consumed as speaker names.
+    static func childEnvironment(from base: [String: String], home: String) -> [String: String] {
+        var environment = base
+        let existing = (base["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin")
+            .split(separator: ":", omittingEmptySubsequences: true)
+            .map(String.init)
+        var seen = Set<String>()
+        var entries: [String] = []
+        for directory in toolDirectories(home: home) where !existing.contains(directory) {
+            if seen.insert(directory).inserted { entries.append(directory) }
+        }
+        for directory in existing where seen.insert(directory).inserted {
+            entries.append(directory)
+        }
+        environment["PATH"] = entries.joined(separator: ":")
+        environment["WHIZ_UI_PIPE"] = "1"
+        return environment
     }
 
     /// Terminate the current run at the next safe point; `run` then throws
@@ -177,7 +247,12 @@ final class CLIBackend: TranscriptionBackend, @unchecked Sendable {
             let label = String(body[..<separator.lowerBound])
             let path = String(body[separator.upperBound...])
                 .trimmingCharacters(in: .whitespaces)
-            guard !path.isEmpty else { return nil }
+            // Absolute paths only. The GUI always passes an absolute input,
+            // so every real artifact line carries one; a relative "path" is
+            // prose that happens to look like the marker — an LLM summary
+            // echoed into the log ("✓ Decision: ship Friday") must not
+            // become a clickable file.
+            guard path.hasPrefix("/") else { return nil }
             return .artifact(Artifact(label: label, url: URL(fileURLWithPath: path)))
         }
         if line.hasPrefix(speakerNameMarker) {
@@ -213,17 +288,20 @@ final class CLIBackend: TranscriptionBackend, @unchecked Sendable {
     }
 }
 
-/// The mutable part of a run: the live process plus the cancelled flag.
+/// The mutable part of a run: the live process, its stdin, and what Stop did.
 ///
 /// `cancel()` may arrive from the UI thread while `run` is awaiting the
-/// termination handler, so both the flag and the process are lock-guarded.
-/// `terminate()` is skipped for a process that never launched or already
-/// exited — it throws an Obj-C exception in both cases.
+/// termination handler, so all of it is lock-guarded. `terminate()` is
+/// skipped for a process that never launched or already exited — it throws
+/// an Obj-C exception in both cases — and `didTerminate` records only a
+/// terminate() that was actually delivered, so a Stop that lands after the
+/// process exited cannot relabel a finished run as stopped.
 private final class ProcessState: @unchecked Sendable {
     private let lock = NSLock()
     private var process: Process?
     private var stdin: FileHandle?
-    private var cancelled = false
+    private var cancelRequested = false
+    private var terminated = false
 
     func setProcess(_ process: Process?) {
         lock.lock()
@@ -234,33 +312,159 @@ private final class ProcessState: @unchecked Sendable {
     func setStdin(_ handle: FileHandle?) {
         lock.lock()
         defer { lock.unlock() }
+        // Per-descriptor SIGPIPE suppression: a write to a child that already
+        // died then fails with EPIPE instead of killing the app. main.swift
+        // also ignores SIGPIPE process-wide; this keeps the write path safe
+        // on its own (tests, or any host that did not).
+        if let handle { _ = fcntl(handle.fileDescriptor, F_SETNOSIGPIPE, 1) }
         self.stdin = handle
     }
 
-    /// Write one answer line. A closed handle (the run ended between the
-    /// prompt arriving and the user answering) silently no-ops — the CLI's
-    /// own EOF path keeps the default label. `write(_:)` is the non-throwing
-    /// legacy API on this SDK; a throwing call would need `try`, but there
-    /// is nothing to recover from on a dead pipe.
+    /// Write one answer line. A closed or dead pipe (the run ended between
+    /// the prompt arriving and the user answering) is ignored — the CLI's
+    /// own EOF path keeps the default label, and there is nothing to
+    /// recover on this side.
     func writeLine(_ text: String) {
         lock.lock()
         defer { lock.unlock() }
         guard let stdin else { return }
-        stdin.write(text.data(using: .utf8) ?? Data())
+        try? stdin.write(contentsOf: Data(text.utf8))
     }
 
-    var isCancelled: Bool {
+    /// True only when a terminate() reached a running process.
+    var didTerminate: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return cancelled
+        return terminated
     }
 
     func cancel() {
         lock.lock()
         defer { lock.unlock() }
-        cancelled = true
+        cancelRequested = true
+        terminateLocked()
+    }
+
+    /// Honour a cancel() that arrived before the process existed.
+    func terminateIfCancelRequested() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard cancelRequested else { return }
+        terminateLocked()
+    }
+
+    private func terminateLocked() {
         guard let process, process.isRunning else { return }
         process.terminate()
+        terminated = true
+    }
+}
+
+/// A one-shot event that async code can wait for, optionally with a bound.
+///
+/// Firing is idempotent; every waiter — past or future — sees it.
+private final class OneShotSignal: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fired = false
+    private var nextID = 0
+    private var waiters: [Int: CheckedContinuation<Bool, Never>] = [:]
+
+    func fire() {
+        lock.lock()
+        guard !fired else { lock.unlock(); return }
+        fired = true
+        let pending = Array(waiters.values)
+        waiters = [:]
+        lock.unlock()
+        for waiter in pending { waiter.resume(returning: true) }
+    }
+
+    func wait() async {
+        _ = await wait(timeout: nil)
+    }
+
+    /// `true` if the signal fired, `false` if `timeout` elapsed first.
+    func wait(timeout: TimeInterval?) async -> Bool {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if fired {
+                lock.unlock()
+                continuation.resume(returning: true)
+                return
+            }
+            let id = nextID
+            nextID += 1
+            waiters[id] = continuation
+            lock.unlock()
+            guard let timeout else { return }
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [self] in
+                lock.lock()
+                let expired = waiters.removeValue(forKey: id)
+                lock.unlock()
+                expired?.resume(returning: false)
+            }
+        }
+    }
+}
+
+/// Reads the merged output pipe into a `LineCollector` until EOF.
+///
+/// Every read and every hand-off to the collector happens under one lock, and
+/// once `stop()` (or a drain) has run, late readability callbacks return
+/// without reading — so after `run` has stopped the reader, no event can
+/// reach the caller. An empty read is EOF: the handler removes itself and
+/// fires `eof`.
+private final class PipeReader: @unchecked Sendable {
+    private let handle: FileHandle
+    private let collector: LineCollector
+    private let lock = NSLock()
+    private var stopped = false
+    let eof = OneShotSignal()
+
+    init(handle: FileHandle, collector: LineCollector) {
+        self.handle = handle
+        self.collector = collector
+    }
+
+    func start() {
+        handle.readabilityHandler = { [self] readable in
+            lock.lock()
+            defer { lock.unlock() }
+            guard !stopped else { return }
+            let data = readable.availableData
+            if data.isEmpty {
+                stopped = true
+                readable.readabilityHandler = nil
+                eof.fire()
+                return
+            }
+            collector.ingest(data)
+        }
+    }
+
+    /// Read whatever is already buffered without waiting for EOF — the
+    /// write end may be held open by a grandchild that outlived the run.
+    func drainAvailable() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !stopped else { return }
+        stopped = true
+        handle.readabilityHandler = nil
+        let fd = handle.fileDescriptor
+        _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let count = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+            guard count > 0 else { break }  // 0 = EOF, -1 = EAGAIN or error
+            collector.ingest(Data(buffer[0..<count]))
+        }
+    }
+
+    func stop() {
+        lock.lock()
+        defer { lock.unlock() }
+        stopped = true
+        handle.readabilityHandler = nil
     }
 }
 
@@ -270,9 +474,15 @@ private final class ProcessState: @unchecked Sendable {
 /// an arbitrary queue, and a partial line at a chunk boundary has to survive
 /// between callbacks. Splitting per-chunk instead would tear a marker in half
 /// and drop the artifact.
-private final class LineCollector: @unchecked Sendable {
+///
+/// Buffers raw BYTES and splits on 0x0A before decoding. A pipe chunk can end
+/// in the middle of a multi-byte character (every marker glyph is one, and so
+/// is Cyrillic speech); decoding chunk-by-chunk fails on such a chunk and
+/// would lose it whole. Each complete line is decoded leniently, so even
+/// invalid bytes cost one replacement character, never a line.
+final class LineCollector: @unchecked Sendable {
     private let lock = NSLock()
-    private var pending = ""
+    private var pending = Data()
     private var lastLine = ""
     private let onEvent: @Sendable (TranscriptionEvent) -> Void
 
@@ -281,11 +491,13 @@ private final class LineCollector: @unchecked Sendable {
     }
 
     func ingest(_ data: Data) {
-        guard let text = String(data: data, encoding: .utf8) else { return }
         lock.lock()
-        pending += text
-        var lines = pending.components(separatedBy: "\n")
-        pending = lines.removeLast()  // trailing partial line
+        pending.append(data)
+        var lines: [String] = []
+        while let newline = pending.firstIndex(of: 0x0A) {
+            lines.append(String(decoding: pending[pending.startIndex..<newline], as: UTF8.self))
+            pending.removeSubrange(pending.startIndex...newline)
+        }
         lock.unlock()
         for line in lines { emit(line) }
     }
@@ -295,9 +507,9 @@ private final class LineCollector: @unchecked Sendable {
     func flush() {
         lock.lock()
         let remainder = pending
-        pending = ""
+        pending = Data()
         lock.unlock()
-        if !remainder.isEmpty { emit(remainder) }
+        if !remainder.isEmpty { emit(String(decoding: remainder, as: UTF8.self)) }
     }
 
     var lastMeaningfulLine: String {
