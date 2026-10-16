@@ -97,12 +97,16 @@ def _is_vad_model(name: str) -> bool:
     return name.startswith("ggml-silero-")
 
 
+def is_quantized(alias: str) -> bool:
+    """large-v3-turbo-q5_0 -> True; large-v3-turbo -> False."""
+    return re.search(r"-q\d+(_\d+|_k)?", alias) is not None
+
+
 def _preference_rank(alias: str) -> tuple[int, int, str]:
     """Sort key: PREFERENCE position, then unquantized before quantized (NS-15)."""
     aliases = [_alias_from_name(w) for w in PREFERENCE]
     pos = aliases.index(alias) if alias in aliases else len(aliases)
-    quantized = 1 if re.search(r"-q\d+(_\d+|_k)?", alias) else 0
-    return (pos, quantized, alias)
+    return (pos, 1 if is_quantized(alias) else 0, alias)
 
 
 def discover(config: cfg.Config) -> list[ModelInfo]:
@@ -309,13 +313,39 @@ def _stream_to_atomic(resp, target: Path) -> None:
     ``.part`` file is removed on any failure, so retries start clean.
     """
     part = target.with_name(target.name + ".part")
+    total = _content_length(resp)
     try:
         with part.open("wb") as fh:
-            shutil.copyfileobj(resp, fh, length=1024 * 1024)
+            if total is None:
+                shutil.copyfileobj(resp, fh, length=1024 * 1024)
+            else:
+                # Known size: report whole-percent steps (the macOS setup
+                # assistant shows them; a terminal sees nothing new).
+                from whiz import ui
+
+                done, last = 0, -1
+                while chunk := resp.read(1024 * 1024):
+                    fh.write(chunk)
+                    done += len(chunk)
+                    whole = min(100, done * 100 // total)
+                    if whole != last:
+                        ui.download_progress(whole)
+                        last = whole
         os.replace(part, target)
     except BaseException:
         part.unlink(missing_ok=True)
         raise
+
+
+def _content_length(resp) -> int | None:
+    """The response's Content-Length, or None when absent or unusable."""
+    headers = getattr(resp, "headers", None)
+    raw = headers.get("Content-Length") if headers is not None else None
+    try:
+        value = int(raw) if raw is not None else 0
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
 
 
 def download_vad(config: cfg.Config, dest_dir: Path | None = None, version: str = "") -> Path:

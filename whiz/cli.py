@@ -1588,6 +1588,15 @@ def _run_transcribe(
 def cmd_models_list(args: argparse.Namespace) -> int:
     config = cfg.load()
     found = M.discover(config)
+    if getattr(args, "json", False):
+        # Data only, even when empty: the app renders "no models" itself.
+        import json
+
+        print(json.dumps(
+            [{"alias": m.alias, "size_mb": round(m.size_mb, 1), "path": str(m.path)} for m in found],
+            ensure_ascii=False,
+        ))
+        return 0
     if not found:
         ui.status("No models found in:", kind="warn")
         for d in cfg.model_search_dirs(config):
@@ -1605,6 +1614,7 @@ def cmd_models_list(args: argparse.Namespace) -> int:
 def cmd_models_download(args: argparse.Namespace) -> int:
     config = cfg.load()
     dest = Path(args.dest).expanduser() if args.dest else None
+    ui.phase("downloading speech model")
     try:
         path = M.download(args.model, config, dest_dir=dest)
         print(f"\nDone. Use it with: whiz transcribe -m {path} <file>")
@@ -1627,6 +1637,7 @@ def cmd_models_download_vad(args: argparse.Namespace) -> int:
     config = cfg.load()
     dest = Path(args.dest).expanduser() if args.dest else None
     version = getattr(args, "version", "") or ""
+    ui.phase("downloading silence model")
     try:
         path = M.download_vad(config, dest_dir=dest, version=version)
         print(f"\nDone. VAD model at: {path}")
@@ -1650,6 +1661,178 @@ def cmd_models_download_diarization(args: argparse.Namespace) -> int:
         return 2
 
 
+# ---------- doctor / setup ----------
+
+_WHISPER_INSTALL_HINT = "brew install whisper-cpp"
+_FFMPEG_INSTALL_HINT = "brew install ffmpeg"
+
+
+def _tool_path(configured: str, *names: str) -> str | None:
+    """A configured tool path if it exists, else the first name on PATH."""
+    if configured:
+        expanded = Path(configured).expanduser()
+        return str(expanded) if expanded.exists() else shutil.which(configured)
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+def _doctor_report(config: cfg.Config, *, check_ai: bool = False) -> dict:
+    """What a run needs, and whether this machine has it.
+
+    One report for two readers: ``whiz doctor`` in a terminal, and the macOS
+    app's setup assistant (``--json``). Every check is a filesystem / PATH
+    lookup except the opt-in AI probe (``check_ai``), which talks to the
+    configured server. ``ready`` means a plain transcription can run;
+    speakers and AI are optional extras with their own ``ok``.
+    """
+    whisper = _tool_path(config.whisper_cli, "whisper-cli", "whisper")
+    ffmpeg = _tool_path(config.ffmpeg, "ffmpeg")
+
+    model_ref = config.model
+    model_path = M.resolve(model_ref, config) if model_ref else M.pick_best(config)
+    model_alias = M._alias_from_name(model_path.name) if model_path else None
+    model = {
+        "ok": model_path is not None,
+        "configured": model_ref,
+        "path": str(model_path) if model_path else None,
+        "alias": model_alias,
+        "size_mb": round(model_path.stat().st_size / (1024 * 1024), 1) if model_path else None,
+        # NS-15: a quantized model still runs (ok stays true), but one picked
+        # only because nothing better is on disk is worth replacing; a
+        # configured one is the user's informed choice and is not nagged.
+        "quantized": bool(model_alias and M.is_quantized(model_alias)),
+        "fix": f"whiz models download {model_ref or 'turbo'}",
+    }
+
+    vad_path = M.find_vad_model(config)
+    seg = D.find_segmentation_model(config)
+    emb = D.find_embedding_model(config)
+    try:
+        import importlib.util
+
+        package = importlib.util.find_spec("sherpa_onnx") is not None
+    except (ImportError, ValueError):
+        package = False
+
+    ai: dict = {
+        "configured": bool(config.ai_model and config.ai_base_url),
+        "base_url": config.ai_base_url,
+        "model": config.ai_model,
+    }
+    if check_ai:
+        names = AI.list_ollama_models(config.ai_base_url, timeout=5) if config.ai_base_url else []
+        ai["reachable"] = bool(names)
+        ai["models"] = names
+        ai["model_available"] = bool(config.ai_model) and config.ai_model in names
+
+    report = {
+        "version": __version__,
+        "checks": {
+            "whisper_cli": {"ok": whisper is not None, "path": whisper, "fix": _WHISPER_INSTALL_HINT},
+            "ffmpeg": {"ok": ffmpeg is not None, "path": ffmpeg, "fix": _FFMPEG_INSTALL_HINT},
+            "model": model,
+            # Downloaded on first use when missing, so never blocking.
+            "vad_model": {"ok": vad_path is not None, "path": str(vad_path) if vad_path else None,
+                          "fix": "whiz models download-vad"},
+            "speakers": {"ok": package and seg is not None and emb is not None,
+                         "package": package,
+                         "segmentation": str(seg) if seg else None,
+                         "embedding": str(emb) if emb else None,
+                         "fix": "whiz setup speakers"},
+        },
+        "ai": ai,
+        "brew": _tool_path("", "brew") or next(
+            (b for b in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew") if Path(b).exists()), None),
+    }
+    report["ready"] = all(report["checks"][k]["ok"] for k in ("whisper_cli", "ffmpeg", "model"))
+    return report
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Check what transcription needs; exit 0 only when a run can work."""
+    config = cfg.load()
+    report = _doctor_report(config, check_ai=getattr(args, "ai", False))
+    if getattr(args, "json", False):
+        import json
+
+        print(json.dumps(report, ensure_ascii=False))
+        return 0 if report["ready"] else 1
+
+    checks = report["checks"]
+    labels = [
+        ("whisper_cli", "whisper.cpp", True),
+        ("ffmpeg", "ffmpeg", True),
+        ("model", "speech model", True),
+        ("vad_model", "silence model (VAD)", False),
+        ("speakers", "speaker detection", False),
+    ]
+    rows = []
+    for key, label, required in labels:
+        check = checks[key]
+        if key == "model" and check["ok"] and check["quantized"] and not check["configured"]:
+            state = "quantized"
+            detail = f"{check['alias']} costs accuracy — {check['fix']} for full quality"
+        elif check["ok"]:
+            state = "ok"
+            detail = check.get("path") or check.get("segmentation") or ""
+        else:
+            state = "missing" if required else "optional"
+            detail = check["fix"]
+        rows.append([label, state, str(detail)])
+    ai = report["ai"]
+    if ai["configured"]:
+        if "reachable" in ai:
+            state = "ok" if ai["model_available"] else ("model missing" if ai["reachable"] else "unreachable")
+        else:
+            state = "configured"
+        rows.append(["AI summary", state, f"{ai['model']} @ {ai['base_url']}"])
+    else:
+        rows.append(["AI summary", "optional", "whiz config set ai_model=<model>"])
+    ui.table(f"whiz {report['version']}", [("Part", "left"), ("Status", "left"), ("Where / how to fix", "left")], rows)
+    if report["ready"]:
+        ui.status("Ready to transcribe.", kind="ok")
+        return 0
+    ui.status("Not ready yet — run the commands above.", kind="warn")
+    return 1
+
+
+def cmd_setup_speakers(args: argparse.Namespace) -> int:
+    """One-time speaker-detection setup, on request.
+
+    The same steps a diarized run performs on its own (sherpa-onnx into
+    this environment, then the ~90 MB models), but asked for explicitly —
+    running this command IS the consent, so nothing prompts.
+    """
+    config = cfg.load()
+    if _diarization_available(config):
+        ui.status("Speaker detection is already set up.", kind="ok")
+        return 0
+    try:
+        import sherpa_onnx  # type: ignore[import-not-found]  # noqa: F401
+    except ImportError:
+        ui.phase("installing speaker detection")
+        if not _install_sherpa_onnx():
+            return 1
+    if D.find_segmentation_model(config) is None or D.find_embedding_model(config) is None:
+        ui.phase("downloading speaker models")
+        try:
+            D.download_diarization_models()
+        except Exception as e:  # noqa: BLE001
+            ui.status(f"Speaker model download failed: {e}", kind="warn",
+                      detail="Try again, or run: whiz models download-diarization")
+            return 1
+    if not _diarization_available(config):
+        ui.status("Setup finished but speaker detection is still unavailable.", kind="warn",
+                  detail="Check with: whiz doctor")
+        return 1
+    ui.status("Speaker detection is ready.", kind="ok")
+    return 0
+
+
+# ---------- analyze ----------
 # ---------- analyze ----------
 
 def _analysis_output_path(of_base: Path) -> Path:
@@ -2363,6 +2546,17 @@ def cmd_dictate(args: argparse.Namespace) -> int:
 def cmd_speakers_list(args: argparse.Namespace) -> int:
     """List stored speaker voice profiles."""
     profiles = P.load_profiles()
+    if getattr(args, "json", False):
+        # Names and provenance only — the embeddings are biometric data and
+        # the app has no use for them.
+        import json
+
+        print(json.dumps([
+            {"name": prof.name, "samples": prof.samples, "created": prof.created,
+             "source": prof.source, "path": str(P._profile_path(prof.name))}
+            for prof in profiles
+        ], ensure_ascii=False))
+        return 0
     if not profiles:
         ui.info(f"No voice profiles found in {P.profiles_dir()}")
         ui.muted("Profiles are saved automatically when you name speakers with")
@@ -2489,6 +2683,8 @@ def _run_speakers_match(args: argparse.Namespace, stack: contextlib.ExitStack) -
 
 def cmd_config_show(args: argparse.Namespace) -> int:
     config = cfg.load()
+    if getattr(args, "json", False):
+        return _print_config_json(config)
     print(f"# {cfg.CONFIG_PATH}")
     print()
     for k, v in config.to_dict().items():
@@ -2515,6 +2711,34 @@ def cmd_config_show(args: argparse.Namespace) -> int:
 
 
 _SECRET_CONFIG_KEYS = {"ai_api_key"}
+
+
+def _print_config_json(config: cfg.Config) -> int:
+    """``config show --json``: the settings as data, for the macOS app.
+
+    The text form prints Python reprs (``True``, ``['srt', 'json']``) that a
+    second language would have to re-parse by guesswork. Secrets stay masked
+    here too — the app only needs to know a key IS set (``secrets_set``),
+    and stdout of a GUI's child process ends up in logs like any other.
+    """
+    import json
+
+    values: dict[str, object] = {}
+    secrets_set: dict[str, bool] = {}
+    for k, v in config.to_dict().items():
+        if k in _SECRET_CONFIG_KEYS:
+            secrets_set[k] = bool(v)
+            values[k] = _mask_secret(v) if isinstance(v, str) and v else ""
+        else:
+            values[k] = v
+    payload = {
+        "path": str(cfg.CONFIG_PATH),
+        "values": values,
+        "secrets_set": secrets_set,
+        "model_search_dirs": [str(d) for d in cfg.model_search_dirs(config)],
+    }
+    print(json.dumps(payload, default=str, ensure_ascii=False))
+    return 0
 
 
 def _mask_secret(value: str) -> str:
@@ -2591,9 +2815,17 @@ def _validate_config_value(key: str, value: object) -> None:
 def cmd_config_set(args: argparse.Namespace) -> int:
     config = cfg.load()
     assignment = args.assignment
-    if "=" not in assignment:
+    if getattr(args, "stdin", False):
+        # `config set ai_api_key --stdin`: the value never appears in argv,
+        # where every local process can read it (ps). One line; the trailing
+        # newline a pipe or a heredoc adds is not part of the value.
+        if "=" in assignment:
+            raise SystemExit("With --stdin, pass only the KEY (the value is read from stdin)")
+        key, value = assignment, sys.stdin.readline().rstrip("\r\n")
+    elif "=" not in assignment:
         raise SystemExit("Expected KEY=VALUE (e.g. whiz config set threads=8)")
-    key, _, value = assignment.partition("=")
+    else:
+        key, _, value = assignment.partition("=")
     key = key.strip()
     if key not in cfg.Config.__dataclass_fields__:
         raise SystemExit(f"Unknown config key '{key}'. Valid: {', '.join(cfg.Config.__dataclass_fields__)}")
@@ -2602,7 +2834,10 @@ def cmd_config_set(args: argparse.Namespace) -> int:
     _validate_config_value(key, coerced)
     setattr(config, key, coerced)
     path = cfg.save(config)
-    print(f"Set {key} = {coerced!r}")
+    if key in _SECRET_CONFIG_KEYS and isinstance(coerced, str) and coerced:
+        print(f"Set {key} = {_mask_secret(coerced)!r}")
+    else:
+        print(f"Set {key} = {coerced!r}")
     print(f"Saved to {path}")
     return 0
 
@@ -2790,7 +3025,9 @@ def build_parser() -> argparse.ArgumentParser:
     # models
     mp = sub.add_parser("models", aliases=["m"], help="Manage whisper models")
     msub = mp.add_subparsers(dest="models_command", required=True)
-    msub.add_parser("list", aliases=["ls"]).set_defaults(func=cmd_models_list)
+    ml = msub.add_parser("list", aliases=["ls"])
+    ml.add_argument("--json", action="store_true", help="Print the discovered models as JSON")
+    ml.set_defaults(func=cmd_models_list)
     md = msub.add_parser("download", aliases=["dl"], help="Download a model from HuggingFace")
     md.add_argument("model", help="Model name, e.g. 'turbo', 'large-v3', or full 'ggml-large-v3-turbo-q5_0.bin'")
     md.add_argument("--dest", default="", help="Destination directory (default: ~/.cache/whisper)")
@@ -2823,7 +3060,9 @@ def build_parser() -> argparse.ArgumentParser:
     # speakers (voice profiles)
     sp = sub.add_parser("speakers", aliases=["sp"], help="Manage speaker voice profiles (cross-recording recognition)")
     spsub = sp.add_subparsers(dest="speakers_command", required=True)
-    spsub.add_parser("list", aliases=["ls"]).set_defaults(func=cmd_speakers_list)
+    spl = spsub.add_parser("list", aliases=["ls"])
+    spl.add_argument("--json", action="store_true", help="Print the profiles as JSON (names and provenance, no embeddings)")
+    spl.set_defaults(func=cmd_speakers_list)
     sf = spsub.add_parser("forget", aliases=["rm"], help="Delete a stored speaker voice profile by name")
     sf.add_argument("name", help="Speaker name to forget")
     sf.set_defaults(func=cmd_speakers_forget)
@@ -2842,11 +3081,23 @@ def build_parser() -> argparse.ArgumentParser:
     # config
     cp = sub.add_parser("config", aliases=["c"], help="View or edit configuration")
     csub = cp.add_subparsers(dest="config_command", required=True)
-    csub.add_parser("show", aliases=["cat"]).set_defaults(func=cmd_config_show)
+    cshow = csub.add_parser("show", aliases=["cat"])
+    cshow.add_argument("--json", action="store_true", help="Print the settings as JSON (secrets masked)")
+    cshow.set_defaults(func=cmd_config_show)
     csub.add_parser("edit", help="Open config in $EDITOR").set_defaults(func=cmd_config_edit)
     cs = csub.add_parser("set", help="Set a value: KEY=VALUE")
-    cs.add_argument("assignment", help="KEY=VALUE, e.g. threads=8 or model=turbo")
+    cs.add_argument("assignment", help="KEY=VALUE, e.g. threads=8 or model=turbo (just KEY with --stdin)")
+    cs.add_argument("--stdin", action="store_true", help="Read the value from stdin (keeps secrets such as ai_api_key out of argv)")
     cs.set_defaults(func=cmd_config_set)
+
+    # doctor / setup
+    doc = sub.add_parser("doctor", help="Check what transcription needs (whisper.cpp, ffmpeg, a model, speakers, AI)")
+    doc.add_argument("--json", action="store_true", help="Print the report as JSON")
+    doc.add_argument("--ai", action="store_true", help="Also contact the AI server and check the configured model")
+    doc.set_defaults(func=cmd_doctor)
+    st = sub.add_parser("setup", help="One-time setup steps")
+    stsub = st.add_subparsers(dest="setup_command", required=True)
+    stsub.add_parser("speakers", help="Install speaker detection (sherpa-onnx + ~90 MB models)").set_defaults(func=cmd_setup_speakers)
 
     # upgrade
     up = sub.add_parser("upgrade", aliases=["up"], help="One-command upgrade: reinstall whiz from git (pipx or uv tool, whichever installed it), keeping the diarize extra if it was installed.")

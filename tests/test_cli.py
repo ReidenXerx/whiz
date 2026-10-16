@@ -2149,6 +2149,66 @@ def test_config_show_masks_the_api_key(monkeypatch, capsys):
     assert "sk-…4567" in out
 
 
+def test_config_show_json_is_data_with_secrets_masked(monkeypatch, capsys):
+    import json
+
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config(
+        ai_api_key="sk-SECRET1234567", outputs=["srt", "json"], verbose=False))
+    monkeypatch.setattr(cli.cfg, "model_search_dirs", lambda config: [Path("/models")])
+    assert cli.cmd_config_show(SimpleNamespace(json=True)) == 0
+    out = capsys.readouterr().out
+    assert "SECRET" not in out
+    payload = json.loads(out)
+    assert payload["values"]["outputs"] == ["srt", "json"]
+    assert payload["values"]["verbose"] is False
+    # Tri-state unset is JSON null, not the text form's "<unset>".
+    assert payload["values"]["auto_diarization_setup"] is None
+    assert payload["secrets_set"] == {"ai_api_key": True}
+    assert payload["model_search_dirs"] == ["/models"]
+
+
+def test_models_list_json_prints_a_list_even_when_empty(monkeypatch, capsys, tmp_path):
+    import json
+
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    monkeypatch.setattr(cli.M, "discover", lambda config: [])
+    assert cli.cmd_models_list(SimpleNamespace(json=True)) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+    model = SimpleNamespace(alias="turbo", size_mb=1550.04, path=tmp_path / "ggml-large-v3-turbo.bin")
+    monkeypatch.setattr(cli.M, "discover", lambda config: [model])
+    cli.cmd_models_list(SimpleNamespace(json=True))
+    assert json.loads(capsys.readouterr().out) == [
+        {"alias": "turbo", "size_mb": 1550.0, "path": str(model.path)}]
+
+
+def test_config_set_stdin_keeps_the_secret_out_of_argv_and_stdout(tmp_path, monkeypatch, capsys):
+    import io
+
+    monkeypatch.setenv("WHIZ_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(cli.cfg, "CONFIG_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(cli.cfg, "CONFIG_PATH", tmp_path / "config.toml", raising=False)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("sk-SECRET1234567\n"))
+    assert cli.cmd_config_set(SimpleNamespace(assignment="ai_api_key", stdin=True)) == 0
+    assert cli.cfg.load().ai_api_key == "sk-SECRET1234567"
+    assert "SECRET" not in capsys.readouterr().out
+
+    # The KEY=VALUE form masks its echo too.
+    cli.cmd_config_set(SimpleNamespace(assignment="ai_api_key=sk-OTHER98765432"))
+    assert "OTHER" not in capsys.readouterr().out
+
+    with pytest.raises(SystemExit, match="only the KEY"):
+        cli.cmd_config_set(SimpleNamespace(assignment="ai_api_key=x", stdin=True))
+
+
+def test_json_flags_are_wired_into_the_parser():
+    parser = cli.build_parser()
+    assert parser.parse_args(["config", "show", "--json"]).json is True
+    assert parser.parse_args(["models", "list", "--json"]).json is True
+    assert parser.parse_args(["config", "show"]).json is False
+    assert parser.parse_args(["config", "set", "ai_api_key", "--stdin"]).stdin is True
+
+
 def test_config_edit_splits_editor_command(monkeypatch, tmp_path):
     seen = {}
     monkeypatch.setenv("EDITOR", "code -w")
@@ -2288,3 +2348,132 @@ def test_tool_installer_detection(monkeypatch):
 
 def test_run_live_missing_tool_is_not_a_traceback(monkeypatch):
     assert cli._run_live(["definitely-not-a-real-tool-xyz"]) == 127
+
+
+# ---------- doctor / setup (onboarding contract) ----------
+
+def _doctor_env(monkeypatch, tmp_path, *, whisper=True, ffmpeg=True, model=True,
+                model_file="ggml-large-v3-turbo.bin"):
+    tools = {"whisper-cli": whisper, "ffmpeg": ffmpeg, "brew": True}
+    monkeypatch.setattr(cli.shutil, "which",
+                        lambda name: f"/bin/{name}" if tools.get(name) else None)
+    bin_path = tmp_path / model_file
+    bin_path.write_bytes(b"x" * 2048)
+    monkeypatch.setattr(cli.M, "pick_best", lambda config: bin_path if model else None)
+    monkeypatch.setattr(cli.M, "find_vad_model", lambda config: None)
+    monkeypatch.setattr(cli.D, "find_segmentation_model", lambda config: None)
+    monkeypatch.setattr(cli.D, "find_embedding_model", lambda config: None)
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config(ai_model="", ai_base_url="http://x/v1"))
+
+
+def test_doctor_report_ready_when_the_three_essentials_exist(monkeypatch, tmp_path):
+    _doctor_env(monkeypatch, tmp_path)
+    report = cli._doctor_report(cli.cfg.load())
+    assert report["ready"] is True
+    assert report["checks"]["whisper_cli"]["path"] == "/bin/whisper-cli"
+    assert report["checks"]["model"]["alias"] == "large-v3-turbo"
+    assert report["checks"]["model"]["quantized"] is False
+    # Optional parts never block readiness.
+    assert report["checks"]["speakers"]["ok"] is False
+    assert report["checks"]["vad_model"]["ok"] is False
+    assert report["ai"] == {"configured": False, "base_url": "http://x/v1", "model": ""}
+    assert report["brew"] == "/bin/brew"
+
+
+@pytest.mark.parametrize("missing", ["whisper", "ffmpeg", "model"])
+def test_doctor_json_exits_nonzero_when_an_essential_is_missing(monkeypatch, tmp_path, capsys, missing):
+    import json
+
+    _doctor_env(monkeypatch, tmp_path, **{missing: False})
+    assert cli.cmd_doctor(SimpleNamespace(json=True, ai=False)) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["ready"] is False
+    key = {"whisper": "whisper_cli", "ffmpeg": "ffmpeg", "model": "model"}[missing]
+    assert report["checks"][key]["ok"] is False
+    assert report["checks"][key]["fix"].startswith(("brew install", "whiz models download"))
+
+
+def test_doctor_ai_probe_is_opt_in(monkeypatch, tmp_path):
+    _doctor_env(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(cli.AI, "list_ollama_models",
+                        lambda url, timeout: calls.append(url) or ["qwen3:8b"])
+    config = cli.cfg.Config(ai_model="qwen3:8b", ai_base_url="http://x/v1")
+    assert "reachable" not in cli._doctor_report(config)["ai"]
+    assert calls == [], "no network unless asked"
+    ai = cli._doctor_report(config, check_ai=True)["ai"]
+    assert ai["reachable"] and ai["model_available"] and ai["models"] == ["qwen3:8b"]
+
+
+def test_doctor_flags_a_quantized_fallback_but_stays_ready(monkeypatch, tmp_path, capsys):
+    # NS-15: the only model on disk is quantized — it runs, so the doctor is
+    # ready, but it says so and names the unquantized download.
+    _doctor_env(monkeypatch, tmp_path, model_file="ggml-large-v3-turbo-q5_0.bin")
+    report = cli._doctor_report(cli.cfg.load())
+    assert report["ready"] is True
+    model = report["checks"]["model"]
+    assert model["ok"] is True and model["quantized"] is True
+    assert model["fix"] == "whiz models download turbo"
+    assert cli.cmd_doctor(SimpleNamespace(json=False, ai=False)) == 0
+    assert "quantized" in capsys.readouterr().err  # ui tables go to stderr
+
+
+def test_quantized_alias_detection():
+    for alias in ("large-v3-turbo-q5_0", "large-v3-q8_0", "medium-q5_1", "small-q4_k"):
+        assert cli.M.is_quantized(alias), alias
+    for alias in ("large-v3-turbo", "large-v3", "small", "small.en"):
+        assert not cli.M.is_quantized(alias), alias
+
+
+def test_doctor_text_mode_runs(monkeypatch, tmp_path):
+    _doctor_env(monkeypatch, tmp_path)
+    assert cli.cmd_doctor(SimpleNamespace(json=False, ai=False)) == 0
+
+
+def test_setup_speakers_is_a_no_op_when_ready(monkeypatch):
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    monkeypatch.setattr(cli, "_diarization_available", lambda config: True)
+    monkeypatch.setattr(cli, "_install_sherpa_onnx", lambda: pytest.fail("must not install"))
+    assert cli.cmd_setup_speakers(SimpleNamespace()) == 0
+
+
+def test_setup_speakers_downloads_models_without_prompting(monkeypatch):
+    import types
+
+    state = {"downloaded": False}
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", types.ModuleType("sherpa_onnx"))
+    monkeypatch.setattr(cli, "_auto_setup_consent", lambda config: pytest.fail("the command is the consent"))
+    monkeypatch.setattr(cli.D, "find_segmentation_model", lambda config: "/seg" if state["downloaded"] else None)
+    monkeypatch.setattr(cli.D, "find_embedding_model", lambda config: "/emb" if state["downloaded"] else None)
+    monkeypatch.setattr(cli.D, "download_diarization_models", lambda: state.update(downloaded=True))
+    assert cli.cmd_setup_speakers(SimpleNamespace()) == 0
+    assert state["downloaded"]
+
+
+def test_setup_speakers_reports_a_failed_install(monkeypatch):
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    monkeypatch.setattr(cli, "_diarization_available", lambda config: False)
+    monkeypatch.setitem(sys.modules, "sherpa_onnx", None)  # import raises ImportError
+    monkeypatch.setattr(cli, "_install_sherpa_onnx", lambda: False)
+    assert cli.cmd_setup_speakers(SimpleNamespace()) == 1
+
+
+def test_speakers_list_json_has_no_embeddings(monkeypatch, capsys):
+    import json
+
+    prof = cli.P.Profile(name="Ann", embedding=[0.1] * 4, dim=4, created="2026-10-16T00:00:00Z",
+                         samples=3, source="user")
+    monkeypatch.setattr(cli.P, "load_profiles", lambda: [prof])
+    assert cli.cmd_speakers_list(SimpleNamespace(json=True)) == 0
+    out = capsys.readouterr().out
+    assert "embedding" not in out and "0.1" not in out
+    row = json.loads(out)[0]
+    assert row["name"] == "Ann" and row["samples"] == 3 and row["source"] == "user"
+
+
+def test_onboarding_commands_are_wired():
+    parser = cli.build_parser()
+    assert parser.parse_args(["doctor", "--json", "--ai"]).func is cli.cmd_doctor
+    assert parser.parse_args(["setup", "speakers"]).func is cli.cmd_setup_speakers
+    assert parser.parse_args(["speakers", "list", "--json"]).json is True

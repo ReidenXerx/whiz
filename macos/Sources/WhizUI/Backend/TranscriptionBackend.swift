@@ -125,7 +125,7 @@ enum TranscriptionFailure: LocalizedError, Equatable {
             return summary.isEmpty ? "whiz exited with code \(code)." : summary
         case .whizNotFound:
             return "Could not find the whiz command. Install it with:\n"
-                 + "  pipx install whiz"
+                 + "  pipx install git+https://github.com/ReidenXerx/whiz.git"
         }
     }
 }

@@ -64,11 +64,23 @@ final class CLIBackend: TranscriptionBackend, @unchecked Sendable {
         _ request: TranscriptionRequest,
         onEvent: @escaping @Sendable (TranscriptionEvent) -> Void
     ) async throws {
+        try await run(arguments: Self.arguments(for: request), onEvent: onEvent)
+    }
+
+    /// Run `executable` with any argv under the same pipe discipline as a
+    /// transcription: merged output parsed into events, EOF-and-exit before
+    /// done, nonzero exit thrown as `TranscriptionFailure`, cancel → stop.
+    /// The setup assistant drives `whiz models download`, `whiz setup
+    /// speakers` — and `brew` / `pipx`, whose lines simply arrive as `.log`.
+    func run(
+        arguments: [String],
+        onEvent: @escaping @Sendable (TranscriptionEvent) -> Void
+    ) async throws {
         try Task.checkCancellation()
 
         let process = Process()
         process.executableURL = executable
-        process.arguments = Self.arguments(for: request)
+        process.arguments = arguments
 
         // whiz writes progress to stderr and leaves stdout for data. Both are
         // merged: a user reading a log pane does not care which stream a line

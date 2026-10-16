@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="docs/assets/whiz-mark.svg" alt="whiz" width="76">
+<img src="docs/assets/whiz-icon.png" alt="Whiz app icon" width="112">
 
-# whiz
+# Whiz
 
 **A recording goes in. A transcript that knows who spoke comes out.**
 
@@ -14,11 +14,13 @@ From audio or video to a labeled, named, frame-illustrated transcript — in one
 [![macOS · Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](#requirements)
 [![Powered by whisper.cpp](https://img.shields.io/badge/powered%20by-whisper.cpp%20%2B%20sherpa--onnx-F0A32E)](https://github.com/ggerganov/whisper.cpp)
 
-```bash
-whiz transcribe recording.mov
-```
+**[Mac app](#macos-app)** · **[Command line](#quick-start)** · **[duduphudu.app/whiz](https://duduphudu.app/whiz/)**
 
-**[duduphudu.app/whiz](https://duduphudu.app/whiz/)** — what one command does, and what it costs you in privacy (nothing)
+<img src="docs/assets/app-transcript.png" alt="The Whiz Mac app showing a three-person meeting: the video player on top, then the transcript with Maya, Tom and Arjun each in their own colour, a talk-time legend, and the slide that was on screen beside every line." width="100%">
+
+```bash
+whiz transcribe recording.mov    # the same pipeline, from the terminal
+```
 
 </div>
 
@@ -47,6 +49,7 @@ Most transcription tools stop at text. whiz is the one-command path from a scree
 - [Requirements](#requirements)
 - [Install](#install)
 - [What it does](#what-it-does)
+- [macOS app](#macos-app)
 - [Recipes](#recipes)
 - [Commands](#commands)
 - [Configuration](#configuration)
@@ -108,6 +111,38 @@ Then make sure a model is available — download one from the official whisper.c
 ```bash
 whiz models download turbo      # ggml-large-v3-turbo.bin — unquantized (NS-15)
 ```
+
+## macOS app
+
+`macos/` holds a native SwiftUI front-end for the CLI (macOS 13+). It runs
+the installed `whiz` for every transcription, so install the CLI first; then:
+
+```bash
+cd macos && ./build-app.sh            # → macos/dist/Whiz.app (ad-hoc signed, this Mac only)
+cp -R dist/Whiz.app /Applications/
+```
+
+To give the app to other Macs, sign it with a Developer ID and notarize the
+DMG (needs an Apple Developer Program membership; `build-dmg.sh` explains
+the one-time `notarytool store-credentials` step):
+
+```bash
+WHIZ_SIGN_IDENTITY="Developer ID Application: Name (TEAMID)" \
+WHIZ_NOTARY_PROFILE=whiz-notary ./build-dmg.sh   # → signed, notarized, stapled DMG
+```
+
+<p>
+<img src="docs/assets/app-compose.png" alt="New Transcription: a drop zone for a recording, then options for language, speakers, names, video frames and AI summary." width="49%">
+<img src="docs/assets/app-setup.png" alt="The Setup Assistant on a fresh Mac: the whiz engine is installed; whisper.cpp offers Install with Homebrew; the speech model step offers Turbo, Large v3 or Small to download." width="49%">
+</p>
+
+- **Setup Assistant:** on first launch, a checklist of what Whiz needs (the CLI, whisper.cpp and ffmpeg, a speech model, optionally speaker detection and an AI model), each installed with one click through Homebrew, pipx and `whiz`, with progress. Without Homebrew, *Install Homebrew…* runs its official installer in Terminal (it asks for your password); coming back to the app checks again. A quantized speech model that is only there by default is flagged, with the full-quality download offered. It reopens from the app menu.
+- **Sidebar:** New Transcription, the run in progress, and recent runs (right-click to re-run or remove).
+- **New Transcription:** drop a recording (or ⌘O, or Finder's *Open With*), choose language, speakers, names, frames and AI summary, then press Return.
+- **While it runs:** a step list with progress and time left, a card that asks you to name unknown speakers, and the full log under *Details*.
+- **Results:** the transcript with speaker colors, search, frames and a built-in player (click a timestamp to play from there), the rendered AI summary, and every file written.
+- **Settings (⌘,):** whiz's own `config.toml` through `whiz config` (model, default language, output formats, speaker detection, AI server and key), plus the remembered voices, each of which can be forgotten. The terminal and the app share one config.
+- **Summarize Now:** a finished run without a summary gets one from its Summary tab (`whiz analyze`).
 
 ## What it does
 
@@ -230,6 +265,7 @@ Manage whisper, VAD, and diarization models.
 
 ```bash
 whiz models list                       # show discovered ggml models
+whiz models list --json                # the same, as data (the macOS app reads this)
 whiz models download turbo             # ggml-large-v3-turbo.bin — unquantized (NS-15)
 whiz models download large-v3 --dest ~/models
 whiz models known                      # canonical whisper.cpp model filenames
@@ -238,15 +274,27 @@ whiz models download-vad v6.2.0
 whiz models download-diarization       # pyannote segmentation + 3D-Speaker embedding (~90 MB)
 ```
 
+### `whiz doctor` / `whiz setup speakers`
+
+```bash
+whiz doctor                            # what a run needs and whether it is here, with the fix for each part
+whiz doctor --json                     # the same as data; exit 1 until whisper.cpp, ffmpeg and a model exist
+whiz doctor --ai                       # also ask the AI server which models it has
+whiz setup speakers                    # one-time speaker detection setup (sherpa-onnx + ~90 MB models), no prompt
+whiz speakers list --json              # voice profiles as data (names and provenance, never the embeddings)
+```
+
 ### `whiz config show | edit | set`
 
 ```bash
 whiz config show                       # print current config + model search dirs
+whiz config show --json                # the same as JSON, secrets masked
 whiz config edit                       # open ~/.config/whiz/config.toml in $EDITOR
 whiz config set model=turbo
 whiz config set threads=8
 whiz config set ai_model=llava
 whiz config set speaker_match_threshold=0.85
+whiz config set ai_api_key --stdin     # read the value from stdin: secrets stay out of argv
 ```
 
 ### `whiz speakers list | forget | match`

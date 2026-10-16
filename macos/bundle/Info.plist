@@ -4,8 +4,24 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Recording</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.movie</string>
+				<string>public.audio</string>
+			</array>
+		</dict>
+	</array>
 	<key>CFBundleExecutable</key>
-	<string>WhizUI</string>
+	<string>Whiz</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
@@ -13,7 +29,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>WhizUI</string>
+	<string>Whiz</string>
 	<key>CFBundleDisplayName</key>
 	<string>Whiz</string>
 	<key>CFBundlePackageType</key>
