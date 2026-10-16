@@ -119,6 +119,11 @@ def _will_write_generic_labels(args: argparse.Namespace) -> bool:
     return aud.needs_extraction(Path(file_arg)) and not getattr(args, "no_screenshots", False)
 
 
+_WHISPER_PROGRESS_RE = re.compile(
+    r"whisper_print_progress_callback: progress\s*=\s*(\d+)\s*%"
+)
+
+
 def _run_whisper_streaming(cmd: list[str]) -> subprocess.Popen:
     """Run whisper-cli, streaming its stdout/stderr line-by-line to our stderr.
 
@@ -126,6 +131,14 @@ def _run_whisper_streaming(cmd: list[str]) -> subprocess.Popen:
     transcriptions show progress pacing. Output is styled via the ui module
     (dimmed timestamp prefix + muted content) and degrades to plain text when
     piped. Returns the Popen object after completion.
+
+    whisper-cli's own progress line
+    (``whisper_print_progress_callback: progress =  42%``) is swallowed and
+    re-emitted as ``ui.progress`` — over a pipe that becomes the
+    ``~ progress: N%`` machine line the macOS UI's status chip reads; on a TTY
+    it stays a dim ``progress: N%`` line. Swallowing it also keeps the raw
+    callback noise out of logs on BOTH branches — the raw line is whisper's
+    internal trace, not run output the user needs.
     """
     import time
 
@@ -140,6 +153,9 @@ def _run_whisper_streaming(cmd: list[str]) -> subprocess.Popen:
     assert proc.stdout is not None
     with ui.streaming_progress(cmd) as write:
         for line in proc.stdout:
+            if (m := _WHISPER_PROGRESS_RE.search(line)) and ":" in line:
+                ui.progress(int(m.group(1)))
+                continue
             elapsed = time.monotonic() - start
             write(line, elapsed)
     proc.wait()
@@ -563,12 +579,13 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
     if args.no_timestamps:
         cmd.append("-nt")
     # Progress: whisper-cli uses -pp (print progress) and -np (no progress).
-    # They are mutually exclusive. When stderr is a TTY we default to -pp so
-    # the user sees live progress; otherwise -np keeps logs clean. --no-progress
-    # forces -np even on a TTY; --print-progress forces -pp even off a TTY.
-    progress_enabled = args.print_progress or (
-        sys.stderr.isatty() and not args.no_progress
-    )
+    # They are mutually exclusive. -pp is now the DEFAULT on both branches:
+    # on a TTY the user sees the live line; when piped, _run_whisper_streaming
+    # swallows it and re-emits the `~ progress: N%` machine line the macOS
+    # UI's status chip reads — a pipe is not "logs", it is the UI's channel.
+    # --no-progress forces -np everywhere; --print-progress forces -pp over
+    # any opt-out.
+    progress_enabled = args.print_progress or not args.no_progress
     if progress_enabled:
         cmd.append("-pp")
     elif not config.verbose and not args.verbose:
@@ -2456,7 +2473,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--vad-threshold", type=float, default=None, help="VAD threshold (default: 0.5)")
     t.add_argument("--translate", action="store_true", help="Translate to English instead of transcribing")
     t.add_argument("--no-timestamps", action="store_true", help="Suppress timestamps in output")
-    t.add_argument("--print-progress", action="store_true", help="Print progress (force on; default on when stderr is a TTY)")
+    t.add_argument("--print-progress", action="store_true", help="Print progress (force on; default: on unless --no-progress)")
     t.add_argument("--no-progress", dest="no_progress", action="store_true", help="Disable whisper-cli progress passthrough (forces -np)")
     t.add_argument("--keep-wav", action="store_true", help="Keep the intermediate extracted WAV (default: deleted after)")
     t.add_argument("--no-auto-vad-download", action="store_true", help="Don't auto-download the Silero VAD model when VAD is enabled and missing")

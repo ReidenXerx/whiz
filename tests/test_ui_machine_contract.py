@@ -17,6 +17,7 @@ the prose inside a label stays free to change:
     ▸ <phase label>
     ✓ <artifact label>: <path>
     ? speaker-name: <label> | <quote>[ | <suggestion>]
+    ~ progress: <whole percent>%
 """
 
 from __future__ import annotations
@@ -309,6 +310,79 @@ def test_piped_prompt_writes_no_stdout_echo(monkeypatch, capsys):
         "piped stdin must not echo the prompt to stdout — it corrupts the merged stream"
     )
     assert "Name for Speaker A" not in captured.err
+
+
+def test_progress_emits_machine_line_when_piped(piped):
+    """`~ progress: N%` — how the UI's status chip shows a live percent.
+
+    The integer is whole and unpadded: whisper-cli pads its own line
+    ("progress =  42%") and that padding would leak into the chip as "042%".
+    """
+    ui.progress(42.0)
+    assert piped.read().strip() == "~ progress: 42%"
+
+
+def test_progress_clamps_out_of_range(piped):
+    """A percent outside 0-100 clamps rather than printing nonsense — the
+    emitters are float-derived and a rounding overshoot at 99.999 is normal.
+    """
+    ui.progress(100.7)
+    ui.progress(-3.0)
+    lines = piped.read().strip().splitlines()
+    assert lines == ["~ progress: 100%", "~ progress: 0%"]
+
+
+def test_whisper_progress_lines_become_machine_lines(monkeypatch, capsys, tmp_path):
+    """_run_whisper_streaming must swallow whisper-cli's own progress line
+    and re-emit it as `~ progress: N%` — the raw padded line
+    ('whisper_print_progress_callback: progress =  42%') is whisper's
+    internal trace, and over a pipe it would be both log noise and an
+    unparseable near-miss of the marker. The rest of whisper's output
+    streams through untouched.
+    """
+    import subprocess
+
+    fixture = tmp_path / "stream.txt"
+    fixture.write_text(
+        "whisper_print_progress_callback: progress =  41%\n"
+        "hello world\n"
+        "whisper_print_progress_callback: progress = 100%\n",
+        encoding="utf-8",
+    )
+    fake = subprocess.Popen(
+        ["cat", str(fixture)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: fake)
+    monkeypatch.setattr(ui, "_is_tty", lambda: False)
+
+    cli._run_whisper_streaming(["cat"])
+
+    out = capsys.readouterr()
+    assert "~ progress: 41%" in out.err
+    assert "~ progress: 100%" in out.err
+    assert "whisper_print_progress" not in out.err
+    # The non-progress line still streams through the elapsed writer.
+    assert "hello world" in out.err
+
+
+def test_diarization_callback_emits_one_line_per_percent(piped):
+    """The sherpa-onnx progress hook is called per chunk — hundreds of times
+    at the same percent. Over a pipe each whole percent must emit exactly one
+    `~ progress:` line, never carriage returns (a `\r` line would corrupt
+    the merged stream the UI parses line-by-line).
+    """
+    from whiz import diarize
+
+    diarize._last_emitted_percent[0] = -1
+    for processed, total in [(0, 100), (7, 100), (7, 100), (8, 100), (8, 100), (9, 100)]:
+        diarize._progress_callback(processed, total)
+
+    lines = piped.read().strip().splitlines()
+    assert lines == ["~ progress: 0%", "~ progress: 7%", "~ progress: 8%", "~ progress: 9%"]
 
 
 def test_prompt_loop_ends_on_eof_over_pipe(monkeypatch):

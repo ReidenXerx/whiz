@@ -33,6 +33,7 @@ final class CLIBackend: TranscriptionBackend, @unchecked Sendable {
     private static let phaseMarker = "▸ "
     private static let artifactMarker = "✓ "
     private static let speakerNameMarker = "? speaker-name: "
+    private static let progressMarker = "~ progress: "
 
     /// The live process and the cancelled flag — see `ProcessState`.
     private let state = ProcessState()
@@ -197,6 +198,16 @@ final class CLIBackend: TranscriptionBackend, @unchecked Sendable {
             }
             return .speakerName(SpeakerNamePrompt(
                 label: label, quote: quote, suggestion: suggestion))
+        }
+        if line.hasPrefix(progressMarker) {
+            // `~ progress: N%` — whole, unpadded, always within 0-100 on the
+            // emit side; the bounds here are defence against a malformed
+            // hand-written line.
+            let body = line.dropFirst(progressMarker.count)
+            guard body.hasSuffix("%"),
+                  let percent = Int(body.dropLast()) else { return nil }
+            guard (0...100).contains(percent) else { return nil }
+            return .progress(percent)
         }
         return nil
     }

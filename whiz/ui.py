@@ -178,6 +178,26 @@ def _machine_field(text: str) -> str:
     return str(text).replace(" | ", f" {_PIPE_LOOKALIKE} ")
 
 
+def progress(percent: float) -> None:
+    """Report run progress as a percentage, 0-100.
+
+    On a TTY this is a single dim line (the rich spinner already animates
+    the phase label; a stream of these would scroll it away). When piped,
+    this is the fourth machine line the macOS UI parses:
+
+        ~ progress: 42%
+
+    Emitters throttle to whole percent steps, so a piped run prints at most
+    100 of these; the integer is always whole and unpadded.
+    """
+    value = max(0.0, min(100.0, percent))
+    whole = int(round(value))
+    if not _is_tty():
+        print(f"~ progress: {whole}%", file=sys.stderr)
+        return
+    _console.print(Text(f"progress: {whole}%", style="whiz.muted"))
+
+
 def speaker_prompt(label: str, quote: str, suggestion: str | None) -> None:
     """Render one interactive speaker-naming prompt's context.
 

@@ -43,6 +43,10 @@ final class TranscriptionViewModel: ObservableObject {
     /// empty. A window that has run something shows its own artifacts; this
     /// is the fresh-window state (see MainView's empty state).
     @Published private(set) var lastRun: LastRunRecord?
+    /// The recent finished runs, newest first, loaded from `LastRunStore`.
+    /// A fresh window offers the whole recent set, not just the newest one —
+    /// the artifacts are on disk either way.
+    @Published private(set) var recentRuns: [LastRunRecord] = []
     /// What the control bar's status chip says about the last run in THIS
     /// window: running, or how it ended. A window shows its own run; the
     /// persisted record above is what fresh windows see.
@@ -56,6 +60,10 @@ final class TranscriptionViewModel: ObservableObject {
     /// Prompts arrive one at a time (the CLI asks sequentially); answering
     /// releases the run to continue.
     @Published private(set) var pendingSpeakerPrompt: SpeakerNamePrompt?
+    /// How far along the current phase is, 0-100 — `nil` when the phase
+    /// reports nothing measurable. Reset on every phase change so a new
+    /// stage starts at "no percent yet", not stuck at the last one's 100.
+    @Published private(set) var progressPercent: Int?
 
     /// The log pane is a transcript, not a ledger: keep the tail.
     static let logLineCap = 400
@@ -79,10 +87,29 @@ final class TranscriptionViewModel: ObservableObject {
     /// Injectable for tests: a suite-backed store rather than the real
     /// domain (see LastRunStore for why the real domain must stay untouched).
     private let lastRunStore: LastRunStore
+    private let optionsStore: OptionsStore
 
-    init(lastRunStore: LastRunStore = LastRunStore()) {
+    init(lastRunStore: LastRunStore = LastRunStore(),
+         optionsStore: OptionsStore = OptionsStore()) {
         self.lastRunStore = lastRunStore
+        self.optionsStore = optionsStore
         lastRun = lastRunStore.load()
+        recentRuns = lastRunStore.loadHistory()
+        restoreOptions()
+    }
+
+    /// Bring the persisted options into the form once, at birth — the form
+    /// then owns them until `start()` writes them back.
+    private func restoreOptions() {
+        let record = optionsStore.load()
+        language = record.language
+        speakers = record.speakers
+        speakerNames = record.speakerNames
+        if let mode = ScreenshotsMode(rawValue: record.screenshotsRaw) {
+            screenshots = mode
+        }
+        analyze = record.analyze
+        aiModel = record.aiModel
     }
 
     var hasError: Bool { errorMessage != nil }
@@ -118,6 +145,14 @@ final class TranscriptionViewModel: ObservableObject {
         lastDuration = nil
         lastOutcome = .running
         pendingSpeakerPrompt = nil
+        progressPercent = nil
+        optionsStore.save(OptionsRecord(
+            language: language,
+            speakers: speakers,
+            speakerNames: speakerNames,
+            screenshotsRaw: screenshots.rawValue,
+            analyze: analyze,
+            aiModel: aiModel))
 
         // The backend reports events from the pipe's reader queue; a stream
         // moves them onto the main actor without polling. `onEvent` is only
@@ -146,6 +181,7 @@ final class TranscriptionViewModel: ObservableObject {
             await consumer.value
             isRunning = false
             phase = nil
+            progressPercent = nil
             lastOutcome = outcome
             lastDuration = Date().timeIntervalSince(runStartedAt ?? Date())
             // Persist the results only when the run actually produced
@@ -154,6 +190,7 @@ final class TranscriptionViewModel: ObservableObject {
             // window never advertises a run that wrote nothing.
             if !artifacts.isEmpty {
                 lastRun = lastRunStore.saveReturning(artifacts: artifacts, input: input)
+                recentRuns = lastRunStore.loadHistory()
             }
         }
     }
@@ -185,12 +222,15 @@ final class TranscriptionViewModel: ObservableObject {
         switch event {
         case .phase(let label):
             phase = label
+            progressPercent = nil
         case .log(let line):
             appendLog(line)
         case .artifact(let artifact):
             artifacts.append(artifact)
         case .speakerName(let prompt):
             pendingSpeakerPrompt = prompt
+        case .progress(let percent):
+            progressPercent = percent
         }
     }
 

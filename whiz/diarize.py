@@ -367,13 +367,44 @@ def run_diarization(
 
 
 def _progress_callback(num_processed: int, num_total: int) -> int:
-    """sherpa-onnx diarization progress hook (prints % to stderr)."""
-    if num_total > 0:
-        pct = num_processed / num_total * 100.0
-        print(f"\rDiarization: {pct:5.1f}% ({num_processed}/{num_total})", end="", file=sys.stderr, flush=True)
+    """sherpa-onnx diarization progress hook.
+
+    Called very frequently (per chunk); the whole point of throttling here is
+    that ONE integer percent is what both renderers want. On a TTY the line
+    redraws in place with ``\r`` (the classic counter). When piped, each new
+    whole percent is a ``~ progress: N%`` machine line for the macOS UI — the
+    raw ``\r`` line would corrupt the merged stream a pipe parser reads.
+    """
+    if num_total <= 0:
+        return 0
+    pct = num_processed / num_total * 100.0
+    whole = int(pct)
+    if whole == _last_emitted_percent[0]:
+        return 0
+    _last_emitted_percent[0] = whole
+    if _ui_tty():
+        print(f"\rDiarization: {pct:5.1f}% ({num_processed}/{num_total})",
+              end="", file=sys.stderr, flush=True)
         if num_processed >= num_total:
             print(file=sys.stderr)  # newline after completion
+    else:
+        from whiz import ui
+        ui.progress(pct)
     return 0
+
+
+# The last percent the callback emitted, so repeated per-chunk calls at the
+# same percentage emit exactly one line. Starts at -1 (a percent outside the
+# real range) so a first call at 0% still emits once. Module-level state —
+# the CLI runs one diarization per process, so there is no run index to key
+# it on.
+_last_emitted_percent = [-1]
+
+
+def _ui_tty() -> bool:
+    """Whether whiz's ui sees a TTY — imported lazily to avoid a cycle."""
+    from whiz import ui
+    return ui._is_tty()
 
 
 def _read_wav_pcm(path: Path) -> tuple[list[float], int]:

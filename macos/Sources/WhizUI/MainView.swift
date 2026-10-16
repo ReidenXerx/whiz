@@ -111,7 +111,7 @@ struct MainView: View {
             case .running:
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
-                    Text(model.phase ?? "Running…")
+                    Text(chipPhaseTitle)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -146,6 +146,14 @@ struct MainView: View {
         .padding(.vertical, 5)
         .background(.quinary, in: Capsule())
         .lineLimit(1)
+    }
+
+    /// The phase label with a live percent when the CLI reports one —
+    /// 'transcribing · 42%' reads as one fact, not two competing ones.
+    private var chipPhaseTitle: String {
+        guard let phase = model.phase else { return "Running…" }
+        guard let percent = model.progressPercent else { return phase }
+        return "\(phase) · \(percent)%"
     }
 
     @ViewBuilder
@@ -397,16 +405,28 @@ struct MainView: View {
             Button("Open") { NSWorkspace.shared.open(url) }
         }
         .padding(.vertical, 1)
+        .contextMenu {
+            Button("Copy Path") { copyPath(url) }
+            Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+            Button("Open") { NSWorkspace.shared.open(url) }
+        }
+    }
+
+    /// The full path on the pasteboard — the fastest way to hand an artifact
+    /// to a terminal, a chat, or an issue.
+    private func copyPath(_ url: URL) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(url.path, forType: .string)
     }
 
     // MARK: - Idle area
 
     private var idleArea: some View {
         ZStack {
-            if let record = model.lastRun {
-                lastRunCard(record)
-            } else {
+            if model.recentRuns.isEmpty {
                 firstRunHint
+            } else {
+                recentRunsList
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -415,6 +435,57 @@ struct MainView: View {
         .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
             acceptDrop(providers)
         }
+    }
+
+    /// The recent runs, newest first — every entry's artifacts are on disk.
+    /// One row per run: what it consumed, when it finished, what it wrote,
+    /// and the one click to get there in Finder.
+    private var recentRunsList: some View {
+        ScrollView {
+            VStack(spacing: 10) {
+                Text("Recent runs")
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+                ForEach(model.recentRuns) { record in
+                    recentRunRow(record)
+                }
+                Text("Drop a media file here, or click anywhere to choose one")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(24)
+            .frame(maxWidth: 640)
+        }
+    }
+
+    private func recentRunRow(_ record: LastRunRecord) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text(URL(fileURLWithPath: record.inputPath).lastPathComponent)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(record.inputPath)
+                Spacer()
+                Text(record.finishedAt.formatted(date: .abbreviated, time: .shortened))
+                    .foregroundStyle(.secondary)
+                    .font(.caption)
+            }
+            HStack(spacing: 6) {
+                Text("\(record.artifacts.count) artifact\(record.artifacts.count == 1 ? "" : "s")")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                Button("Open Folder") {
+                    let dir = record.artifacts.first?.url.deletingLastPathComponent()
+                        ?? URL(fileURLWithPath: record.inputPath).deletingLastPathComponent()
+                    NSWorkspace.shared.open(dir)
+                }
+                .controlSize(.small)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quinary, in: RoundedRectangle(cornerRadius: 8))
     }
 
     private var firstRunHint: some View {
@@ -431,42 +502,6 @@ struct MainView: View {
                 .frame(maxWidth: 460)
         }
         .padding(24)
-    }
-
-    /// The previous run's results, offered in a fresh window. A window that
-    /// never ran anything used to look exactly like "no run ever happened",
-    /// including seconds after a finished run's window was closed. The
-    /// artifacts are on disk; this card says so.
-    private func lastRunCard(_ record: LastRunRecord) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                Text("Last run").font(.headline)
-                Text("·").foregroundStyle(.tertiary)
-                Text(URL(fileURLWithPath: record.inputPath).lastPathComponent)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(record.inputPath)
-                Spacer()
-                Text(record.finishedAt.formatted(date: .abbreviated, time: .shortened))
-                    .foregroundStyle(.secondary)
-            }
-            List(record.artifacts) { artifact in
-                artifactRow(label: artifact.label, url: artifact.url)
-            }
-            .frame(height: min(120 + CGFloat(record.artifacts.count) * 32, 220))
-            HStack {
-                Spacer()
-                Button("Open Folder") {
-                    let dir = record.artifacts.first?.url.deletingLastPathComponent()
-                        ?? URL(fileURLWithPath: record.inputPath).deletingLastPathComponent()
-                    NSWorkspace.shared.open(dir)
-                }
-                .controlSize(.small)
-            }
-        }
-        .padding(16)
-        .frame(maxWidth: 520)
-        .background(.quinary, in: RoundedRectangle(cornerRadius: 10))
     }
 
     /// A dropped file chooses the input and starts the run — the fastest path

@@ -18,6 +18,10 @@ enum TranscriptionEvent: Equatable, Sendable {
     /// through the channel their UI holds (the CLI's stdin); the CLI treats
     /// '-' as "keep the default label", even over a suggestion.
     case speakerName(SpeakerNamePrompt)
+    /// How far along the current phase is, 0-100. The CLI throttles to whole
+    /// percent steps; a run without measurable progress simply never emits
+    /// one (the chip then shows the phase label alone).
+    case progress(Int)
 }
 
 /// One naming question from the run: which speaker, what it said, and the

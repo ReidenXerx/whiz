@@ -291,6 +291,20 @@ struct CLIBackendRunTests {
         #expect(CLIBackend.classify("? speaker-name: Speaker A") == nil)
     }
 
+    @Test("a progress line becomes a percent event")
+    func progressLine() {
+        #expect(CLIBackend.classify("~ progress: 42%") == .progress(42))
+        #expect(CLIBackend.classify("~ progress: 0%") == .progress(0))
+        #expect(CLIBackend.classify("~ progress: 100%") == .progress(100))
+
+        // Malformed shapes are not events — a log line is not a percent.
+        #expect(CLIBackend.classify("~ progress: ") == nil)
+        #expect(CLIBackend.classify("~ progress: 4x%") == nil)
+        #expect(CLIBackend.classify("~ progress: 101%") == nil)
+        #expect(CLIBackend.classify("~ progress: 42") == nil)
+        #expect(CLIBackend.classify("~progress: 42%") == nil)
+    }
+
     @Test("a naming answer reaches the run's stdin")
     func answersReachStdin() async throws {
         // A stub that replays a machine prompt and then reads one stdin line:
