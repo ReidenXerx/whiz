@@ -232,28 +232,38 @@ def format_dialogue_txt(merged: list[tuple[WhisperSeg, str]]) -> str:
 
 # ---------- HTML transcript ----------
 
-# Deterministic per-speaker colors (cycle for >8 speakers).
+# Per-speaker colors, assigned by order of first appearance (cycle for >10).
 _SPEAKER_COLORS = [
     "#e74c3c", "#3498db", "#2ecc71", "#f39c12", "#9b59b6",
     "#1abc9c", "#e67e22", "#34495e", "#16a085", "#d35400",
 ]
 
 
-def _speaker_color(label: str) -> str:
-    """Pick a stable color for a speaker label by its first-appearance index."""
-    # Hash the label to a stable index so colors are consistent across runs.
+def _speaker_color(label: str, order: list[str] | None = None) -> str:
+    """Pick a color for a speaker label.
+
+    With ``order`` (the document's speakers in order of first appearance),
+    the color is the label's position in it — the first ten speakers of a
+    document always get ten DISTINCT colors. The old character-code sum
+    gave "Speaker A" and "Speaker K" the same color (wave-3 audit).
+    Without ``order`` (callers that have no document context) the old
+    label hash remains as a stable fallback.
+    """
+    if order is not None and label in order:
+        return _SPEAKER_COLORS[order.index(label) % len(_SPEAKER_COLORS)]
     h = sum(ord(c) for c in label)
     return _SPEAKER_COLORS[h % len(_SPEAKER_COLORS)]
 
 
-def speaker_palette(label: str) -> str:
+def speaker_palette(label: str, order: list[str] | None = None) -> str:
     """Public alias for the HTML/terminal speaker color palette.
 
-    Returns a hex color string (e.g. ``#e74c3c``) stable across runs for a
-    given label. Used by both the HTML transcript and the terminal speaker
-    tally so colors match between the two.
+    Returns a hex color string (e.g. ``#e74c3c``). Pass the same ``order``
+    the HTML used (``speakers_in_order(merged)``) and the terminal colors
+    match the HTML transcript's; without it the color is a stable per-label
+    hash that may collide between two speakers.
     """
-    return _speaker_color(label)
+    return _speaker_color(label, order)
 
 
 def _html_escape(text: str) -> str:
@@ -289,14 +299,10 @@ def format_speakers_html(
     """
     import base64
 
-    # Gather speakers in order of appearance for the legend.
-    speakers_in_order: list[str] = []
-    for _seg, label in merged:
-        if label not in speakers_in_order:
-            speakers_in_order.append(label)
-    legend = [
-        (label, _speaker_color(label)) for label in speakers_in_order
-    ]
+    # Speakers in order of appearance: the legend order AND the color key
+    # (each speaker's color is its first-appearance index — no collisions).
+    order = speakers_in_order(merged)
+    legend = [(label, _speaker_color(label, order)) for label in order]
 
     css = """
 :root {
@@ -381,17 +387,20 @@ footer.foot { text-align: center; color: var(--muted); font-size: .8em; padding:
 
     js = r"""
 (function () {
+  // The lightbox exists only when a frame was inlined; search always does.
   var box = document.getElementById('lightbox');
-  var boxImg = box.querySelector('img');
-  function open(src) { boxImg.src = src; box.classList.add('open'); }
-  function close() { box.classList.remove('open'); boxImg.src = ''; }
-  document.querySelectorAll('.cue .frame').forEach(function (el) {
-    el.addEventListener('click', function () {
-      var img = el.querySelector('img'); if (img) open(img.src);
+  if (box) {
+    var boxImg = box.querySelector('img');
+    var open = function (src) { boxImg.src = src; box.classList.add('open'); };
+    var close = function () { box.classList.remove('open'); boxImg.src = ''; };
+    document.querySelectorAll('.cue .frame').forEach(function (el) {
+      el.addEventListener('click', function () {
+        var img = el.querySelector('img'); if (img) open(img.src);
+      });
     });
-  });
-  box.addEventListener('click', function (e) { if (e.target === box || e.target.classList.contains('close')) close(); });
-  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') close(); });
+    box.addEventListener('click', function (e) { if (e.target === box || e.target.classList.contains('close')) close(); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') close(); });
+  }
   var search = document.getElementById('search');
   if (search) {
     search.addEventListener('input', function () {
@@ -439,7 +448,7 @@ footer.foot { text-align: center; color: var(--muted); font-size: .8em; padding:
         if not text:
             continue
         cue_count += 1
-        color = _speaker_color(label)
+        color = _speaker_color(label, order)
         ts = _fmt_clock(seg.start)
         parts.append(f'<div class="cue" style="--c:{color}">')
         # Inline frame thumbnail if it exists (clickable -> lightbox).
@@ -470,7 +479,10 @@ footer.foot { text-align: center; color: var(--muted); font-size: .8em; padding:
         parts.append('<button class="close" aria-label="Close">&times;</button>')
         parts.append('<img alt="fullscreen frame">')
         parts.append('</div>')
-        parts.append(f'<script>{js}</script>')
+    # The script ALWAYS ships: it also drives the search box, which every
+    # page has. Gating it on frames left search dead on every audio-only
+    # transcript (wave-3 audit); the lightbox half guards on the box.
+    parts.append(f'<script>{js}</script>')
 
     parts.append('</body>\n</html>')
     return "\n".join(parts)

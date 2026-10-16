@@ -7,7 +7,10 @@ hand-rolled TOML emitter so we don't depend on a third-party package.
 
 from __future__ import annotations
 
+import datetime as _dt
 import os
+import re
+import tempfile
 import tomllib
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -92,6 +95,14 @@ DEFAULT_MODEL_SEARCH_DIRS: list[Path] = [
 ]
 
 
+# Characters TOML forbids raw inside a basic string: every C0 control and
+# DEL. \n/\r/\t get their short escapes; the rest go out as \uXXXX.
+_TOML_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+_TOML_SHORT_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+# Keys that may be written bare; anything else is emitted as a quoted key.
+_TOML_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+
 def _escape_toml_string(value: str) -> str:
     """Escape a string for a basic TOML double-quoted literal.
 
@@ -101,46 +112,93 @@ def _escape_toml_string(value: str) -> str:
     NEXT ``load()`` of every command (C1, wave-1 audit; the Swift reader
     drops the line outright). Multi-line prompts saved from the settings
     window are the known trigger.
+
+    Wave-3: escaping only newline/CR/tab left every OTHER control character
+    (an ANSI ESC 0x1b pasted into a prompt, a stray NUL, DEL) raw —
+    equally illegal in a basic string, equally fatal to the next load.
+    Those now go out as ``\\uXXXX``.
     """
-    return (
-        value.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
-        .replace("\t", "\\t")
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return _TOML_CONTROL_RE.sub(
+        lambda m: _TOML_SHORT_ESCAPES.get(m.group(0), f"\\u{ord(m.group(0)):04X}"),
+        escaped,
     )
 
 
-def _emit_toml(data: dict[str, Any]) -> str:
-    """Minimal TOML writer for our flat config schema."""
-    lines: list[str] = []
+def _toml_key(key: str) -> str:
+    """A TOML key: bare when it can be, quoted otherwise."""
+    if _TOML_BARE_KEY_RE.fullmatch(key):
+        return key
+    return f'"{_escape_toml_string(key)}"'
+
+
+def _toml_value(value: Any) -> str:
+    """One TOML value, inline. Raises ValueError for anything unrepresentable.
+
+    Covers everything ``tomllib`` can hand back — so a foreign key written by
+    another tool (Mynah's ``[mynah]`` table, a datetime, a nested or mixed
+    array) round-trips instead of going out as Python ``repr`` and making the
+    file unreadable for every later command (wave-3 audit).
+    """
+    # bool before int: bool is an int subclass.
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        # repr keeps full precision; inf/-inf/nan spell the same in TOML.
+        return repr(value)
+    if isinstance(value, str):
+        return f'"{_escape_toml_string(value)}"'
+    # datetime before date: datetime is a date subclass.
+    if isinstance(value, (_dt.datetime, _dt.date, _dt.time)):
+        return value.isoformat()
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_toml_value(v) for v in value) + "]"
+    if isinstance(value, dict):
+        items = ", ".join(
+            f"{_toml_key(str(k))} = {_toml_value(v)}"
+            for k, v in value.items() if v is not None
+        )
+        return "{ " + items + " }" if items else "{}"
+    raise ValueError(f"cannot represent {type(value).__name__} value {value!r} in TOML")
+
+
+def _emit_table(data: dict[str, Any], prefix: tuple[str, ...], lines: list[str]) -> None:
+    """Emit one table's plain keys, then each sub-table as a ``[section]``."""
+    tables: list[tuple[str, dict[str, Any]]] = []
     for key, value in data.items():
         if value is None:
             # Tri-state fields (e.g. auto_diarization_setup) are "unset" by
             # None — an emitted `= None` would be invalid TOML and break the
             # NEXT load() for every command, not just the one that saved.
             continue
-        if isinstance(value, bool):
-            lines.append(f"{key} = {str(value).lower()}")
-        elif isinstance(value, int):
-            lines.append(f"{key} = {value}")
-        elif isinstance(value, float):
-            lines.append(f"{key} = {value}")
-        elif isinstance(value, str):
-            lines.append(f'{key} = "{_escape_toml_string(value)}"')
-        elif isinstance(value, list):
-            if not value:
-                lines.append(f"{key} = []")
-            elif all(isinstance(v, str) for v in value):
-                items = ", ".join(
-                    '"' + _escape_toml_string(v) + '"' for v in value
-                )
-                lines.append(f"{key} = [{items}]")
-            else:
-                items = ", ".join(str(v) for v in value)
-                lines.append(f"{key} = [{items}]")
-        else:
-            lines.append(f"{key} = {value!r}")
+        if isinstance(value, dict):
+            tables.append((key, value))
+            continue
+        try:
+            lines.append(f"{_toml_key(key)} = {_toml_value(value)}")
+        except ValueError as e:
+            raise ValueError(f"{'.'.join(prefix + (key,))}: {e}") from e
+    for key, sub in tables:
+        path = prefix + (key,)
+        if lines:
+            lines.append("")
+        lines.append("[" + ".".join(_toml_key(k) for k in path) + "]")
+        _emit_table(sub, path, lines)
+
+
+def _emit_toml(data: dict[str, Any]) -> str:
+    """Minimal TOML writer: our flat schema plus whatever foreign keys hold.
+
+    Top-level scalars and arrays first, then each dict value as a
+    ``[table]`` section (recursively, ``[a.b]``) — keys after a table header
+    would otherwise land INSIDE that table. Raises ValueError when a value
+    has no TOML spelling, so ``save()`` refuses rather than writing a file
+    the next ``load()`` cannot parse.
+    """
+    lines: list[str] = []
+    _emit_table(data, (), lines)
     return "\n".join(lines) + "\n"
 
 
@@ -183,8 +241,17 @@ def save(cfg: Config) -> Path:
     branches add their own keys (``ocr_*``), and a user may be running a pipx
     install that is older or newer than the checkout. Any ``whiz config set``
     from the wrong one wiped the others' settings without a word.
+
+    Wave-3 audit: the emitted text is re-parsed BEFORE anything touches disk
+    — a value with no TOML spelling (or an emitter bug) raises RuntimeError
+    and the existing file is left byte-for-byte intact, never replaced by one
+    the next ``load()`` rejects for every command. The write is atomic (temp
+    file in the same directory + ``os.replace``), so a crash mid-write cannot
+    truncate the file either. The file is created 0600 (it can hold an
+    ``ai_api_key``) and a directory whiz creates is 0700.
     """
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if not CONFIG_DIR.exists():
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     merged: dict[str, Any] = {}
     if CONFIG_PATH.exists():
@@ -201,8 +268,38 @@ def save(cfg: Config) -> Path:
     updates = {k: v for k, v in cfg.to_dict().items() if v is not None}
     merged.update(updates)
 
-    CONFIG_PATH.write_text(_emit_toml(merged), encoding="utf-8")
+    try:
+        text = _emit_toml(merged)
+        tomllib.loads(text)
+    except (ValueError, tomllib.TOMLDecodeError) as e:
+        raise RuntimeError(
+            f"refusing to save config: the result would not be valid TOML ({e}).\n"
+            f"{CONFIG_PATH} was left unchanged."
+        ) from e
+    _write_atomic(CONFIG_PATH, text)
     return CONFIG_PATH
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Replace ``path`` with ``text`` atomically, mode 0600.
+
+    ``mkstemp`` creates the temp file 0600 in the SAME directory, so the
+    ``os.replace`` is a same-filesystem rename: readers see the old file or
+    the complete new one, never a partial write. A symlinked config (dotfile
+    managers) is written through to its target instead of being replaced by
+    a regular file.
+    """
+    target = path.resolve() if path.is_symlink() else path
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, target)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def model_search_dirs(cfg: Config) -> list[Path]:

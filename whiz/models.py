@@ -92,8 +92,27 @@ def _short_alias(alias: str) -> str:
     return alias
 
 
+def _is_vad_model(name: str) -> bool:
+    """Silero VAD files share the ggml-*.bin naming but are NOT whisper models."""
+    return name.startswith("ggml-silero-")
+
+
+def _preference_rank(alias: str) -> tuple[int, int, str]:
+    """Sort key: PREFERENCE position, then unquantized before quantized (NS-15)."""
+    aliases = [_alias_from_name(w) for w in PREFERENCE]
+    pos = aliases.index(alias) if alias in aliases else len(aliases)
+    quantized = 1 if re.search(r"-q\d+(_\d+|_k)?", alias) else 0
+    return (pos, quantized, alias)
+
+
 def discover(config: cfg.Config) -> list[ModelInfo]:
-    """Scan configured dirs for ggml-*.bin model files."""
+    """Scan configured dirs for ggml-*.bin whisper model files.
+
+    Silero VAD models (``ggml-silero-*.bin``, see ``VAD_GLOB``) live in the
+    same directories under the same prefix; they are excluded (wave-3 audit)
+    — listed as a whisper model, ``pick_best``'s alphabetical fallback could
+    hand one to whisper-cli as the transcription model.
+    """
     found: dict[str, ModelInfo] = {}
     for d in cfg.model_search_dirs(config):
         if not d.exists():
@@ -104,6 +123,8 @@ def discover(config: cfg.Config) -> list[ModelInfo]:
             if not p.name.endswith(".bin"):
                 continue
             if not p.name.startswith("ggml-"):
+                continue
+            if _is_vad_model(p.name):
                 continue
             alias = _alias_from_name(p.name)
             if alias not in found:
@@ -136,10 +157,13 @@ def resolve(name: str, config: cfg.Config) -> Path | None:
     if name in aliases:
         return aliases[name].path
 
-    # Short alias: 'turbo' -> any alias containing 'turbo'.
+    # Short alias: 'turbo' -> any alias containing 'turbo'. Several on disk
+    # (large-v3-turbo AND large-v3-turbo-q5_0) used to resolve to None — the
+    # ambiguity broke the one alias the docs advertise (wave-3 audit). Ties
+    # break by PREFERENCE, so the unquantized model wins (NS-15).
     matches = [m for a, m in aliases.items() if _short_alias(a) == _short_alias(name)]
-    if len(matches) == 1:
-        return matches[0].path
+    if matches:
+        return min(matches, key=lambda m: _preference_rank(m.alias)).path
     # Bare 'large-v3' should match 'large-v3' exactly if present.
     for m in found:
         if m.alias == name:
