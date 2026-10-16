@@ -24,11 +24,15 @@ on-disk manifest stays small (paths only).
 from __future__ import annotations
 
 import base64
+import http.client
+import ipaddress
 import json
+import re
 import socket
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -276,6 +280,18 @@ _ESSENTIALS_REDUCE_INSTRUCTION = (
 )
 
 
+# Appended to a custom --prompt that has no {transcript} placeholder. Without
+# it the transcript was silently never sent (wave-3 audit): the model answered
+# the bare question about nothing. The delimiters make it unambiguous where the
+# user's instruction ends and the transcript begins.
+_TRANSCRIPT_BLOCK = (
+    "\n\nTranscript (between the markers):\n"
+    "----- BEGIN TRANSCRIPT -----\n"
+    "{transcript}\n"
+    "----- END TRANSCRIPT -----"
+)
+
+
 def _augment_prompt_essentials(prompt_template: str) -> str:
     """Append the always-on Essentials instruction to a prompt template.
 
@@ -283,13 +299,16 @@ def _augment_prompt_essentials(prompt_template: str) -> str:
     there is no {task} slot. The instruction is inserted right after the
     {transcript} placeholder so chat_text/chat_vision's .replace places it
     after the transcript text.
+
+    A custom prompt without a ``{transcript}`` placeholder gets the transcript
+    appended in a delimited block first — otherwise the transcript would never
+    reach the model.
     """
-    if "{transcript}" in prompt_template:
-        return prompt_template.replace(
-            "{transcript}", "{transcript}" + _ESSENTIALS_INSTRUCTION
-        )
-    # No placeholder (shouldn't happen for real prompts): just append.
-    return prompt_template + _ESSENTIALS_INSTRUCTION
+    if "{transcript}" not in prompt_template:
+        prompt_template = prompt_template + _TRANSCRIPT_BLOCK
+    return prompt_template.replace(
+        "{transcript}", "{transcript}" + _ESSENTIALS_INSTRUCTION
+    )
 
 
 # Chunked map-reduce prompts. For long transcripts (or many frames) the input is
@@ -448,26 +467,86 @@ def resolve_prompt_auto(transcript: str, *, base_url: str, model: str, api_key: 
     On any failure (network/model error, empty/garbled reply), falls back to
     ``SUMMARY_AND_ACTIONS_PROMPT`` with ``detected_mode`` set to ``'meeting'`` plus
     the suffix ``' (fallback)'`` so callers can surface that the detector failed.
+
+    Only a bounded head+tail sample of the transcript is classified (see
+    ``_classify_sample``): the category is evident from the opening and closing
+    minutes, and a 2h transcript would otherwise overflow the context and be
+    front-truncated by the server.
     """
+    _last_classifier_error[0] = ""
     try:
-        reply = chat_text(CLASSIFY_PROMPT, transcript, base_url=base_url, model=model, api_key=api_key)
+        reply = chat_text(CLASSIFY_PROMPT, _classify_sample(transcript),
+                          base_url=base_url, model=model, api_key=api_key)
     except RuntimeError as exc:
         # Caller logs the warning; we just pick the safe default.
         _last_classifier_error[0] = str(exc)
         return SUMMARY_AND_ACTIONS_PROMPT, "meeting (fallback)"
-    token = reply.strip().splitlines()[0].strip().upper() if reply else ""
-    # The model may prepend a stray label or wrap the token in prose; accept the
-    # first occurrence of any keyword to be forgiving, but prefer the most
-    # specific match (WALKTHROUGH before PLAN before MEETING) so a reply like
-    # "WALKTHROUGH" is not misread as containing "PLAN".
-    if "WALKTHROUGH" in token:
+    mode = _parse_classification(reply or "")
+    if mode == "walkthrough":
         return WALKTHROUGH_PROMPT, "walkthrough"
-    if "PLAN" in token and "MEETING" not in token:
+    if mode == "plan":
         return PLAN_PROMPT, "plan"
-    if "MEETING" in token:
+    if mode == "meeting":
         return SUMMARY_AND_ACTIONS_PROMPT, "meeting"
-    # Anything else (including empty) -> safe default.
-    return SUMMARY_AND_ACTIONS_PROMPT, "meeting"
+    # Unrecognized reply: same safe default as a failed call, and marked as a
+    # fallback so the caller warns instead of claiming a real detection.
+    _last_classifier_error[0] = f"unrecognized classifier reply: {(reply or '')[:120]!r}"
+    return SUMMARY_AND_ACTIONS_PROMPT, "meeting (fallback)"
+
+
+# Classifier input cap: head + tail of the transcript, this many chars total.
+# ~2-3k tokens — fits any default context window with room for the prompt.
+_CLASSIFY_SAMPLE_CHARS = 8000
+_THINK_RE = re.compile(r"<think>.*?(</think>|\Z)", re.IGNORECASE | re.DOTALL)
+_CLASS_TOKEN_RE = re.compile(r"\b(WALKTHROUGH|PLAN|MEETING)\b")
+
+
+def _classify_sample(transcript: str, limit: int = _CLASSIFY_SAMPLE_CHARS) -> str:
+    """Head + tail of ``transcript`` bounded to about ``limit`` chars.
+
+    Cuts on line boundaries so no segment line is torn, and marks the gap so
+    the model knows the middle was omitted.
+    """
+    if limit <= 0 or len(transcript) <= limit:
+        return transcript
+    half = limit // 2
+    head = transcript[:half]
+    tail = transcript[-half:]
+    # Snap to whole lines (keep at least the raw slice if there's no newline).
+    if "\n" in head:
+        head = head[:head.rfind("\n")]
+    if "\n" in tail:
+        tail = tail[tail.find("\n") + 1:]
+    omitted = len(transcript) - len(head) - len(tail)
+    return f"{head}\n[… {omitted} characters of the middle omitted …]\n{tail}"
+
+
+def _parse_classification(reply: str) -> str:
+    """Map a classifier reply to 'walkthrough' / 'plan' / 'meeting', or ''.
+
+    Reasoning models wrap their thinking in ``<think>…</think>`` (and may echo
+    the category names while deliberating), so those blocks are dropped first.
+    Then the whole reply is searched, not just its first line: a line that is
+    exactly one keyword wins (the last such line — the model's final answer);
+    otherwise prose is resolved by specificity (WALKTHROUGH before PLAN before
+    MEETING, and PLAN only when MEETING isn't also named). '' = unrecognized.
+    """
+    text = _THINK_RE.sub("", reply).upper()
+    exact = [
+        ln.strip(" \t.*`'\"")
+        for ln in text.splitlines()
+        if ln.strip(" \t.*`'\"") in ("WALKTHROUGH", "PLAN", "MEETING")
+    ]
+    if exact:
+        return exact[-1].lower()
+    found = set(_CLASS_TOKEN_RE.findall(text))
+    if "WALKTHROUGH" in found:
+        return "walkthrough"
+    if "PLAN" in found and "MEETING" not in found:
+        return "plan"
+    if "MEETING" in found:
+        return "meeting"
+    return ""
 
 
 # Last classifier error text, stashed here so resolve_prompt_auto stays pure-ish
@@ -499,16 +578,102 @@ def _fmt_clock(t: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
+class AITimeoutError(RuntimeError):
+    """The AI server did not answer within the request timeout.
+
+    A RuntimeError subclass so every existing ``except RuntimeError`` keeps
+    working; ``probe_model`` tells it apart because a timeout while a big model
+    loads cold is NOT evidence that the model is unavailable.
+    """
+
+
+class EmptyCompletionError(RuntimeError):
+    """The server answered 200 but the completion text was empty."""
+
+
+class _Reply(str):
+    """Assistant text that remembers whether the server cut it off.
+
+    ``truncated`` is True when ``finish_reason == "length"`` (the model hit its
+    output-token limit). A plain ``str`` everywhere else, so callers that don't
+    care see no difference; ``analyze`` reads the flag to mark the final
+    analysis as possibly truncated.
+    """
+
+    truncated: bool = False
+
+
+def _chat_base(base_url: str) -> str:
+    """Normalize the configured base URL to the OpenAI-compatible API root.
+
+    ``http://localhost:11434`` (the bare Ollama server root, a common config
+    slip) gets ``/v1`` appended — without it model listing works (it uses the
+    server root) but every chat call 404s and is misreported as a retired
+    model. Only a bare host gets the suffix: a URL that already has a path
+    (``…/v1``, ``…/api/v1``, ``…/v1beta/openai``) is the user's explicit
+    choice and is kept verbatim, minus trailing slashes.
+    """
+    root = base_url.strip().rstrip("/")
+    parts = urllib.parse.urlsplit(root)
+    if parts.scheme and parts.netloc and parts.path in ("", "/"):
+        root += "/v1"
+    return root
+
+
+# Hosts we already warned about (one warning per host per process).
+_insecure_warned: set[str] = set()
+
+
+def _is_loopback_host(host: str) -> bool:
+    host = (host or "").strip("[]").lower()
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _warn_if_insecure(url: str) -> None:
+    """Warn once when the transcript (and API key) would cross the network in
+    clear text: plain ``http`` to a host that isn't loopback. Not refused — a
+    LAN Ollama box is a legitimate setup — but it should never be silent."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme.lower() != "http":
+        return
+    host = parts.hostname or ""
+    if _is_loopback_host(host) or host in _insecure_warned:
+        return
+    _insecure_warned.add(host)
+    _warn(f"AI server {parts.scheme}://{parts.netloc} is plain HTTP on a non-local "
+          "host: the transcript, frames, and API key are sent unencrypted. "
+          "Use https:// or a loopback address if that network isn't trusted.")
+
+
+def _warn(msg: str) -> None:
+    """One warning line on stderr, in the same style as the retry notices."""
+    print(f"  ⚠ {msg}", file=sys.stderr)
+
+
 def _post_chat(base_url: str, model: str, messages: list[dict], api_key: str, timeout: int = 600) -> str:
     """POST to /v1/chat/completions and return the assistant text.
 
-    Retries transient failures (HTTP 429/500/502/503/504 and connection errors)
-    with exponential backoff — cloud models occasionally return a transient
-    500 ("Internal Server Error") mid-analysis, and retrying turns that random
-    failure into a successful run. Non-transient errors (400, 404, 401, ...) fail
-    immediately. ``_RETRY_SLEEP`` is patchable so tests don't actually sleep.
+    Retries transient failures (HTTP 429/500/502/503/504, connection errors,
+    and connections the server dropped mid-request/mid-response —
+    ``RemoteDisconnected``, ``IncompleteRead``, resets) with exponential
+    backoff — cloud models occasionally return a transient 500 ("Internal
+    Server Error") mid-analysis, and retrying turns that random failure into a
+    successful run. Non-transient errors (400, 404, 401, ...) fail
+    immediately. Timeouts are not retried (the default is already 10 min) and
+    raise ``AITimeoutError``. ``_RETRY_SLEEP`` is patchable so tests don't
+    actually sleep.
+
+    An empty completion raises ``EmptyCompletionError``; a completion cut off
+    at the output-token limit (``finish_reason == "length"``) is returned with
+    a warning and ``truncated=True`` on the returned ``_Reply``.
     """
-    url = base_url.rstrip("/") + "/chat/completions"
+    url = _chat_base(base_url) + "/chat/completions"
+    _warn_if_insecure(url)
     body = {
         "model": model,
         "messages": messages,
@@ -521,7 +686,8 @@ def _post_chat(base_url: str, model: str, messages: list[dict], api_key: str, ti
         headers["Authorization"] = f"Bearer {api_key}"
     # HTTPError is a subclass of URLError, so it must be caught first —
     # otherwise a 400 (e.g. text model rejecting vision images) is misreported
-    # as "could not reach the server".
+    # as "could not reach the server". Both are OSError subclasses, as are
+    # timeouts, so the generic connection-drop clause comes last.
     last_err: Exception | None = None
     for attempt in range(_RETRY_MAX):
         req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
@@ -530,12 +696,16 @@ def _post_chat(base_url: str, model: str, messages: list[dict], api_key: str, ti
                 raw = resp.read().decode("utf-8")
                 data = json.loads(raw)
             break  # success
-        except (json.JSONDecodeError, socket.timeout, TimeoutError) as e:
-            # Wave-1 audit (L-low): these used to bypass the RuntimeError
-            # machinery entirely — a server replying with an HTML error page
-            # or a stalled socket surfaced as a raw JSONDecodeError/
-            # TimeoutError to callers that only catch RuntimeError. Wrap
-            # them so every failure from _post_chat is a clean RuntimeError.
+        except (socket.timeout, TimeoutError) as e:
+            # Wave-1 audit (L-low): a stalled socket used to escape as a raw
+            # TimeoutError to callers that only catch RuntimeError.
+            raise AITimeoutError(
+                f"AI server at {url} returned an unreadable response "
+                f"({type(e).__name__}: {e}) — no answer within {timeout}s."
+            ) from e
+        except ValueError as e:
+            # JSONDecodeError (an HTML error page) and UnicodeDecodeError
+            # (garbage bytes) — same wave-1 rule: always a clean RuntimeError.
             raise RuntimeError(
                 f"AI server at {url} returned an unreadable response "
                 f"({type(e).__name__}: {e})."
@@ -575,22 +745,66 @@ def _post_chat(base_url: str, model: str, messages: list[dict], api_key: str, ti
                       f"{delay:.0f}s (attempt {attempt + 2}/{_RETRY_MAX})…", file=sys.stderr)
                 _RETRY_SLEEP(delay)
                 continue
-            raise RuntimeError(
+            err_cls = (AITimeoutError
+                       if isinstance(e.reason, (socket.timeout, TimeoutError))
+                       else RuntimeError)
+            raise err_cls(
                 f"Could not reach AI server at {url}: {e.reason}\n"
                 "Is Ollama running? Start it with:  ollama serve"
             ) from e
+        except (http.client.HTTPException, OSError) as e:
+            # Wave-3 audit: a server that drops the connection mid-request or
+            # mid-response (RemoteDisconnected, IncompleteRead, ECONNRESET,
+            # BrokenPipe — Ollama does this when a runner crashes or reloads)
+            # escaped every clause above as a raw traceback, with no retry.
+            # It's transient by nature: retry under the same policy.
+            if attempt < _RETRY_MAX - 1:
+                last_err = e
+                delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                print(f"  ⚠ AI server dropped the connection ({type(e).__name__}); "
+                      f"retrying in {delay:.0f}s (attempt {attempt + 2}/{_RETRY_MAX})…",
+                      file=sys.stderr)
+                _RETRY_SLEEP(delay)
+                continue
+            raise RuntimeError(
+                f"AI server at {url} dropped the connection "
+                f"({type(e).__name__}: {e}) on all {_RETRY_MAX} attempts.\n"
+                "The server may have crashed or restarted while loading the model; "
+                "check its logs (e.g. `ollama serve` output) and retry."
+            ) from e
     else:
         raise RuntimeError(f"AI server retries exhausted for {url}.") from last_err
-    # OpenAI shape: {"choices": [{"message": {"content": "..."}}]}
-    choices = data.get("choices", [])
+    # OpenAI shape: {"choices": [{"message": {"content": "..."}, "finish_reason": ...}]}
+    choices = data.get("choices", []) if isinstance(data, dict) else []
     if not choices:
         raise RuntimeError(f"AI server returned no choices: {json.dumps(data)[:300]}")
-    content = choices[0].get("message", {}).get("content", "")
-    # Some servers return "content": null (empty completion) — treat it as
-    # a clean empty string instead of crashing with AttributeError on strip.
-    if content is None:
+    choice = choices[0] if isinstance(choices[0], dict) else {}
+    finish = choice.get("finish_reason")
+    content = (choice.get("message") or {}).get("content", "")
+    # Some servers return "content": null — normalize before the empty check
+    # instead of crashing with AttributeError on strip.
+    if not isinstance(content, str):
         content = ""
-    return content.strip()
+    content = content.strip()
+    # Wave-3 audit: an empty completion used to be accepted and written out as
+    # an empty analysis. It is a failure (often a reasoning model that spent
+    # its whole output budget thinking: finish_reason == "length").
+    if not content:
+        hint = (" The model hit its output-token limit before answering "
+                "(finish_reason=length) — a reasoning model may have spent it all "
+                "thinking.") if finish == "length" else ""
+        raise EmptyCompletionError(
+            f"AI server returned an empty completion from model '{model}' at {url} "
+            f"(finish_reason={finish!r}).{hint}"
+        )
+    reply = _Reply(content)
+    if finish == "length":
+        # Keep the text (it's usually most of the answer) but never silently:
+        # warn now, and analyze() marks the final output as possibly truncated.
+        _warn(f"model '{model}' stopped at its output-token limit "
+              "(finish_reason=length); this response may be truncated.")
+        reply.truncated = True
+    return reply
 
 
 # Retry tuning for transient server errors. _RETRY_SLEEP is patchable so tests
@@ -625,19 +839,27 @@ def chat_vision(
     Frames are spread evenly across the list when ``len(frames) > max_frames``
     so the vision model sees a representative sample of the whole video rather
     than just the first N minutes. Frames that don't exist on disk are skipped.
+
+    ``analyze`` pre-selects exactly the frames it labels in the timeline, so a
+    skip here (file vanished / unreadable between selection and send) would
+    desync "Frame N" from the N-th image — it is warned about, never silent.
     """
     selected = _subsample(frames, max_frames)
     prompt = prompt_template.replace("{transcript}", transcript)
     content: list[dict] = [{"type": "text", "text": prompt}]
+    dropped = 0
     for fp in selected:
-        if not fp.exists():
+        b64 = _base64_jpeg(fp) if fp.exists() else ""
+        if not b64:
+            dropped += 1
             continue
-        b64 = _base64_jpeg(fp)
-        if b64:
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
-            })
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+        })
+    if dropped:
+        _warn(f"{dropped} of {len(selected)} frame image(s) could not be read and "
+              "were not attached.")
     messages = [{"role": "user", "content": content}]
     return _post_chat(base_url, model, messages, api_key)
 
@@ -676,6 +898,65 @@ def _chunk_text(text: str, target_chars: int = 6000) -> list[str]:
     return [c for c in chunks if c.strip()]
 
 
+# Size budgets (characters) for what one model call may carry beyond its own
+# chunk. Ollama silently FRONT-truncates a prompt that overflows the model's
+# context window (wave-3 audit: a 2h transcript's final merge was ~96k chars,
+# so the model only ever saw the last few partials). ~4 chars/token, so these
+# keep every merge / rolling-context block well inside an 8k-token context
+# with room for the instructions and the answer:
+# - _MERGE_BUDGET_CHARS: max joined partials per merge call. Larger inputs are
+#   merged hierarchically (groups first, then the group results) until one
+#   final merge fits.
+# - _CONTEXT_BUDGET_CHARS: max running context carried into a map call (the
+#   last ``context_turns`` partials, oldest dropped first).
+_MERGE_BUDGET_CHARS = 24_000
+_CONTEXT_BUDGET_CHARS = 12_000
+
+# Prefixed to an intermediate (group) merge so the model doesn't compress the
+# detail away — its output is merged again with the other groups.
+_GROUP_MERGE_NOTE = (
+    "This is an INTERMEDIATE merge step: the partials below cover only chunks "
+    "{lo}-{hi} of {total} of the transcript, and your result will be merged "
+    "again with the other groups. Merge and deduplicate, but keep every "
+    "distinct point (especially Essentials bullets, names, numbers, and "
+    "timestamps) — do not compress detail away.\n\n"
+)
+
+# Prefixed to a vision-path call that ends up with no attached image (frames
+# missing on disk, or none sampled into this chunk). The analyst posture talks
+# about frames as a source of truth; with zero images that wording must be
+# switched off or the model is told to reconcile against screens it never got.
+_NO_FRAMES_NOTE = (
+    "NOTE: no on-screen frames are attached to this request. Ignore every "
+    "instruction about frames, screens, visible text, or SCREEN vs TRANSCRIPT "
+    "reconciliation, and analyze the transcript text only.\n\n"
+)
+
+
+class _RunState:
+    """Per-``analyze`` bookkeeping: how many model calls hit the length limit."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.truncated = 0
+
+    def track(self, reply) -> str:
+        self.calls += 1
+        if getattr(reply, "truncated", False):
+            self.truncated += 1
+        return str(reply)
+
+
+def _truncation_note(truncated: int, calls: int) -> str:
+    return (
+        "\n\n---\n"
+        f"> ⚠ **Possibly truncated:** {truncated} of {calls} model call(s) for this "
+        "analysis stopped at the model's output-token limit (finish_reason=length), "
+        "so parts of it may be cut off or missing. Use a model with a larger output "
+        "limit (or raise its num_predict / max_tokens) and re-run.\n"
+    )
+
+
 def analyze(
     prompt_template: str,
     transcript: str,
@@ -691,6 +972,9 @@ def analyze(
     chunk_chars: int = 6000,
     context_turns: int = 3,
     on_progress=None,
+    partial_path: Path | str | None = None,
+    merge_budget_chars: int | None = None,
+    context_budget_chars: int | None = None,
 ) -> str:
     """Run an analysis, chunking long inputs with rolling-context map-reduce.
 
@@ -711,6 +995,19 @@ def analyze(
     a given chunk (a sliding window — the last ``context_turns`` partials),
     bounding prompt growth on very long inputs. ``0`` disables the rolling
     context (each chunk analyzed independently), which is the old behavior.
+    The window is also capped by size (``context_budget_chars``, default
+    ``_CONTEXT_BUDGET_CHARS``): oldest partials drop out first.
+
+    The reduce is **size-budgeted**: when the joined partials exceed
+    ``merge_budget_chars`` (default ``_MERGE_BUDGET_CHARS``) they are merged in
+    consecutive groups first, recursively, until a single final merge fits —
+    an over-long merge prompt would be silently front-truncated by the server.
+
+    ``max_frames`` caps the frames sent across the WHOLE video: they are
+    sampled evenly over every frame present on disk before chunking, then each
+    chunk carries the sampled frames that fall in it. The frame timeline in a
+    prompt lists exactly the images attached to that call; a call with no
+    image gets no timeline and is told to ignore the frame instructions.
 
     Built-in prompts (summary / actions / summary+actions / plan) route through
     ``MAP_PROMPT`` + ``SYNTH_PROMPT`` so the final answer has the same structure
@@ -726,6 +1023,11 @@ def analyze(
     on the ``{task}`` label in MAP/SYNTH; for single-call and custom paths it's
     appended to the prompt template. Zero extra model calls.
 
+    If any model call stopped at its output-token limit, the returned text ends
+    with a "Possibly truncated" note. If a map-reduce run fails after some
+    chunks completed and ``partial_path`` is given, the completed chunk
+    analyses are written there and the raised error names the file.
+
     ``on_progress(msg)``, if given, is called with a short status string before
     each map call and the reduce call so callers can surface progress.
     """
@@ -735,38 +1037,48 @@ def analyze(
     # also produces a ## Essentials section at zero extra model-call cost.
     task = _task_label(prompt_template) + _ESSENTIALS_TASK_SUFFIX
     prompt_template = _augment_prompt_essentials(prompt_template)
+    state = _RunState()
+    common = dict(
+        task=task, built_in=built_in, prompt_template=prompt_template,
+        context_turns=context_turns, state=state,
+        merge_budget=_MERGE_BUDGET_CHARS if merge_budget_chars is None else merge_budget_chars,
+        context_budget=_CONTEXT_BUDGET_CHARS if context_budget_chars is None else context_budget_chars,
+        partial_path=partial_path,
+        base_url=base_url, model=model, api_key=api_key, on_progress=on_progress,
+    )
 
     # --- Vision path: chunk by entries so each chunk's frames stay local ---
     if use_vision and entries:
+        attach = _select_frames(entries, frames_dir, max_frames)
         chunks = chunk_entries(entries, chunk_size)
         # One chunk (or none): single call, preserves prior behavior.
         if len(chunks) <= 1:
-            frame_paths = _frames_for_entries(entries, frames_dir)
-            manifest = _frame_manifest(entries)
-            vision_prompt = manifest + prompt_template if manifest else prompt_template
-            return chat_vision(
-                vision_prompt, transcript, frame_paths,
-                base_url=base_url, model=model, api_key=api_key, max_frames=max_frames,
+            result = _vision_call(
+                prompt_template, transcript, entries, attach, state,
+                max_frames=max_frames, base_url=base_url, model=model, api_key=api_key,
             )
-        return _map_reduce_vision(
-            chunks, task, built_in, prompt_template, max_frames,
-            context_turns=context_turns,
-            base_url=base_url, model=model, api_key=api_key,
-            frames_dir=frames_dir, on_progress=on_progress,
-        )
+        else:
+            result = _map_reduce_vision(chunks, attach, max_frames, **common)
+        return _finalize(result, state)
 
     # --- Text path: chunk the transcript string ---
     chunks = _chunk_text(transcript, target_chars=chunk_chars)
     if len(chunks) <= 1:
-        return chat_text(
+        result = state.track(chat_text(
             prompt_template, transcript,
             base_url=base_url, model=model, api_key=api_key,
-        )
-    return _map_reduce_text(
-        chunks, task, built_in, prompt_template,
-        context_turns=context_turns,
-        base_url=base_url, model=model, api_key=api_key, on_progress=on_progress,
-    )
+        ))
+    else:
+        result = _map_reduce_text(chunks, **common)
+    return _finalize(result, state)
+
+
+def _finalize(result: str, state: _RunState) -> str:
+    """Plain-str result, with the truncation note when any call was cut off."""
+    text = str(result)
+    if state.truncated:
+        text += _truncation_note(state.truncated, state.calls)
+    return text
 
 
 def _frames_for_entries(entries, frames_dir) -> list[Path]:
@@ -781,6 +1093,56 @@ def _frames_for_entries(entries, frames_dir) -> list[Path]:
     return out
 
 
+def _select_frames(entries, frames_dir, max_frames: int) -> dict[int, Path]:
+    """Pick the frames to send for the whole run: ``{id(entry): path}``.
+
+    Only frames that exist on disk are candidates (a missing file must not
+    occupy a timeline slot), and ``max_frames`` is applied ONCE across the whole
+    video — evenly spaced and deterministic — instead of per chunk, so
+    ``--max-frames 10`` really means 10 images in total.
+    """
+    if frames_dir is None:
+        return {}
+    listed = 0
+    available: list[tuple[object, Path]] = []
+    for e in entries:
+        frame = getattr(e, "frame", "")
+        if not frame:
+            continue
+        listed += 1
+        path = Path(frames_dir) / frame
+        if path.is_file():
+            available.append((e, path))
+    if listed and not available:
+        _warn(f"none of the {listed} frame images listed in the manifest exist under "
+              f"{frames_dir}; analyzing the transcript only.")
+    elif len(available) < listed:
+        _warn(f"{listed - len(available)} of {listed} frame images listed in the "
+              f"manifest are missing under {frames_dir}; sending the rest.")
+    return {id(e): path for e, path in _subsample(available, max_frames)}
+
+
+def _vision_call(prompt, transcript, chunk, attach, state, *,
+                 max_frames, base_url, model, api_key) -> str:
+    """One vision-path model call for ``chunk`` with exactly its selected frames.
+
+    The frame timeline is built from the frames actually attached, so "Frame N"
+    is always the N-th image. With no frame to attach the call goes out as plain
+    text with the frame instructions switched off (``_NO_FRAMES_NOTE``).
+    """
+    pairs = [(e, attach[id(e)]) for e in chunk if id(e) in attach]
+    if not pairs:
+        return state.track(chat_text(
+            _NO_FRAMES_NOTE + prompt, transcript,
+            base_url=base_url, model=model, api_key=api_key,
+        ))
+    manifest = _frame_manifest([e for e, _ in pairs])
+    return state.track(chat_vision(
+        manifest + prompt, transcript, [p for _, p in pairs],
+        base_url=base_url, model=model, api_key=api_key, max_frames=max_frames,
+    ))
+
+
 def _frame_manifest(entries) -> str:
     """Build a text frame-timeline label so the model knows image order.
 
@@ -788,6 +1150,9 @@ def _frame_manifest(entries) -> str:
     tells the model which image is which (by 1-based position) and the timestamp
     each corresponds to, so it can treat them as a sequential visual timeline
     rather than a bag of independent screenshots.
+
+    Callers pass only the entries whose frames are actually attached (see
+    ``_vision_call``) so the numbering matches the images.
 
     Returns an empty string when there are no frame-bearing entries.
     """
@@ -807,100 +1172,204 @@ def _frame_manifest(entries) -> str:
     return header + "\n" + "\n".join(lines) + "\n\n"
 
 
-def _running_context(partials: list[str], context_turns: int) -> str:
+def _running_context(partials: list[str], context_turns: int,
+                     budget_chars: int | None = None) -> str:
     """Build the running-context block from prior partials (sliding window).
 
     Returns the filled ``_CONTEXT_BLOCK`` with the last ``context_turns``
     partials joined in order, or an empty string when there are no prior
     partials (chunk 1) or rolling context is disabled (``context_turns`` <= 0).
+
+    The window is also capped at ``budget_chars`` (default
+    ``_CONTEXT_BUDGET_CHARS``; <= 0 = uncapped): the oldest partials drop out
+    first, and a lone partial still over budget keeps its head with a marker.
     """
     if context_turns <= 0 or not partials:
         return ""
+    budget = _CONTEXT_BUDGET_CHARS if budget_chars is None else budget_chars
     window = partials[-context_turns:]
+    if budget > 0:
+        while len(window) > 1 and len("\n\n".join(window)) > budget:
+            window = window[1:]
+        if len(window[0]) > budget:
+            window = [window[0][:budget].rstrip()
+                      + "\n[… truncated to fit the running-context budget …]"]
     context = "\n\n".join(window)
     return _CONTEXT_BLOCK.replace("{context}", context)
 
 
+def _map_prompt(task, built_in, prompt_template, k, n, context_block, chunk_transcript) -> str:
+    if built_in:
+        return (MAP_PROMPT
+                .replace("{task}", task)
+                .replace("{k}", str(k))
+                .replace("{n}", str(n))
+                .replace("{context_block}", context_block)
+                .replace("{transcript}", chunk_transcript))
+    # Custom prompt: prepend the running context (no MAP_PROMPT wrapper).
+    return context_block + prompt_template.replace("{transcript}", chunk_transcript)
+
+
 def _map_reduce_vision(
-    chunks, task, built_in, prompt_template, max_frames, *,
-    context_turns=3, base_url, model, api_key, frames_dir, on_progress=None,
+    chunks, attach, max_frames, *, task, built_in, prompt_template,
+    context_turns=3, state, merge_budget, context_budget, partial_path=None,
+    base_url, model, api_key, on_progress=None,
 ) -> str:
     n = len(chunks)
     partials: list[str] = []
-    for k, chunk in enumerate(chunks, start=1):
-        chunk_transcript = transcript_text(chunk)
-        frames = _frames_for_entries(chunk, frames_dir)
-        manifest = _frame_manifest(chunk)
-        if on_progress:
-            on_progress(f"analyzing chunk {k}/{n} ({len(chunk)} segments, {len(frames)} frames)")
-        context_block = _running_context(partials, context_turns)
-        if built_in:
-            mp = (MAP_PROMPT
-                  .replace("{task}", task)
-                  .replace("{k}", str(k))
-                  .replace("{n}", str(n))
-                  .replace("{context_block}", context_block)
-                  .replace("{transcript}", chunk_transcript))
-            if manifest:
-                mp = manifest + mp
-        else:
-            # Custom prompt: prepend the running context (no MAP_PROMPT wrapper).
-            mp = context_block + prompt_template.replace("{transcript}", chunk_transcript)
-            if manifest:
-                mp = manifest + mp
-        partial = chat_vision(
-            mp, chunk_transcript, frames,
-            base_url=base_url, model=model, api_key=api_key, max_frames=max_frames,
+    try:
+        for k, chunk in enumerate(chunks, start=1):
+            chunk_transcript = transcript_text(chunk)
+            n_frames = sum(1 for e in chunk if id(e) in attach)
+            if on_progress:
+                on_progress(f"analyzing chunk {k}/{n} ({len(chunk)} segments, {n_frames} frames)")
+            context_block = _running_context(partials, context_turns, context_budget)
+            mp = _map_prompt(task, built_in, prompt_template, k, n, context_block, chunk_transcript)
+            partial = _vision_call(
+                mp, chunk_transcript, chunk, attach, state,
+                max_frames=max_frames, base_url=base_url, model=model, api_key=api_key,
+            )
+            partials.append(f"### Part {k} of {n}\n{partial}")
+        return _reduce_partials(
+            partials, task, built_in, budget=merge_budget, state=state,
+            base_url=base_url, model=model, api_key=api_key, on_progress=on_progress,
         )
-        partials.append(f"### Part {k} of {n}\n{partial}")
-    if on_progress:
-        on_progress(f"synthesizing {n} partial analyses")
-    reduce_prompt = (SYNTH_PROMPT if built_in else _CUSTOM_REDUCE_PROMPT + _ESSENTIALS_REDUCE_INSTRUCTION)
-    synth_prompt = (reduce_prompt
-                    .replace("{task}", task)
-                    .replace("{n}", str(n))
-                    .replace("{partials}", "\n\n".join(partials)))
-    return chat_text(
-        synth_prompt, "",  # transcript placeholder not used by SYNTH_PROMPT
-        base_url=base_url, model=model, api_key=api_key,
-    )
+    except RuntimeError as exc:
+        _raise_with_partials(exc, partials, n, partial_path)
+        raise
 
 
 def _map_reduce_text(
-    chunks, task, built_in, prompt_template, *,
-    context_turns=3, base_url, model, api_key, on_progress=None,
+    chunks, *, task, built_in, prompt_template,
+    context_turns=3, state, merge_budget, context_budget, partial_path=None,
+    base_url, model, api_key, on_progress=None,
 ) -> str:
     n = len(chunks)
     partials: list[str] = []
-    for k, chunk in enumerate(chunks, start=1):
-        if on_progress:
-            on_progress(f"analyzing chunk {k}/{n}")
-        context_block = _running_context(partials, context_turns)
-        if built_in:
-            mp = (MAP_PROMPT
-                  .replace("{task}", task)
-                  .replace("{k}", str(k))
-                  .replace("{n}", str(n))
-                  .replace("{context_block}", context_block)
-                  .replace("{transcript}", chunk))
-        else:
-            mp = context_block + prompt_template.replace("{transcript}", chunk)
-        partial = chat_text(
-            mp, chunk,
-            base_url=base_url, model=model, api_key=api_key,
+    try:
+        for k, chunk in enumerate(chunks, start=1):
+            if on_progress:
+                on_progress(f"analyzing chunk {k}/{n}")
+            context_block = _running_context(partials, context_turns, context_budget)
+            mp = _map_prompt(task, built_in, prompt_template, k, n, context_block, chunk)
+            partial = state.track(chat_text(
+                mp, chunk,
+                base_url=base_url, model=model, api_key=api_key,
+            ))
+            partials.append(f"### Part {k} of {n}\n{partial}")
+        return _reduce_partials(
+            partials, task, built_in, budget=merge_budget, state=state,
+            base_url=base_url, model=model, api_key=api_key, on_progress=on_progress,
         )
-        partials.append(f"### Part {k} of {n}\n{partial}")
-    if on_progress:
-        on_progress(f"synthesizing {n} partial analyses")
+    except RuntimeError as exc:
+        _raise_with_partials(exc, partials, n, partial_path)
+        raise
+
+
+def _synth_call(items: list[str], task, built_in, *, prefix: str = "", state,
+                base_url, model, api_key) -> str:
+    """One merge call over ``items`` (SYNTH or the custom reduce prompt)."""
     reduce_prompt = (SYNTH_PROMPT if built_in else _CUSTOM_REDUCE_PROMPT + _ESSENTIALS_REDUCE_INSTRUCTION)
-    synth_prompt = (reduce_prompt
-                    .replace("{task}", task)
-                    .replace("{n}", str(n))
-                    .replace("{partials}", "\n\n".join(partials)))
-    return chat_text(
-        synth_prompt, "",
+    synth_prompt = prefix + (reduce_prompt
+                             .replace("{task}", task)
+                             .replace("{n}", str(len(items)))
+                             .replace("{partials}", "\n\n".join(items)))
+    return state.track(chat_text(
+        synth_prompt, "",  # transcript placeholder not used by SYNTH_PROMPT
         base_url=base_url, model=model, api_key=api_key,
+    ))
+
+
+def _group_by_budget(items: list, budget: int) -> list[list]:
+    """Pack consecutive ``(lo, hi, text)`` items into groups of <= ``budget``
+    joined chars. Every group but a trailing one holds at least two items even
+    when that overshoots the budget, so each merge pass strictly shrinks the
+    list (guaranteed termination)."""
+    groups: list[list] = []
+    cur: list = []
+    size = 0
+    for it in items:
+        add = len(it[2]) + (2 if cur else 0)
+        if len(cur) >= 2 and size + add > budget:
+            groups.append(cur)
+            cur, size, add = [], 0, len(it[2])
+        cur.append(it)
+        size += add
+    if cur:
+        groups.append(cur)
+    return groups
+
+
+def _reduce_partials(partials: list[str], task, built_in, *, budget: int, state,
+                     base_url, model, api_key, on_progress=None) -> str:
+    """Merge the map partials into one answer, hierarchically when too big.
+
+    While the joined partials exceed ``budget`` chars (<= 0 = no cap), merge
+    consecutive groups into intermediate results (chronology preserved, each
+    labelled with the chunk range it covers) and repeat; then one final merge.
+    """
+    total = len(partials)
+    items = [(k, k, p) for k, p in enumerate(partials, start=1)]
+    level = 0
+    while (budget > 0 and len(items) > 1
+           and len("\n\n".join(t for _, _, t in items)) > budget):
+        level += 1
+        groups = _group_by_budget(items, budget)
+        merged = []
+        for gi, group in enumerate(groups, start=1):
+            if len(group) == 1:
+                merged.append(group[0])
+                continue
+            lo, hi = group[0][0], group[-1][1]
+            if on_progress:
+                on_progress(f"merging chunks {lo}-{hi} of {total} (pass {level})")
+            out = _synth_call(
+                [t for _, _, t in group], task, built_in,
+                prefix=(_GROUP_MERGE_NOTE.replace("{lo}", str(lo))
+                        .replace("{hi}", str(hi)).replace("{total}", str(total))),
+                state=state, base_url=base_url, model=model, api_key=api_key,
+            )
+            merged.append((lo, hi, f"### Parts {lo}-{hi} of {total} (merged)\n{out}"))
+        items = merged
+    if on_progress:
+        on_progress(f"synthesizing {total} partial analyses")
+    return _synth_call(
+        [t for _, _, t in items], task, built_in,
+        state=state, base_url=base_url, model=model, api_key=api_key,
     )
+
+
+def _raise_with_partials(exc: RuntimeError, partials: list[str], n: int, partial_path) -> None:
+    """Save completed chunk partials and raise an error naming the file.
+
+    No-op (the caller re-raises ``exc`` unchanged) when there is no
+    ``partial_path`` or nothing completed — so a long run that dies at the
+    final merge no longer throws away 30 minutes of chunk work.
+    """
+    if partial_path is None or not partials:
+        return
+    path = Path(partial_path)
+    first_line = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+    body = (
+        "# whiz partial analysis\n\n"
+        f"> The analysis did not finish ({first_line}). Below are the "
+        f"{len(partials)} of {n} chunk analyses that completed, in time order. "
+        "Re-run `whiz analyze` to retry the full analysis.\n\n"
+        + "\n\n".join(partials) + "\n"
+    )
+    try:
+        path.write_text(body, encoding="utf-8")
+    except OSError as write_err:
+        _warn(f"could not save partial analyses to {path}: {write_err}")
+        return
+    try:
+        wrapped = type(exc)(
+            f"{exc}\n\nThe {len(partials)} of {n} completed chunk analyses were "
+            f"saved to {path}"
+        )
+    except TypeError:  # exotic exception signature: fall back to the base type
+        wrapped = RuntimeError(f"{exc}\n\nPartial chunk analyses saved to {path}")
+    raise wrapped from exc
 
 
 def list_ollama_models(base_url: str, *, timeout: int = 10) -> list[str]:
@@ -921,8 +1390,9 @@ def list_ollama_models(base_url: str, *, timeout: int = 10) -> list[str]:
     names = _get_json(root + "/api/tags", timeout)
     if names is not None:
         return names
-    # Fallback to the OpenAI-style list endpoint.
-    return _get_json(base_url.rstrip("/") + "/models", timeout) or []
+    # Fallback to the OpenAI-style list endpoint, under the same normalized
+    # API root the chat calls use (a bare host gets /v1 — see _chat_base).
+    return _get_json(_chat_base(base_url) + "/models", timeout) or []
 
 
 def probe_model(base_url: str, model: str, api_key: str = "", *, timeout: int = 30) -> tuple[bool, str]:
@@ -934,6 +1404,14 @@ def probe_model(base_url: str, model: str, api_key: str = "", *, timeout: int = 
     This probe lets the interactive picker avoid saving a dead model.
 
     Returns ``(ok, error_message)``; ``error_message`` is empty on success.
+
+    Only a definite answer means unavailable — an HTTP error (410 retired, 404
+    unknown model, other 4xx; 5xx after retries) or an unreachable server. A
+    TIMEOUT is reported as ok (wave-3 audit): a big model loading cold easily
+    takes longer than the probe's ``timeout``, and calling that "unavailable"
+    sent the caller into the picker, which could overwrite the saved model.
+    The real analysis call has a 10-minute timeout of its own. Likewise an
+    empty completion still proves the model loaded and answered.
     """
     try:
         _post_chat(
@@ -941,6 +1419,8 @@ def probe_model(base_url: str, model: str, api_key: str = "", *, timeout: int = 
             [{"role": "user", "content": "Reply with: ok"}],
             api_key, timeout=timeout,
         )
+    except (AITimeoutError, EmptyCompletionError):
+        return True, ""
     except RuntimeError as exc:
         return False, str(exc)
     return True, ""
