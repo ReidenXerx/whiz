@@ -7,6 +7,7 @@ escape-free). Rich is the only runtime dependency.
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -157,13 +158,19 @@ def wrote(label: str, path: Any) -> None:
         t.add_row(Text("  " + str(path), style="whiz.dim"))
         _console.print(t)
     else:
-        print(f"✓ {label}: {path}", file=sys.stderr)
+        # Absolute over a pipe: the macOS UI accepts an artifact line only
+        # when its path is absolute (a model-written "✓ Decision: ship
+        # Friday" must not pose as one), and a relative input would
+        # otherwise yield relative output paths.
+        print(f"✓ {label}: {os.path.abspath(str(path))}", file=sys.stderr)
 
 
-def speaker_label_line(label: str) -> None:
+def speaker_label_line(label: str, order: list[str] | None = None) -> None:
     """Print a speaker label with its palette color and a 'said:' suffix."""
-    hex_color = speaker_palette(label)
-    _console.print(f"  [{hex_color}]●[/] [bold]{label}[/] said:")
+    hex_color = speaker_palette(label, order)
+    # Text, not markup: a label is user-typed (a name like "[/x]" raised
+    # MarkupError) or speech-derived.
+    _console.print(Text.assemble("  ", ("●", hex_color), " ", (label, "bold"), " said:"))
 
 
 # U+01C0 LATIN LETTER DENTAL CLICK — a vertical stroke visually identical
@@ -226,18 +233,23 @@ def speaker_prompt(label: str, quote: str, suggestion: str | None) -> None:
     muted(f'  "{quote}"')
 
 
-def tally(counts: list[tuple[str, int]]) -> None:
-    """Render the speaker tally with per-speaker colors matching the HTML palette."""
+def tally(counts: list[tuple[str, int]], order: list[str] | None = None) -> None:
+    """Render the speaker tally with per-speaker colors matching the HTML palette.
+
+    ``order`` is the HTML's first-appearance order (``speakers_in_order``);
+    with it the colors here are the transcript's, not a colliding hash.
+    """
     if not counts:
         return
     _console.print(f"[whiz.kv.label]{'Speakers':<7}[/] [bold]{len(counts)}[/] detected")
     # Align speaker names so the segment counts line up.
     width = max((len(label) for label, _ in counts), default=0)
     for label, n in counts:
-        hex_color = speaker_palette(label)
-        _console.print(
-            f"    [{hex_color}]●[/] [bold]{label:<{width}}[/]  [whiz.muted]{n} segments[/]"
-        )
+        hex_color = speaker_palette(label, order)
+        _console.print(Text.assemble(
+            "    ", ("●", hex_color), " ", (f"{label:<{width}}", "bold"),
+            "  ", (f"{n} segments", "whiz.muted"),
+        ))
 
 
 def summary(items: list[str], title: str = "Done") -> None:
@@ -311,7 +323,12 @@ def streaming_progress(_cmd: list[str]) -> Iterator:
         # line includes its trailing newline from the subprocess
         prefix = f"[{_fmt_elapsed(elapsed)}] "
         if _is_tty():
-            _console.print(f"[whiz.timestamp]{prefix}[/][whiz.muted]{line.rstrip()}[/]")
+            # Text, not a markup string: transcripts are full of brackets —
+            # `[laughs]`/`[music]` vanished as unknown tags, and a `[/x]`
+            # token raised MarkupError mid-run.
+            _console.print(Text.assemble(
+                (prefix, "whiz.timestamp"), (line.rstrip(), "whiz.muted"),
+            ))
         else:
             sys.stderr.write(prefix + line)
             if not line.endswith("\n"):

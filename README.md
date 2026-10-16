@@ -272,13 +272,13 @@ whiz analyze recording.mov --prompt "What risks? {transcript}"
 
 ### `whiz upgrade`
 
-One-command update — reinstalls whiz from git and re-verifies the stack, so a new version is actually the one running:
+One-command update — reinstalls whiz from git with the tool that installed it (pipx or `uv tool`):
 
 ```bash
 whiz upgrade
 ```
 
-It re-injects the `diarize` extra when that one is already installed, so speaker detection keeps working across an upgrade.
+It keeps the `diarize` extra when that one is already installed, so speaker detection keeps working across an upgrade, and exits nonzero if it could not. A pip install or a dev checkout is not something it can redo — it says so and changes nothing.
 
 ## Configuration
 
