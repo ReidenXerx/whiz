@@ -317,6 +317,7 @@ def test_transcribe_html_and_frames_fallback_for_video(tmp_path, monkeypatch, ca
         lambda in_path, merged, of_base, ffmpeg, width, dry_run: (frames_dir, manifest, False),
     )
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    monkeypatch.setattr(cli.aud, "find_ffmpeg", lambda configured="": "ffmpeg")  # CI has no ffmpeg
 
     rc = cli.cmd_transcribe(_transcribe_args(video, outputs="html", speakers=1))
 
@@ -1649,9 +1650,11 @@ def test_merge_declined_setup_then_success_explains_cache_reuse(tmp_path, monkey
     rc = cli.cmd_merge(_merge_args(audio, outputs="html", speakers=1))
 
     assert rc == 0
-    flat = " ".join(capsys.readouterr().err.split())
-    assert "ran WITHOUT the one-time setup" in flat
-    assert ".diar.json" in flat
+    err = capsys.readouterr().err
+    assert "ran WITHOUT the one-time setup" in " ".join(err.split())
+    # The cache path is one long word; the console folds it wherever the
+    # temp dir's length puts the edge, so look for it with no whitespace.
+    assert ".diar.json" in "".join(err.split())
 
 
 def test_manifest_is_named_detection(tmp_path):
@@ -1754,6 +1757,7 @@ def test_transcribe_degraded_run_keeps_named_frames_manifest_rc0(tmp_path, monke
     monkeypatch.setattr(cli, "_run_whisper_streaming", lambda cmd: SimpleNamespace(returncode=0))
     monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    monkeypatch.setattr(cli.aud, "find_ffmpeg", lambda configured="": "ffmpeg")  # CI has no ffmpeg
 
     def _boom(*_a, **_k):
         raise AssertionError("extraction must not run when the named manifest is kept")
