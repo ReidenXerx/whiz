@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="docs/assets/whiz-icon.png" alt="whiz" width="96">
+<img src="docs/assets/whiz-icon.png" alt="Whiz app icon" width="112">
 
-# whiz
+# Whiz
 
 **A recording goes in. A transcript that knows who spoke comes out.**
 
@@ -14,11 +14,13 @@ From audio or video to a labeled, named, frame-illustrated transcript — in one
 [![macOS · Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](#requirements)
 [![Powered by whisper.cpp](https://img.shields.io/badge/powered%20by-whisper.cpp%20%2B%20sherpa--onnx-F0A32E)](https://github.com/ggerganov/whisper.cpp)
 
-```bash
-whiz transcribe recording.mov
-```
+**[Mac app](#macos-app)** · **[Command line](#quick-start)** · **[duduphudu.app/whiz](https://duduphudu.app/whiz/)**
 
-**[duduphudu.app/whiz](https://duduphudu.app/whiz/)** — what one command does, and what it costs you in privacy (nothing)
+<img src="docs/assets/app-transcript.png" alt="The Whiz Mac app showing a three-person meeting: the video player on top, then the transcript with Maya, Tom and Arjun each in their own colour, a talk-time legend, and the slide that was on screen beside every line." width="100%">
+
+```bash
+whiz transcribe recording.mov    # the same pipeline, from the terminal
+```
 
 </div>
 
@@ -116,8 +118,8 @@ whiz models download turbo      # ggml-large-v3-turbo.bin — unquantized (NS-15
 the installed `whiz` for every transcription, so install the CLI first; then:
 
 ```bash
-cd macos && ./build-app.sh            # → macos/dist/WhizUI.app (ad-hoc signed, this Mac only)
-cp -R dist/WhizUI.app /Applications/
+cd macos && ./build-app.sh            # → macos/dist/Whiz.app (ad-hoc signed, this Mac only)
+cp -R dist/Whiz.app /Applications/
 ```
 
 To give the app to other Macs, sign it with a Developer ID and notarize the
@@ -128,6 +130,11 @@ the one-time `notarytool store-credentials` step):
 WHIZ_SIGN_IDENTITY="Developer ID Application: Name (TEAMID)" \
 WHIZ_NOTARY_PROFILE=whiz-notary ./build-dmg.sh   # → signed, notarized, stapled DMG
 ```
+
+<p>
+<img src="docs/assets/app-compose.png" alt="New Transcription: a drop zone for a recording, then options for language, speakers, names, video frames and AI summary." width="49%">
+<img src="docs/assets/app-setup.png" alt="The Setup Assistant on a fresh Mac: the whiz engine is installed; whisper.cpp offers Install with Homebrew; the speech model step offers Turbo, Large v3 or Small to download." width="49%">
+</p>
 
 - **Setup Assistant:** on first launch, a checklist of what Whiz needs (the CLI, whisper.cpp and ffmpeg, a speech model, optionally speaker detection and an AI model), each installed with one click through Homebrew, pipx and `whiz`, with progress. Without Homebrew, *Install Homebrew…* runs its official installer in Terminal (it asks for your password); coming back to the app checks again. A quantized speech model that is only there by default is flagged, with the full-quality download offered. It reopens from the app menu.
 - **Sidebar:** New Transcription, the run in progress, and recent runs (right-click to re-run or remove).
