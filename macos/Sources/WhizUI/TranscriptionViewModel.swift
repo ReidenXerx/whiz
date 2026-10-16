@@ -64,6 +64,25 @@ final class TranscriptionViewModel: ObservableObject {
     /// reports nothing measurable. Reset on every phase change so a new
     /// stage starts at "no percent yet", not stuck at the last one's 100.
     @Published private(set) var progressPercent: Int?
+    /// The phases this run has been through, in order — the run view's
+    /// timeline. Each step closes when the next phase starts (or the run
+    /// ends), so a finished step carries its own duration.
+    @Published private(set) var steps: [PhaseStep] = []
+    /// The input of the run the sidebar's "now" row stands for: set when a
+    /// run starts, cleared when it finishes with results (it then lives in
+    /// history) or when the user dismisses a failed/stopped one.
+    @Published private(set) var liveRunInput: URL?
+
+    // --- Navigation ---
+
+    /// What the window shows. Persisted, so a relaunch lands where the user
+    /// left off; a stale `.live` (no run survives a relaunch) or a run that
+    /// is no longer in history reads as the new-run form.
+    @Published var selection: SidebarItem = .compose {
+        didSet { if selection != oldValue { optionsStore.saveSelection(selection) } }
+    }
+    /// Set by ⌘O from anywhere; the window owns the file importer.
+    @Published var isPickingFile = false
 
     /// The log pane is a transcript, not a ledger: keep the tail.
     static let logLineCap = 400
@@ -71,7 +90,7 @@ final class TranscriptionViewModel: ObservableObject {
     /// Human clock for the status chip: `3:12`, `1:47:30`. Zero-pads seconds,
     /// shows hours only when hours exist, and clamps a clock-skewed negative
     /// to zero rather than printing nonsense.
-    static func formatDuration(_ seconds: Double) -> String {
+    nonisolated static func formatDuration(_ seconds: Double) -> String {
         let total = max(Int(seconds.rounded()), 0)
         let hours = total / 3600
         let minutes = (total % 3600) / 60
@@ -102,6 +121,62 @@ final class TranscriptionViewModel: ObservableObject {
         lastRun = lastRunStore.load()
         recentRuns = lastRunStore.loadHistory()
         restoreOptions()
+        selection = Self.restorable(optionsStore.loadSelection(), history: recentRuns)
+    }
+
+    /// A persisted selection only survives if it still points at something.
+    nonisolated static func restorable(_ item: SidebarItem?, history: [LastRunRecord]) -> SidebarItem {
+        switch item {
+        case .run(let path) where history.contains(where: { $0.inputPath == path }):
+            return .run(path)
+        default:
+            return .compose
+        }
+    }
+
+    /// The history record a `.run` selection names, if it still exists.
+    func record(for path: String) -> LastRunRecord? {
+        recentRuns.first { $0.inputPath == path }
+    }
+
+    /// Choose the next run's input and show the form with it.
+    func choose(_ url: URL) {
+        guard !isRunning else { return }
+        inputURL = url
+        selection = .compose
+    }
+
+    /// "Transcribe Again": the form, pre-filled with that run's input. The
+    /// options stay the persisted ones — the record does not carry options.
+    func prepareRerun(_ record: LastRunRecord) {
+        choose(record.inputURL)
+    }
+
+    /// Forget a run (its files stay on disk).
+    func removeFromHistory(_ record: LastRunRecord) {
+        lastRunStore.remove(inputPath: record.inputPath)
+        recentRuns = lastRunStore.loadHistory()
+        lastRun = recentRuns.first
+        if selection == .run(record.inputPath) { selection = .compose }
+    }
+
+    /// Put away a failed or stopped run's live view.
+    func dismissLiveRun() {
+        guard !isRunning else { return }
+        liveRunInput = nil
+        steps = []
+        logLines = []
+        artifacts = []
+        lastOutcome = nil
+        if selection == .live { selection = .compose }
+    }
+
+    /// Seconds left in a phase from its percent and how long it has run —
+    /// `nil` until the estimate means something (a few percent in, a few
+    /// seconds in), so the UI never flashes "2 hours left" at 1%.
+    nonisolated static func estimatedRemaining(percent: Int?, elapsed: TimeInterval) -> TimeInterval? {
+        guard let percent, percent >= 3, percent < 100, elapsed >= 5 else { return nil }
+        return elapsed * Double(100 - percent) / Double(percent)
     }
 
     /// Bring the persisted options into the form once, at birth — the form
@@ -152,6 +227,9 @@ final class TranscriptionViewModel: ObservableObject {
         lastOutcome = .running
         pendingSpeakerPrompt = nil
         progressPercent = nil
+        steps = []
+        liveRunInput = input
+        selection = .live
         optionsStore.save(OptionsRecord(
             language: language,
             speakers: speakers,
@@ -185,6 +263,7 @@ final class TranscriptionViewModel: ObservableObject {
             }
             continuation.finish()
             await consumer.value
+            closeCurrentStep(outcome: outcome)
             isRunning = false
             phase = nil
             progressPercent = nil
@@ -198,8 +277,15 @@ final class TranscriptionViewModel: ObservableObject {
             // (saveReturning returns nil for empty lists), so a fresh
             // window never advertises a run that wrote nothing.
             if !artifacts.isEmpty {
-                lastRun = lastRunStore.saveReturning(artifacts: artifacts, input: input)
+                lastRun = lastRunStore.saveReturning(
+                    artifacts: artifacts, input: input, duration: lastDuration)
                 recentRuns = lastRunStore.loadHistory()
+            }
+            // A clean run with results now lives in history: show it there.
+            // Failures and stops stay on the live view, with the reason.
+            if outcome == .finished, !artifacts.isEmpty {
+                liveRunInput = nil
+                if selection == .live { selection = .run(input.path) }
             }
         }
     }
@@ -232,6 +318,8 @@ final class TranscriptionViewModel: ObservableObject {
         case .phase(let label):
             phase = label
             progressPercent = nil
+            closeCurrentStep(outcome: nil)
+            steps.append(PhaseStep(id: steps.count, label: label, startedAt: Date()))
         case .log(let line):
             appendLog(line)
         case .artifact(let artifact):
@@ -243,12 +331,61 @@ final class TranscriptionViewModel: ObservableObject {
         }
     }
 
+    /// End the open step: when the next phase starts (`outcome` nil, it
+    /// finished), or when the run ends, which also says HOW it ended.
+    private func closeCurrentStep(outcome: RunOutcome?) {
+        guard let last = steps.indices.last, steps[last].endedAt == nil else { return }
+        steps[last].endedAt = Date()
+        switch outcome {
+        case .failed: steps[last].state = .failed
+        case .stopped: steps[last].state = .stopped
+        default: steps[last].state = .done
+        }
+    }
+
     private func appendLog(_ line: String) {
         logLines.append(line)
         if logLines.count > Self.logLineCap {
             logLines.removeFirst(logLines.count - Self.logLineCap)
         }
     }
+}
+
+/// One phase of a run, as the timeline shows it.
+struct PhaseStep: Identifiable, Equatable, Sendable {
+    enum State: Equatable, Sendable { case active, done, failed, stopped }
+
+    let id: Int
+    /// The CLI's own phase label ("transcribing", "analyzing (chained)").
+    var label: String
+    var startedAt: Date
+    var endedAt: Date?
+    var state: State = .active
+
+    /// The CLI's phase names are engineer's words ("diarizing"); the step
+    /// list speaks the user's. Unknown phases fall back to the label,
+    /// capitalized — a new CLI phase still shows, just less polished.
+    static let friendlyTitles: [String: String] = [
+        "extracting audio": "Extracting audio",
+        "diarizing": "Telling speakers apart",
+        "transcribing": "Transcribing speech",
+        "merging speakers": "Matching words to speakers",
+        "capturing frames": "Capturing video frames",
+        "writing HTML transcript": "Writing the HTML transcript",
+        "choosing AI model": "Choosing an AI model",
+        "analyzing": "Writing the AI summary",
+    ]
+
+    /// "transcribing" → "Transcribing speech"; the chained-analysis suffix is
+    /// CLI bookkeeping, not something a reader needs.
+    var title: String {
+        let trimmed = label.replacingOccurrences(of: " (chained)", with: "")
+        if let friendly = Self.friendlyTitles[trimmed] { return friendly }
+        guard let first = trimmed.first else { return trimmed }
+        return first.uppercased() + trimmed.dropFirst()
+    }
+
+    var duration: TimeInterval? { endedAt.map { $0.timeIntervalSince(startedAt) } }
 }
 
 /// How the last run in this window ended — the control bar's status chip.

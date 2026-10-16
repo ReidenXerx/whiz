@@ -40,4 +40,44 @@ struct OptionsStore {
         guard let data = try? JSONEncoder().encode(record) else { return }
         defaults.set(data, forKey: Self.key)
     }
+
+    /// The sidebar item the window last showed, so a relaunch lands where
+    /// the user left off. Same suite as the options: one injectable domain
+    /// for everything the window remembers.
+    static let selectionKey = "dev.reidenxerx.whiz.selection"
+
+    func loadSelection() -> SidebarItem? {
+        defaults.string(forKey: Self.selectionKey).flatMap(SidebarItem.init(storageValue:))
+    }
+
+    func saveSelection(_ item: SidebarItem) {
+        defaults.set(item.storageValue, forKey: Self.selectionKey)
+    }
+}
+
+/// What the sidebar has selected: the new-run form, the run in progress (or
+/// the one that just failed), or a finished run from history, keyed by its
+/// input path — the same identity `LastRunStore` dedupes on.
+enum SidebarItem: Hashable, Sendable {
+    case compose
+    case live
+    case run(String)
+
+    var storageValue: String {
+        switch self {
+        case .compose: return "compose"
+        case .live: return "live"
+        case .run(let path): return "run:" + path
+        }
+    }
+
+    init?(storageValue: String) {
+        switch storageValue {
+        case "compose": self = .compose
+        case "live": self = .live
+        default:
+            guard storageValue.hasPrefix("run:"), storageValue.count > 4 else { return nil }
+            self = .run(String(storageValue.dropFirst(4)))
+        }
+    }
 }

@@ -47,6 +47,7 @@ Most transcription tools stop at text. whiz is the one-command path from a scree
 - [Requirements](#requirements)
 - [Install](#install)
 - [What it does](#what-it-does)
+- [macOS app](#macos-app)
 - [Recipes](#recipes)
 - [Commands](#commands)
 - [Configuration](#configuration)
@@ -108,6 +109,22 @@ Then make sure a model is available — download one from the official whisper.c
 ```bash
 whiz models download turbo      # ggml-large-v3-turbo.bin — unquantized (NS-15)
 ```
+
+## macOS app
+
+`macos/` holds a native SwiftUI front-end for the CLI (macOS 13+). It runs
+the installed `whiz` for every transcription, so install the CLI first; then:
+
+```bash
+cd macos && ./build-app.sh            # → macos/dist/WhizUI.app (ad-hoc signed, this Mac only)
+cp -R dist/WhizUI.app /Applications/
+```
+
+- **Sidebar:** New Transcription, the run in progress, and recent runs (right-click to re-run or remove).
+- **New Transcription:** drop a recording (or ⌘O, or Finder's *Open With*), choose language, speakers, names, frames and AI summary, then press Return.
+- **While it runs:** a step list with progress and time left, a card that asks you to name unknown speakers, and the full log under *Details*.
+- **Results:** the transcript with speaker colors, search, frames and a built-in player (click a timestamp to play from there), the rendered AI summary, and every file written.
+- **Settings (⌘,):** whiz's own `config.toml` through `whiz config` (model, default language, output formats, voice profiles, AI server and key). The terminal and the app share one config.
 
 ## What it does
 
@@ -230,6 +247,7 @@ Manage whisper, VAD, and diarization models.
 
 ```bash
 whiz models list                       # show discovered ggml models
+whiz models list --json                # the same, as data (the macOS app reads this)
 whiz models download turbo             # ggml-large-v3-turbo.bin — unquantized (NS-15)
 whiz models download large-v3 --dest ~/models
 whiz models known                      # canonical whisper.cpp model filenames
@@ -242,11 +260,13 @@ whiz models download-diarization       # pyannote segmentation + 3D-Speaker embe
 
 ```bash
 whiz config show                       # print current config + model search dirs
+whiz config show --json                # the same as JSON, secrets masked
 whiz config edit                       # open ~/.config/whiz/config.toml in $EDITOR
 whiz config set model=turbo
 whiz config set threads=8
 whiz config set ai_model=llava
 whiz config set speaker_match_threshold=0.85
+whiz config set ai_api_key --stdin     # read the value from stdin: secrets stay out of argv
 ```
 
 ### `whiz speakers list | forget | match`

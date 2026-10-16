@@ -24,6 +24,12 @@ struct LastRunRecord: Codable, Equatable, Sendable, Identifiable {
     var inputPath: String
     var finishedAt: Date
     var artifacts: [StoredArtifact]
+    /// How long the run took, in seconds. Optional because records written
+    /// before the field existed decode without it (synthesized Codable reads
+    /// a missing optional key as nil).
+    var duration: Double? = nil
+
+    var inputURL: URL { URL(fileURLWithPath: inputPath) }
 }
 
 /// The persisted half of `Artifact`. Exists because `Artifact.kind` is a
@@ -112,15 +118,26 @@ struct LastRunStore {
     /// previous run's results — an empty "last run" is worse than an older
     /// real one.
     @discardableResult
-    func saveReturning(artifacts: [Artifact], input: URL, finishedAt: Date = .init()) -> LastRunRecord? {
+    func saveReturning(artifacts: [Artifact], input: URL, finishedAt: Date = .init(),
+                       duration: Double? = nil) -> LastRunRecord? {
         guard !artifacts.isEmpty else { return nil }
         let record = LastRunRecord(
             inputPath: input.path,
             finishedAt: finishedAt,
-            artifacts: artifacts.map { StoredArtifact(label: $0.label, url: $0.url) }
+            artifacts: artifacts.map { StoredArtifact(label: $0.label, url: $0.url) },
+            duration: duration
         )
         prepend(toHistory: record)
         return record
+    }
+
+    /// Forget one run. The files stay on disk — this is the sidebar's
+    /// "Remove from History", not a delete.
+    func remove(inputPath: String) {
+        let history = loadHistory()
+        let kept = history.filter { $0.inputPath != inputPath }
+        guard kept.count != history.count else { return }
+        saveHistory(kept)
     }
 
     /// Newest first, deduplicated by input path (a re-run of the same file

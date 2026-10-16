@@ -58,7 +58,12 @@ One Python package, ~6,000 lines, no compiled parts:
 for the CLI, not a second pipeline — a different app from the dictation one
 that moved to mynah. It spawns `whiz transcribe` and reads its merged
 stdout+stderr; every decision about audio, speakers and analysis stays in
-the Python package. See *The pipe contract* below.
+the Python package. See *The pipe contract* below. Its other reads are
+files and data the CLI already produces: the results view parses
+`<stem>.frames.json` / `.speakers.srt` / `.speakers.txt` / `.analysis.md`
+(the formats `tests/` pin), and Settings reads and writes `config.toml`
+only through `whiz config show --json` and `whiz config set` (secrets via
+`--stdin`, never argv) — the app keeps no settings copy of its own.
 
 Everything shells out or calls optional dependencies rather than bundling:
 whisper-cli and ffmpeg from PATH, sherpa-onnx as an optional extra installed
