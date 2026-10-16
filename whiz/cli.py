@@ -1588,6 +1588,15 @@ def _run_transcribe(
 def cmd_models_list(args: argparse.Namespace) -> int:
     config = cfg.load()
     found = M.discover(config)
+    if getattr(args, "json", False):
+        # Data only, even when empty: the app renders "no models" itself.
+        import json
+
+        print(json.dumps(
+            [{"alias": m.alias, "size_mb": round(m.size_mb, 1), "path": str(m.path)} for m in found],
+            ensure_ascii=False,
+        ))
+        return 0
     if not found:
         ui.status("No models found in:", kind="warn")
         for d in cfg.model_search_dirs(config):
@@ -2489,6 +2498,8 @@ def _run_speakers_match(args: argparse.Namespace, stack: contextlib.ExitStack) -
 
 def cmd_config_show(args: argparse.Namespace) -> int:
     config = cfg.load()
+    if getattr(args, "json", False):
+        return _print_config_json(config)
     print(f"# {cfg.CONFIG_PATH}")
     print()
     for k, v in config.to_dict().items():
@@ -2515,6 +2526,34 @@ def cmd_config_show(args: argparse.Namespace) -> int:
 
 
 _SECRET_CONFIG_KEYS = {"ai_api_key"}
+
+
+def _print_config_json(config: cfg.Config) -> int:
+    """``config show --json``: the settings as data, for the macOS app.
+
+    The text form prints Python reprs (``True``, ``['srt', 'json']``) that a
+    second language would have to re-parse by guesswork. Secrets stay masked
+    here too — the app only needs to know a key IS set (``secrets_set``),
+    and stdout of a GUI's child process ends up in logs like any other.
+    """
+    import json
+
+    values: dict[str, object] = {}
+    secrets_set: dict[str, bool] = {}
+    for k, v in config.to_dict().items():
+        if k in _SECRET_CONFIG_KEYS:
+            secrets_set[k] = bool(v)
+            values[k] = _mask_secret(v) if isinstance(v, str) and v else ""
+        else:
+            values[k] = v
+    payload = {
+        "path": str(cfg.CONFIG_PATH),
+        "values": values,
+        "secrets_set": secrets_set,
+        "model_search_dirs": [str(d) for d in cfg.model_search_dirs(config)],
+    }
+    print(json.dumps(payload, default=str, ensure_ascii=False))
+    return 0
 
 
 def _mask_secret(value: str) -> str:
@@ -2591,9 +2630,17 @@ def _validate_config_value(key: str, value: object) -> None:
 def cmd_config_set(args: argparse.Namespace) -> int:
     config = cfg.load()
     assignment = args.assignment
-    if "=" not in assignment:
+    if getattr(args, "stdin", False):
+        # `config set ai_api_key --stdin`: the value never appears in argv,
+        # where every local process can read it (ps). One line; the trailing
+        # newline a pipe or a heredoc adds is not part of the value.
+        if "=" in assignment:
+            raise SystemExit("With --stdin, pass only the KEY (the value is read from stdin)")
+        key, value = assignment, sys.stdin.readline().rstrip("\r\n")
+    elif "=" not in assignment:
         raise SystemExit("Expected KEY=VALUE (e.g. whiz config set threads=8)")
-    key, _, value = assignment.partition("=")
+    else:
+        key, _, value = assignment.partition("=")
     key = key.strip()
     if key not in cfg.Config.__dataclass_fields__:
         raise SystemExit(f"Unknown config key '{key}'. Valid: {', '.join(cfg.Config.__dataclass_fields__)}")
@@ -2602,7 +2649,10 @@ def cmd_config_set(args: argparse.Namespace) -> int:
     _validate_config_value(key, coerced)
     setattr(config, key, coerced)
     path = cfg.save(config)
-    print(f"Set {key} = {coerced!r}")
+    if key in _SECRET_CONFIG_KEYS and isinstance(coerced, str) and coerced:
+        print(f"Set {key} = {_mask_secret(coerced)!r}")
+    else:
+        print(f"Set {key} = {coerced!r}")
     print(f"Saved to {path}")
     return 0
 
@@ -2790,7 +2840,9 @@ def build_parser() -> argparse.ArgumentParser:
     # models
     mp = sub.add_parser("models", aliases=["m"], help="Manage whisper models")
     msub = mp.add_subparsers(dest="models_command", required=True)
-    msub.add_parser("list", aliases=["ls"]).set_defaults(func=cmd_models_list)
+    ml = msub.add_parser("list", aliases=["ls"])
+    ml.add_argument("--json", action="store_true", help="Print the discovered models as JSON")
+    ml.set_defaults(func=cmd_models_list)
     md = msub.add_parser("download", aliases=["dl"], help="Download a model from HuggingFace")
     md.add_argument("model", help="Model name, e.g. 'turbo', 'large-v3', or full 'ggml-large-v3-turbo-q5_0.bin'")
     md.add_argument("--dest", default="", help="Destination directory (default: ~/.cache/whisper)")
@@ -2842,10 +2894,13 @@ def build_parser() -> argparse.ArgumentParser:
     # config
     cp = sub.add_parser("config", aliases=["c"], help="View or edit configuration")
     csub = cp.add_subparsers(dest="config_command", required=True)
-    csub.add_parser("show", aliases=["cat"]).set_defaults(func=cmd_config_show)
+    cshow = csub.add_parser("show", aliases=["cat"])
+    cshow.add_argument("--json", action="store_true", help="Print the settings as JSON (secrets masked)")
+    cshow.set_defaults(func=cmd_config_show)
     csub.add_parser("edit", help="Open config in $EDITOR").set_defaults(func=cmd_config_edit)
     cs = csub.add_parser("set", help="Set a value: KEY=VALUE")
-    cs.add_argument("assignment", help="KEY=VALUE, e.g. threads=8 or model=turbo")
+    cs.add_argument("assignment", help="KEY=VALUE, e.g. threads=8 or model=turbo (just KEY with --stdin)")
+    cs.add_argument("--stdin", action="store_true", help="Read the value from stdin (keeps secrets such as ai_api_key out of argv)")
     cs.set_defaults(func=cmd_config_set)
 
     # upgrade

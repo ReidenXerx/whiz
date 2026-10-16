@@ -2145,6 +2145,66 @@ def test_config_show_masks_the_api_key(monkeypatch, capsys):
     assert "sk-…4567" in out
 
 
+def test_config_show_json_is_data_with_secrets_masked(monkeypatch, capsys):
+    import json
+
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config(
+        ai_api_key="sk-SECRET1234567", outputs=["srt", "json"], verbose=False))
+    monkeypatch.setattr(cli.cfg, "model_search_dirs", lambda config: [Path("/models")])
+    assert cli.cmd_config_show(SimpleNamespace(json=True)) == 0
+    out = capsys.readouterr().out
+    assert "SECRET" not in out
+    payload = json.loads(out)
+    assert payload["values"]["outputs"] == ["srt", "json"]
+    assert payload["values"]["verbose"] is False
+    # Tri-state unset is JSON null, not the text form's "<unset>".
+    assert payload["values"]["auto_diarization_setup"] is None
+    assert payload["secrets_set"] == {"ai_api_key": True}
+    assert payload["model_search_dirs"] == ["/models"]
+
+
+def test_models_list_json_prints_a_list_even_when_empty(monkeypatch, capsys, tmp_path):
+    import json
+
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    monkeypatch.setattr(cli.M, "discover", lambda config: [])
+    assert cli.cmd_models_list(SimpleNamespace(json=True)) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+    model = SimpleNamespace(alias="turbo", size_mb=1550.04, path=tmp_path / "ggml-large-v3-turbo.bin")
+    monkeypatch.setattr(cli.M, "discover", lambda config: [model])
+    cli.cmd_models_list(SimpleNamespace(json=True))
+    assert json.loads(capsys.readouterr().out) == [
+        {"alias": "turbo", "size_mb": 1550.0, "path": str(model.path)}]
+
+
+def test_config_set_stdin_keeps_the_secret_out_of_argv_and_stdout(tmp_path, monkeypatch, capsys):
+    import io
+
+    monkeypatch.setenv("WHIZ_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(cli.cfg, "CONFIG_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(cli.cfg, "CONFIG_PATH", tmp_path / "config.toml", raising=False)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("sk-SECRET1234567\n"))
+    assert cli.cmd_config_set(SimpleNamespace(assignment="ai_api_key", stdin=True)) == 0
+    assert cli.cfg.load().ai_api_key == "sk-SECRET1234567"
+    assert "SECRET" not in capsys.readouterr().out
+
+    # The KEY=VALUE form masks its echo too.
+    cli.cmd_config_set(SimpleNamespace(assignment="ai_api_key=sk-OTHER98765432"))
+    assert "OTHER" not in capsys.readouterr().out
+
+    with pytest.raises(SystemExit, match="only the KEY"):
+        cli.cmd_config_set(SimpleNamespace(assignment="ai_api_key=x", stdin=True))
+
+
+def test_json_flags_are_wired_into_the_parser():
+    parser = cli.build_parser()
+    assert parser.parse_args(["config", "show", "--json"]).json is True
+    assert parser.parse_args(["models", "list", "--json"]).json is True
+    assert parser.parse_args(["config", "show"]).json is False
+    assert parser.parse_args(["config", "set", "ai_api_key", "--stdin"]).stdin is True
+
+
 def test_config_edit_splits_editor_command(monkeypatch, tmp_path):
     seen = {}
     monkeypatch.setenv("EDITOR", "code -w")
