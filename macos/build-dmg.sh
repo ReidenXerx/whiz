@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# build-dmg.sh — pack WhizUI.app into a drag-to-install DMG.
+# build-dmg.sh — pack Whiz.app into a drag-to-install DMG.
 #
 # A volume that opens showing the app next to an Applications shortcut,
 # drag once, done.
@@ -22,7 +22,7 @@
 # Runs build-app.sh first (it reads WHIZ_SIGN_IDENTITY too) so the DMG
 # always matches the tree.
 #
-# Output: dist/WhizUI-<version>.dmg (dist/ is gitignored).
+# Output: dist/Whiz-<version>.dmg (dist/ is gitignored).
 
 set -euo pipefail
 
@@ -48,19 +48,19 @@ fi
 "$SCRIPT_DIR/build-app.sh"
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
-  "$DIST/WhizUI.app/Contents/Info.plist")"
-DMG="$DIST/WhizUI-$VERSION.dmg"
+  "$DIST/Whiz.app/Contents/Info.plist")"
+DMG="$DIST/Whiz-$VERSION.dmg"
 
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
 # The Applications symlink is what makes the volume "drag to install" —
 # Finder resolves it in the copy, so dragging the app lands in /Applications.
-cp -R "$DIST/WhizUI.app" "$STAGE/"
+cp -R "$DIST/Whiz.app" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 
 rm -f "$DMG"
-hdiutil create -volname "WhizUI" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+hdiutil create -volname "Whiz" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
 hdiutil verify "$DMG" >/dev/null
 
 if [ -z "$IDENTITY" ]; then

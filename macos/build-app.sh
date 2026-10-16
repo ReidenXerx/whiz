@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# build-app.sh — assemble WhizUI.app from a release build.
+# build-app.sh — assemble Whiz.app from a release build.
 #
 # One command between "the tests pass" and "the app is in /Applications":
 # builds the release binary, copies the bundle directory around it, stamps
@@ -17,7 +17,7 @@
 #                       secure timestamp, as notarization requires.
 #                       Notarizing is build-dmg.sh's job — the DMG ships.
 #
-# Output: dist/WhizUI.app (dist/ is gitignored — artifacts, not sources).
+# Output: dist/Whiz.app (dist/ is gitignored — artifacts, not sources).
 
 set -euo pipefail
 
@@ -26,7 +26,11 @@ MACOS_DIR="$SCRIPT_DIR"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DIST="$MACOS_DIR/dist"
 
-APP_NAME="WhizUI"
+# The Swift product (and module) stays WhizUI; what macOS shows — the
+# bundle, its executable, Activity Monitor, the Dock — is "Whiz". The
+# bundle identifier is unchanged, so settings and run history carry over.
+PRODUCT="WhizUI"
+APP_NAME="Whiz"
 APP="$DIST/$APP_NAME.app"
 CONTENTS="$APP/Contents"
 
@@ -36,7 +40,7 @@ VERSION="$(/usr/bin/awk -F '"' '/^version = / {print $2}' "$REPO_ROOT/pyproject.
 echo "Building $APP_NAME $VERSION (release)…"
 cd "$MACOS_DIR"
 swift build -c release --disable-sandbox >/dev/null
-BINARY="$MACOS_DIR/.build/release/$APP_NAME"
+BINARY="$MACOS_DIR/.build/release/$PRODUCT"
 [ -f "$BINARY" ] || { echo "build-app.sh: no release binary at $BINARY" >&2; exit 1; }
 
 rm -rf "$APP"
