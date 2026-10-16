@@ -5,15 +5,17 @@
 # One command between "the tests pass" and "the app is in /Applications":
 # builds the release binary, copies the bundle directory around it, stamps
 # the version from pyproject.toml (one version for the project, not two),
-# and ad-hoc codesigns so a locally built app runs without any signing
-# identity.
+# and codesigns.
 #
-# FOR THIS MAC ONLY. The signature is ad-hoc (`codesign --sign -`): there is
-# no Developer ID signing and no notarization here. Gatekeeper accepts the
-# app on the machine that built it; copied to another Mac (AirDrop, a
-# download, a DMG) it is quarantined and blocked as "damaged" or "from an
-# unidentified developer". Distributing it needs a Developer ID certificate
-# plus `notarytool`, which this script deliberately does not attempt.
+# Signing:
+#   default             ad-hoc (`codesign --sign -`), no identity needed.
+#                       FOR THIS MAC ONLY: copied to another Mac (AirDrop, a
+#                       download) the app is quarantined and Gatekeeper
+#                       blocks it as "damaged" or "unidentified developer".
+#   WHIZ_SIGN_IDENTITY  a keychain identity, e.g. "Developer ID Application:
+#                       Name (TEAMID)": signs with the hardened runtime and a
+#                       secure timestamp, as notarization requires.
+#                       Notarizing is build-dmg.sh's job — the DMG ships.
 #
 # Output: dist/WhizUI.app (dist/ is gitignored — artifacts, not sources).
 
@@ -56,10 +58,16 @@ fi
 # counter the script does not manage — for a local artifact "1" is honest.
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$CONTENTS/Info.plist"
 
-# Ad-hoc signature: no identity, no notarization, Gatekeeper accepts it on
-# the machine that built it. --force because a previous build may have left
-# a stale signature on a copied bundle.
-codesign --force --sign - "$APP"
-codesign --verify "$APP"
-
-echo "Wrote $APP ($VERSION) — ad-hoc signed, runs on THIS Mac only (not notarized)."
+# --force because a previous build may have left a stale signature on a
+# copied bundle. No entitlements: the app only runs whiz as a child process
+# and reads the files whiz writes, which the hardened runtime allows.
+IDENTITY="${WHIZ_SIGN_IDENTITY:-}"
+if [ -n "$IDENTITY" ]; then
+  codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
+  codesign --verify --strict "$APP"
+  echo "Wrote $APP ($VERSION) — signed by \"$IDENTITY\" (hardened runtime)."
+else
+  codesign --force --sign - "$APP"
+  codesign --verify "$APP"
+  echo "Wrote $APP ($VERSION) — ad-hoc signed, runs on THIS Mac only (not notarized)."
+fi

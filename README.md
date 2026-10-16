@@ -120,7 +120,16 @@ cd macos && ./build-app.sh            # → macos/dist/WhizUI.app (ad-hoc signed
 cp -R dist/WhizUI.app /Applications/
 ```
 
-- **Setup Assistant:** on first launch, a checklist of what Whiz needs (the CLI, whisper.cpp and ffmpeg, a speech model, optionally speaker detection and an AI model), each installed with one click through Homebrew, pipx and `whiz`, with progress. It reopens from the app menu.
+To give the app to other Macs, sign it with a Developer ID and notarize the
+DMG (needs an Apple Developer Program membership; `build-dmg.sh` explains
+the one-time `notarytool store-credentials` step):
+
+```bash
+WHIZ_SIGN_IDENTITY="Developer ID Application: Name (TEAMID)" \
+WHIZ_NOTARY_PROFILE=whiz-notary ./build-dmg.sh   # → signed, notarized, stapled DMG
+```
+
+- **Setup Assistant:** on first launch, a checklist of what Whiz needs (the CLI, whisper.cpp and ffmpeg, a speech model, optionally speaker detection and an AI model), each installed with one click through Homebrew, pipx and `whiz`, with progress. Without Homebrew, *Install Homebrew…* runs its official installer in Terminal (it asks for your password); coming back to the app checks again. A quantized speech model that is only there by default is flagged, with the full-quality download offered. It reopens from the app menu.
 - **Sidebar:** New Transcription, the run in progress, and recent runs (right-click to re-run or remove).
 - **New Transcription:** drop a recording (or ⌘O, or Finder's *Open With*), choose language, speakers, names, frames and AI summary, then press Return.
 - **While it runs:** a step list with progress and time left, a card that asks you to name unknown speakers, and the full log under *Details*.

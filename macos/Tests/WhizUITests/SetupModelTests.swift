@@ -58,6 +58,24 @@ struct SetupModelTests {
         #expect(report.brew == "/opt/homebrew/bin/brew")
     }
 
+    @Test("a quantized fallback model is flagged; a configured one is the user's choice")
+    func quantizedFallback() async throws {
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        func setup(configured: String) async throws -> SetupModel {
+            let whiz = try script(directory, "whiz-\(configured.isEmpty ? "auto" : "set")", """
+            printf '{"version": "1", "checks": {"whisper_cli": {"ok": true}, "ffmpeg": {"ok": true}, "model": {"ok": true, "alias": "large-v3-turbo-q5_0", "quantized": true, "configured": "\(configured)"}}, "ai": {"configured": false, "base_url": "", "model": ""}, "ready": true}\\n'
+            """)
+            let model = SetupModel(locateWhiz: { whiz }, locateTool: { _ in nil })
+            await model.refresh()
+            return model
+        }
+        let auto = try await setup(configured: "")
+        #expect(auto.hasQuantizedFallback && auto.isReady && auto.isDone(.model) == true)
+        let chosen = try await setup(configured: "large-v3-turbo-q5_0")
+        #expect(!chosen.hasQuantizedFallback)
+    }
+
     @Test("a missing CLI is not ready and points at step one")
     func missingCLI() async {
         let setup = SetupModel(locateWhiz: { nil }, locateTool: { _ in nil })
@@ -125,6 +143,39 @@ struct SetupModelTests {
         let calls = try String(contentsOfFile: log, encoding: .utf8)
         #expect(calls.contains("brew install pipx"))
         #expect(calls.contains("pipx install --force \(SetupModel.installSource)"))
+    }
+
+    @Test("Install Homebrew writes a runnable installer and hands it to Terminal")
+    func installHomebrew() throws {
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var opened: [URL] = []
+        let setup = SetupModel(locateWhiz: { nil }, locateTool: { _ in nil }, openFile: { opened.append($0) })
+        setup.installHomebrew(for: .tools, in: directory)
+
+        #expect(opened.count == 1 && opened[0].pathExtension == "command")
+        #expect(FileManager.default.isExecutableFile(atPath: opened[0].path))
+        let text = try String(contentsOf: opened[0], encoding: .utf8)
+        #expect(text.hasPrefix("#!/bin/bash\n"))
+        #expect(text.contains("curl -fsSL \(SetupModel.homebrewInstaller)"))
+        #expect(setup.homebrewStarted && setup.failures[.tools] == nil)
+
+        // The script is valid bash: `bash -n` parses without running it.
+        let check = Process()
+        check.executableURL = URL(fileURLWithPath: "/bin/bash")
+        check.arguments = ["-n", opened[0].path]
+        try check.run()
+        check.waitUntilExit()
+        #expect(check.terminationStatus == 0)
+    }
+
+    @Test("an installer that cannot be written is reported, not opened")
+    func installHomebrewUnwritable() {
+        var opened = 0
+        let setup = SetupModel(locateWhiz: { nil }, locateTool: { _ in nil }, openFile: { _ in opened += 1 })
+        setup.installHomebrew(for: .cli, in: URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)"))
+        #expect(opened == 0 && !setup.homebrewStarted)
+        #expect(setup.failures[.cli]?.contains("Homebrew") == true)
     }
 
     @Test("a plain re-check keeps the last AI probe for the same server")

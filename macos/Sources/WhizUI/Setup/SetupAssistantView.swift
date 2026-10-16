@@ -28,6 +28,12 @@ struct SetupAssistantView: View {
         .frame(width: 720, height: 640)
         .background(Color(nsColor: .windowBackgroundColor))
         .task { await setup.refresh() }
+        // Coming back from Terminal (the Homebrew installer, or a command
+        // typed by hand) checks again, so the list catches up on its own.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            guard !setup.isChecking, setup.task == nil else { return }
+            Task { await setup.refresh() }
+        }
     }
 
     private func finish() {
@@ -319,7 +325,7 @@ private struct CLIItem: View {
                     CommandHint(command: "pipx install \(SetupModel.installSource)")
                 }
                 if !setup.hasPipx && !setup.hasBrew {
-                    HomebrewNote()
+                    HomebrewNote(item: .cli)
                 }
             }
         }
@@ -349,7 +355,7 @@ private struct ToolsItem: View {
                         .disabled(setup.task != nil || !setup.hasBrew)
                     CommandHint(command: "brew install \(missing.joined(separator: " "))")
                 }
-                if !setup.hasBrew { HomebrewNote() }
+                if !setup.hasBrew { HomebrewNote(item: .tools) }
             }
         }
     }
@@ -379,7 +385,14 @@ private struct ModelItem: View {
     var body: some View {
         ChecklistItem(item: .model, number: 3, title: "A speech model", optional: false,
                       summary: summary) {
-            if setup.isDone(.model) == false {
+            if setup.isDone(.model) == false || setup.hasQuantizedFallback {
+                if setup.hasQuantizedFallback {
+                    Label("This model is quantized (compressed), which costs accuracy. Download a full-quality one; Whiz switches to it on its own.",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(SpeechModelChoice.all) { option in
                         Button {
@@ -412,7 +425,8 @@ private struct ModelItem: View {
     private var summary: String {
         if let model = setup.report?.check("model"), model.ok {
             let size = model.sizeMb.map { Format.fileSize(Int64($0 * 1_048_576)) } ?? ""
-            return "Using \(model.alias ?? "a whisper model")\(size.isEmpty ? "" : " (\(size))"). Pick another in Settings."
+            let using = "Using \(model.alias ?? "a whisper model")\(size.isEmpty ? "" : " (\(size))")"
+            return setup.hasQuantizedFallback ? "\(using), the only model on this Mac." : "\(using). Pick another in Settings."
         }
         return "Downloaded once, then everything runs offline."
     }
@@ -491,14 +505,24 @@ private struct AIItem: View {
 }
 
 private struct HomebrewNote: View {
+    @EnvironmentObject private var setup: SetupModel
+    var item: SetupItem
+
     var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "info.circle")
-            Text("Homebrew is needed first.")
-            Link("Get it at brew.sh", destination: URL(string: "https://brew.sh")!)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                Button("Install Homebrew…") { setup.installHomebrew(for: item) }
+                    .disabled(setup.task != nil)
+                Link("What is Homebrew?", destination: URL(string: "https://brew.sh")!)
+                    .font(.callout)
+            }
+            Label(setup.homebrewStarted
+                  ? "Finish the installer in Terminal, then come back here. Whiz checks again on its own."
+                  : "Homebrew is needed first. Its installer opens in Terminal and asks for your Mac password.",
+                  systemImage: setup.homebrewStarted ? "terminal" : "info.circle")
+                .font(.callout)
+                .foregroundStyle(.secondary)
         }
-        .font(.callout)
-        .foregroundStyle(.secondary)
     }
 }
 

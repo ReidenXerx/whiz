@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// `whiz doctor --json`: what a run needs and whether this Mac has it.
@@ -9,6 +10,9 @@ struct DoctorReport: Decodable, Equatable, Sendable {
         var alias: String?
         var sizeMb: Double?
         var package: Bool?
+        /// The speech model only: quantized, and whether the user chose it.
+        var quantized: Bool?
+        var configured: String?
     }
 
     struct AI: Decodable, Equatable, Sendable {
@@ -82,18 +86,24 @@ final class SetupModel: ObservableObject {
     @Published private(set) var isCheckingAI = false
     /// The assistant sheet; ⌘-menu and the compose banner open it.
     @Published var isPresented = false
+    /// The Homebrew installer was started in Terminal; the assistant says
+    /// so until brew turns up.
+    @Published private(set) var homebrewStarted = false
 
     static let installSource = "git+https://github.com/ReidenXerx/whiz.git"
 
     private let locateWhiz: () -> URL?
     private let locateTool: (String) -> URL?
+    private let openFile: (URL) -> Void
     private var backend: CLIBackend?
     private var runTask: Task<Void, Never>?
 
     init(locateWhiz: @escaping () -> URL? = { WhizLocator.find() },
-         locateTool: @escaping (String) -> URL? = SetupModel.findTool) {
+         locateTool: @escaping (String) -> URL? = SetupModel.findTool,
+         openFile: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) }) {
         self.locateWhiz = locateWhiz
         self.locateTool = locateTool
+        self.openFile = openFile
     }
 
     /// brew and pipx live where whiz's own tools do; a Finder-launched app's
@@ -135,6 +145,15 @@ final class SetupModel: ObservableObject {
 
     /// The three parts a plain transcription cannot run without.
     var isReady: Bool { whizExecutable != nil && report?.ready == true }
+
+    /// NS-15: the speech model in use is quantized only because nothing
+    /// better is on disk. It works, so the step stays done, but the
+    /// assistant offers the full-quality download. A model the user set in
+    /// config is their informed choice and is left alone.
+    var hasQuantizedFallback: Bool {
+        guard let model = report?.check("model"), model.ok, model.quantized == true else { return false }
+        return (model.configured ?? "").isEmpty
+    }
 
     /// The first missing essential, for the "finish setup" banner.
     var firstMissing: SetupItem? {
@@ -244,6 +263,48 @@ final class SetupModel: ObservableObject {
         perform(.speakers, steps: [Step(title: "Setting up speaker detection") {
             (whiz, ["setup", "speakers"])
         }])
+    }
+
+    /// Homebrew's official installer, run in Terminal rather than in the
+    /// app: it asks for an administrator password and a confirmation, and
+    /// someone installing a package manager should see what it does. The
+    /// app writes a `.command` file and Terminal opens it; the assistant
+    /// checks again whenever the app becomes active.
+    func installHomebrew(for item: SetupItem, in directory: URL = FileManager.default.temporaryDirectory) {
+        let url = directory.appendingPathComponent("Install Homebrew for Whiz.command")
+        do {
+            try Self.homebrewScript.write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        } catch {
+            failures[item] = "Could not start the Homebrew installer: \(error.localizedDescription)"
+            return
+        }
+        failures[item] = nil
+        homebrewStarted = true
+        openFile(url)
+    }
+
+    static let homebrewInstaller = "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
+
+    static var homebrewScript: String {
+        """
+        #!/bin/bash
+        # Written by Whiz's Setup Assistant: installs Homebrew (https://brew.sh)
+        # with its official installer.
+        clear
+        echo "Installing Homebrew for Whiz. The installer asks for your Mac password"
+        echo "(typing shows nothing) and for Return to continue."
+        echo
+        /bin/bash -c "$(curl -fsSL \(homebrewInstaller))"
+        status=$?
+        echo
+        if [ $status -eq 0 ]; then
+          echo "Homebrew is installed. Switch back to Whiz to continue."
+        else
+          echo "The Homebrew installer stopped (exit $status). See https://brew.sh for help."
+        fi
+
+        """
     }
 
     func cancelTask() {
