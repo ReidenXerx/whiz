@@ -40,6 +40,9 @@ jobs:
 
   swift:
     runs-on: macos-15
+    # The suite takes seconds; a hung test should fail the job, not hold a
+    # runner for hours.
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: macos

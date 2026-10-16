@@ -5,7 +5,7 @@ import Testing
 /// The setup assistant's model, driven through stub executables: the doctor
 /// decides what is done, fixes stream progress, and nothing here touches the
 /// developer's real whiz, brew or pipx.
-@Suite("Setup assistant")
+@Suite("Setup assistant", .timeLimit(.minutes(1)))
 @MainActor
 struct SetupModelTests {
 
@@ -146,7 +146,7 @@ struct SetupModelTests {
     }
 
     @Test("Install Homebrew writes a runnable installer and hands it to Terminal")
-    func installHomebrew() throws {
+    func installHomebrew() async throws {
         let directory = try makeDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         var opened: [URL] = []
@@ -161,12 +161,19 @@ struct SetupModelTests {
         #expect(setup.homebrewStarted && setup.failures[.tools] == nil)
 
         // The script is valid bash: `bash -n` parses without running it.
-        let check = Process()
-        check.executableURL = URL(fileURLWithPath: "/bin/bash")
-        check.arguments = ["-n", opened[0].path]
-        try check.run()
-        check.waitUntilExit()
-        #expect(check.terminationStatus == 0)
+        // Waited for off the main actor: waitUntilExit spins the calling
+        // thread's run loop, and on the main thread that runs other tests'
+        // main-actor jobs re-entrantly in the middle of this one.
+        let script = opened[0].path
+        let status = try await Task.detached { () throws -> Int32 in
+            let check = Process()
+            check.executableURL = URL(fileURLWithPath: "/bin/bash")
+            check.arguments = ["-n", script]
+            try check.run()
+            check.waitUntilExit()
+            return check.terminationStatus
+        }.value
+        #expect(status == 0)
     }
 
     @Test("an installer that cannot be written is reported, not opened")

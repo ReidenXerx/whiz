@@ -16,13 +16,19 @@ struct WhizCommandResult: Sendable, Equatable {
 enum WhizCommand {
     static func run(_ arguments: [String], stdin: String? = nil,
                     executable: URL) async throws -> WhizCommandResult {
-        try await Task.detached(priority: .userInitiated) {
-            try runBlocking(arguments, stdin: stdin, executable: executable)
-        }.value
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(with: Result {
+                    try runBlocking(arguments, stdin: stdin, executable: executable)
+                })
+            }
+        }
     }
 
-    /// The synchronous body — blocking waits belong off the cooperative
-    /// pool's async contexts, which is why `run` hops to a detached task.
+    /// The synchronous body. It blocks until the child exits, so `run`
+    /// calls it on a GCD thread: a detached Task would still block one of
+    /// the cooperative pool's few threads (as many as there are cores), and
+    /// a handful of these at once can starve every other task.
     private static func runBlocking(_ arguments: [String], stdin: String?,
                                     executable: URL) throws -> WhizCommandResult {
         let process = Process()
