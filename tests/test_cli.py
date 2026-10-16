@@ -1904,6 +1904,34 @@ def test_write_labeled_outputs_prompt_confirmation_upgrades_auto_label(tmp_path,
     assert data["source"] == "user"  # provenance upgraded from 'auto'
 
 
+def test_write_labeled_outputs_decline_removes_auto_match(tmp_path, monkeypatch):
+    """'-' at the prompt declines: the label's name is DROPPED, not merely
+    left alone. The wrong voice-profile auto-match seeded name_map before
+    the prompt ran — a decline that added nothing would leave the wrong
+    name on every transcript line and save a profile under it. The None
+    answer must reach through and remove it.
+    """
+    monkeypatch.setattr(cli.P, "profiles_dir", lambda: tmp_path)
+    merged = [(cli.MR.WhisperSeg(start=0.0, end=2.0, text="hi"), "Speaker A")]
+    monkeypatch.setattr(
+        cli, "_prompt_speaker_names",
+        lambda merged, default_names=None: {"Speaker A": None},
+    )
+
+    _srt, _txt, _html, name_map = cli._write_labeled_outputs(
+        merged, tmp_path / "rec", name_speakers=True,
+        profile_names={"Speaker A": "WrongName"},
+        cluster_embeddings={0: [1.0, 1.0]},
+        save_profiles=True,
+    )
+
+    assert name_map == {}
+    srt = (tmp_path / "rec.speakers.srt").read_text(encoding="utf-8")
+    assert "WrongName" not in srt
+    assert "Speaker A: hi" in srt
+    assert not (tmp_path / "WrongName.json").exists()
+
+
 def test_merge_speakers_names_overrides_wrong_auto_match(tmp_path, monkeypatch, capsys):
     """W2-M15: --speakers-names is a HUMAN confirmation and must override a
     wrong auto-match. A stored profile whose centroid sits exactly on the
