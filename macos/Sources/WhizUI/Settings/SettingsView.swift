@@ -40,6 +40,8 @@ struct SettingsView: View {
                         .tabItem { Label("Transcription", systemImage: "waveform") }
                     SpeakerSettings()
                         .tabItem { Label("Speakers", systemImage: "person.2") }
+                    VoiceSettings()
+                        .tabItem { Label("Voices", systemImage: "person.wave.2") }
                     AISettings()
                         .tabItem { Label("AI", systemImage: "sparkles") }
                     AboutSettings()
@@ -212,6 +214,78 @@ private struct SpeakerSettings: View {
     }
 }
 
+/// The voices whiz recognizes on its own, and a way to make it forget one.
+private struct VoiceSettings: View {
+    @EnvironmentObject private var settings: SettingsModel
+    @State private var pendingForget: VoiceProfile?
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let voices = settings.voices {
+                if voices.isEmpty {
+                    EmptyState(symbol: "person.wave.2", title: "No voices yet",
+                               message: "When you name a speaker at the end of a run, whiz remembers the voice and names that person automatically next time.")
+                } else {
+                    Form {
+                        Section {
+                            ForEach(Array(voices.enumerated()), id: \.element.id) { index, voice in
+                                HStack(spacing: 12) {
+                                    Image(systemName: "person.crop.circle.fill")
+                                        .font(.title2)
+                                        .foregroundStyle(Theme.speakerColor(index))
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(voice.name).fontWeight(.medium)
+                                        Text(detail(for: voice))
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    Button("Forget…") { pendingForget = voice }
+                                        .controlSize(.small)
+                                }
+                                .padding(.vertical, 2)
+                            }
+                        } header: {
+                            Text("\(voices.count) remembered \(voices.count == 1 ? "voice" : "voices")")
+                        } footer: {
+                            Text("Only the name and a voice fingerprint are stored, in ~/.config/whiz/speakers. Recordings are never kept.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    .formStyle(.grouped)
+                }
+            } else {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            SaveErrorFooter()
+        }
+        .task { await settings.loadVoices() }
+        .confirmationDialog(
+            "Forget \(pendingForget?.name ?? "")?",
+            isPresented: Binding(get: { pendingForget != nil }, set: { if !$0 { pendingForget = nil } }),
+            presenting: pendingForget
+        ) { voice in
+            Button("Forget \(voice.name)", role: .destructive) {
+                Task { await settings.forgetVoice(voice.name) }
+            }
+        } message: { _ in
+            Text("Whiz will no longer recognize this voice. Transcripts already written keep the name.")
+        }
+    }
+
+    private func detail(for voice: VoiceProfile) -> String {
+        var parts: [String] = []
+        parts.append(voice.isConfirmed ? "Named by you" : "Matched automatically")
+        if voice.samples > 0 {
+            parts.append(voice.samples == 1 ? "1 recording" : "\(voice.samples) recordings")
+        }
+        if let date = voice.createdDate {
+            parts.append("since \(date.formatted(date: .abbreviated, time: .omitted))")
+        }
+        return parts.joined(separator: "  ·  ")
+    }
+}
+
 private struct AISettings: View {
     @EnvironmentObject private var settings: SettingsModel
     @State private var baseURL = ""
@@ -283,6 +357,7 @@ private struct AISettings: View {
 
 private struct AboutSettings: View {
     @EnvironmentObject private var settings: SettingsModel
+    @EnvironmentObject private var setup: SetupModel
 
     var body: some View {
         Form {
@@ -298,6 +373,7 @@ private struct AboutSettings: View {
                 }
                 Text("The app runs this whiz for every transcription. Update it with `whiz upgrade` in Terminal.")
                     .font(.caption).foregroundStyle(.secondary)
+                Button("Open Setup Assistant…") { setup.isPresented = true }
             }
             if let path = settings.snapshot?.path {
                 Section("Config file") {

@@ -44,6 +44,9 @@ struct RunDetailView: View {
     @StateObject private var playback: PlaybackController
     @State private var results: RunResults?
     @State private var query = ""
+    /// Bumped when something new was written (a summary made from here),
+    /// so the files are read again.
+    @State private var reloadToken = 0
 
     init(record: LastRunRecord) {
         self.record = record
@@ -66,7 +69,7 @@ struct RunDetailView: View {
         .onChange(of: query) { value in
             if !value.isEmpty, tab != .transcript { tabRaw = DetailTab.transcript.rawValue }
         }
-        .task(id: record.finishedAt) {
+        .task(id: "\(record.finishedAt.timeIntervalSince1970)#\(reloadToken)") {
             let loaded = await RunResults.load(record)
             // The remembered tab is a preference, not a promise: a run with
             // no summary opens on its transcript, not on an empty page.
@@ -162,7 +165,8 @@ struct RunDetailView: View {
                     }
                 }
             case .analysis:
-                AnalysisView(analysis: results.analysis, record: record)
+                AnalysisView(analysis: results.analysis, record: record,
+                             hasTranscript: results.transcript != nil) { reloadToken += 1 }
             case .files:
                 FilesView(record: record)
             }
@@ -432,9 +436,13 @@ private struct FrameSheet: View {
 /// The AI summary, rendered.
 struct AnalysisView: View {
     @EnvironmentObject private var model: TranscriptionViewModel
+    @EnvironmentObject private var settings: SettingsModel
     let analysis: AnalysisDocument?
     let record: LastRunRecord
+    let hasTranscript: Bool
+    var onWritten: () -> Void
     @State private var showPrompt = false
+    @StateObject private var runner = AnalyzeRunner()
 
     var body: some View {
         if let analysis {
@@ -465,15 +473,45 @@ struct AnalysisView: View {
                 .frame(maxWidth: Theme.readingWidth)
                 .frame(maxWidth: .infinity)
             }
+        } else if runner.isRunning {
+            VStack(spacing: 14) {
+                ProgressView()
+                Text(runner.status)
+                    .font(.headline)
+                Text("Your AI model is reading the transcript. Long recordings take a few minutes.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Button("Stop") { runner.stop() }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             EmptyState(symbol: "sparkles", title: "No AI summary for this run",
-                       message: "Turn on “AI summary” when transcribing to get a summary and action items from your AI model.") {
-                Button("Transcribe Again with Summary…") {
-                    model.analyze = true
-                    model.prepareRerun(record)
+                       message: emptyMessage) {
+                VStack(spacing: 10) {
+                    Button("Summarize Now") {
+                        runner.run(input: record.inputURL, onWritten: onWritten)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(!hasTranscript || settings.string("ai_model").isEmpty)
+                    if let error = runner.error {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .font(.callout)
+                            .foregroundStyle(.red)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: 460)
+                    }
                 }
             }
         }
+    }
+
+    private var emptyMessage: String {
+        let model = settings.string("ai_model")
+        if model.isEmpty {
+            return "Choose an AI model in Settings ▸ AI (or the Setup Assistant) to get a summary and action items."
+        }
+        return "Get a summary and action items for this transcript from \(model)."
     }
 
     private func chip(_ symbol: String, _ text: String) -> some View {
@@ -484,6 +522,59 @@ struct AnalysisView: View {
             .padding(.vertical, 4)
             .background(Capsule().fill(Color.primary.opacity(0.06)))
     }
+}
+
+/// Runs `whiz analyze` for a finished run.
+@MainActor
+final class AnalyzeRunner: ObservableObject {
+    @Published private(set) var isRunning = false
+    @Published private(set) var status = "Starting…"
+    @Published private(set) var error: String?
+    private var backend: CLIBackend?
+
+    func run(input: URL, onWritten: @escaping () -> Void) {
+        guard !isRunning else { return }
+        guard let whiz = WhizLocator.find() else {
+            error = "The whiz command was not found."
+            return
+        }
+        let backend = CLIBackend(executable: whiz)
+        self.backend = backend
+        isRunning = true
+        error = nil
+        status = "Starting…"
+        let (events, continuation) = AsyncStream<TranscriptionEvent>.makeStream()
+        Task {
+            let consumer = Task {
+                for await event in events {
+                    if case .phase(let label) = event {
+                        status = PhaseStep(id: 0, label: label, startedAt: .now).title + "…"
+                    }
+                }
+            }
+            do {
+                try await backend.run(arguments: ["analyze", input.path]) { continuation.yield($0) }
+                continuation.finish()
+                await consumer.value
+                onWritten()
+            } catch is CancellationError {
+                continuation.finish()
+                await consumer.value
+            } catch let failure as TranscriptionFailure {
+                continuation.finish()
+                await consumer.value
+                error = failure.errorDescription
+            } catch {
+                continuation.finish()
+                await consumer.value
+                self.error = error.localizedDescription
+            }
+            isRunning = false
+            self.backend = nil
+        }
+    }
+
+    func stop() { backend?.cancel() }
 }
 
 // MARK: - Files

@@ -129,6 +129,29 @@ struct WhisperModelInfo: Equatable, Sendable, Decodable, Identifiable {
     }
 }
 
+/// One entry of `whiz speakers list --json` — names and provenance only;
+/// the CLI never hands out the voice embeddings.
+struct VoiceProfile: Equatable, Sendable, Decodable, Identifiable {
+    var id: String { name }
+    var name: String
+    var samples: Int
+    var created: String
+    var source: String
+    var path: String
+
+    static func decodeList(_ json: String) throws -> [VoiceProfile] {
+        try JSONDecoder().decode([VoiceProfile].self, from: Data(json.utf8))
+    }
+
+    /// "named by you" vs adopted from an automatic match.
+    var isConfirmed: Bool { source == "user" }
+
+    var createdDate: Date? {
+        let formatter = ISO8601DateFormatter()
+        return formatter.date(from: created)
+    }
+}
+
 /// The Settings window's state: whiz's own config, read and written through
 /// the CLI.
 ///
@@ -154,6 +177,8 @@ final class SettingsModel: ObservableObject {
     @Published var lastError: String?
     /// Keys with a write in flight, for a per-row spinner.
     @Published private(set) var saving: Set<String> = []
+    /// Stored voice profiles; nil until loaded.
+    @Published private(set) var voices: [VoiceProfile]?
 
     private let locate: () -> URL?
 
@@ -188,6 +213,35 @@ final class SettingsModel: ObservableObject {
         } catch {
             state = .unavailable("Could not run whiz: \(error.localizedDescription)")
         }
+    }
+
+    // MARK: - Voices
+
+    func loadVoices() async {
+        guard let executable = executable ?? locate() else { return }
+        do {
+            let result = try await WhizCommand.run(["speakers", "list", "--json"], executable: executable)
+            voices = result.status == 0 ? ((try? VoiceProfile.decodeList(result.stdout)) ?? []) : []
+            if result.status != 0 {
+                lastError = Self.firstLine(result.stderr, fallback: "Could not list voice profiles.")
+            }
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    /// Delete a profile: that voice is a stranger again on the next run.
+    func forgetVoice(_ name: String) async {
+        guard let executable = executable ?? locate() else { return }
+        do {
+            let result = try await WhizCommand.run(["speakers", "forget", name], executable: executable)
+            if result.status != 0 {
+                lastError = Self.firstLine(result.stderr + result.stdout, fallback: "Could not forget \(name).")
+            }
+        } catch {
+            lastError = error.localizedDescription
+        }
+        await loadVoices()
     }
 
     // MARK: - Reading

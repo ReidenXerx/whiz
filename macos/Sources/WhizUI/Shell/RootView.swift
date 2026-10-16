@@ -6,7 +6,11 @@ import UniformTypeIdentifiers
 struct RootView: View {
     @EnvironmentObject private var model: TranscriptionViewModel
     @EnvironmentObject private var settings: SettingsModel
+    @EnvironmentObject private var setup: SetupModel
     @ObservedObject private var router = FileOpenRouter.shared
+    /// Set once the assistant has been finished or skipped; until then it
+    /// opens on launch.
+    @AppStorage("dev.reidenxerx.whiz.setupDone") private var setupDone = false
 
     var body: some View {
         NavigationSplitView {
@@ -43,7 +47,19 @@ struct RootView: View {
         .onChange(of: model.isRunning) { running in
             if !running { NSApp?.requestUserAttention(.informationalRequest) }
         }
-        .task { await settings.reload() }
+        .sheet(isPresented: $setup.isPresented) {
+            SetupAssistantView {
+                setupDone = true
+                Task { await settings.reload() }
+            }
+            .environmentObject(setup)
+            .environmentObject(settings)
+        }
+        .task {
+            await settings.reload()
+            await setup.refresh()
+            if !setupDone { setup.isPresented = true }
+        }
     }
 
     /// The detail views carry their own large title; the toolbar names the

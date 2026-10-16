@@ -10,6 +10,7 @@ import UniformTypeIdentifiers
 struct ComposeView: View {
     @EnvironmentObject private var model: TranscriptionViewModel
     @EnvironmentObject private var settings: SettingsModel
+    @EnvironmentObject private var setup: SetupModel
     @State private var dropTargeted = false
 
     var body: some View {
@@ -22,8 +23,8 @@ struct ComposeView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                if model.whizMissing || settings.isMissingWhiz {
-                    MissingWhizCard()
+                if model.whizMissing || (!setup.isChecking && setup.firstMissing != nil) {
+                    SetupBanner { setup.isPresented = true }
                 }
 
                 fileSection
@@ -210,7 +211,7 @@ struct ComposeView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
             .keyboardShortcut(.defaultAction)
-            .disabled(model.inputURL == nil || model.isRunning)
+            .disabled(model.inputURL == nil || model.isRunning || setup.firstMissing != nil)
         }
     }
 }
@@ -284,39 +285,5 @@ private struct SelectedFileCard: View {
         if let duration { parts.append(Format.clock(duration)) }
         if let size = MediaInfo.fileSize(of: url) { parts.append(Format.fileSize(size)) }
         return parts.joined(separator: "  ·  ")
-    }
-}
-
-/// Shown when the app cannot find the CLI it drives.
-struct MissingWhizCard: View {
-    @EnvironmentObject private var model: TranscriptionViewModel
-    @EnvironmentObject private var settings: SettingsModel
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.title2)
-                .foregroundStyle(.orange)
-            VStack(alignment: .leading, spacing: 6) {
-                Text("The whiz command-line tool was not found")
-                    .font(.headline)
-                Text("This app runs whiz to do the work. It looks in ~/.local/bin (pipx), Homebrew and your PATH. Install it in Terminal, then check again:")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text("pipx install git+https://github.com/ReidenXerx/whiz.git")
-                    .font(.system(.callout, design: .monospaced))
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(0.06)))
-                Button("Check Again") {
-                    model.dismissMissingWarning()
-                    Task { await settings.reload() }
-                }
-                .padding(.top, 2)
-            }
-        }
-        .card()
     }
 }

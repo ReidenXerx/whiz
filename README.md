@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/whiz-mark.svg" alt="whiz" width="76">
+<img src="docs/assets/whiz-icon.png" alt="whiz" width="96">
 
 # whiz
 
@@ -120,11 +120,13 @@ cd macos && ./build-app.sh            # → macos/dist/WhizUI.app (ad-hoc signed
 cp -R dist/WhizUI.app /Applications/
 ```
 
+- **Setup Assistant:** on first launch, a checklist of what Whiz needs (the CLI, whisper.cpp and ffmpeg, a speech model, optionally speaker detection and an AI model), each installed with one click through Homebrew, pipx and `whiz`, with progress. It reopens from the app menu.
 - **Sidebar:** New Transcription, the run in progress, and recent runs (right-click to re-run or remove).
 - **New Transcription:** drop a recording (or ⌘O, or Finder's *Open With*), choose language, speakers, names, frames and AI summary, then press Return.
 - **While it runs:** a step list with progress and time left, a card that asks you to name unknown speakers, and the full log under *Details*.
 - **Results:** the transcript with speaker colors, search, frames and a built-in player (click a timestamp to play from there), the rendered AI summary, and every file written.
-- **Settings (⌘,):** whiz's own `config.toml` through `whiz config` (model, default language, output formats, voice profiles, AI server and key). The terminal and the app share one config.
+- **Settings (⌘,):** whiz's own `config.toml` through `whiz config` (model, default language, output formats, speaker detection, AI server and key), plus the remembered voices, each of which can be forgotten. The terminal and the app share one config.
+- **Summarize Now:** a finished run without a summary gets one from its Summary tab (`whiz analyze`).
 
 ## What it does
 
@@ -254,6 +256,16 @@ whiz models known                      # canonical whisper.cpp model filenames
 whiz models download-vad               # Silero VAD model (default: v5.1.2)
 whiz models download-vad v6.2.0
 whiz models download-diarization       # pyannote segmentation + 3D-Speaker embedding (~90 MB)
+```
+
+### `whiz doctor` / `whiz setup speakers`
+
+```bash
+whiz doctor                            # what a run needs and whether it is here, with the fix for each part
+whiz doctor --json                     # the same as data; exit 1 until whisper.cpp, ffmpeg and a model exist
+whiz doctor --ai                       # also ask the AI server which models it has
+whiz setup speakers                    # one-time speaker detection setup (sherpa-onnx + ~90 MB models), no prompt
+whiz speakers list --json              # voice profiles as data (names and provenance, never the embeddings)
 ```
 
 ### `whiz config show | edit | set`

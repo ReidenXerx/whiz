@@ -12,20 +12,23 @@ struct WhizApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model = TranscriptionViewModel()
     @StateObject private var settings = SettingsModel()
+    @StateObject private var setup = SetupModel()
 
     var body: some Scene {
         Window("Whiz", id: "main") {
             RootView()
                 .environmentObject(model)
                 .environmentObject(settings)
+                .environmentObject(setup)
                 .frame(minWidth: 860, minHeight: 560)
         }
         .defaultSize(width: 1180, height: 780)
-        .commands { WhizCommands(model: model) }
+        .commands { WhizCommands(model: model, setup: setup) }
 
         Settings {
             SettingsView()
                 .environmentObject(settings)
+                .environmentObject(setup)
         }
     }
 }
@@ -33,8 +36,12 @@ struct WhizApp: App {
 /// File and Run menus: every action the window offers, on the keyboard.
 private struct WhizCommands: Commands {
     @ObservedObject var model: TranscriptionViewModel
+    @ObservedObject var setup: SetupModel
 
     var body: some Commands {
+        CommandGroup(after: .appSettings) {
+            Button("Setup Assistant…") { setup.isPresented = true }
+        }
         CommandGroup(replacing: .newItem) {
             Button("New Transcription") { model.selection = .compose }
                 .keyboardShortcut("n")

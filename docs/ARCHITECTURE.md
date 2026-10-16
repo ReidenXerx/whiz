@@ -63,7 +63,12 @@ files and data the CLI already produces: the results view parses
 `<stem>.frames.json` / `.speakers.srt` / `.speakers.txt` / `.analysis.md`
 (the formats `tests/` pin), and Settings reads and writes `config.toml`
 only through `whiz config show --json` and `whiz config set` (secrets via
-`--stdin`, never argv) — the app keeps no settings copy of its own.
+`--stdin`, never argv) — the app keeps no settings copy of its own. The
+setup assistant asks `whiz doctor --json` what is missing and fixes it with
+commands a user could type (`brew install`, `pipx install`, `whiz models
+download`, `whiz setup speakers`); the doctor, not a command's exit code,
+decides what is done. Downloads report `~ progress:` lines when piped and
+stay silent on a terminal.
 
 Everything shells out or calls optional dependencies rather than bundling:
 whisper-cli and ffmpeg from PATH, sherpa-onnx as an optional extra installed
