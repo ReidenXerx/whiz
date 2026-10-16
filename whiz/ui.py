@@ -205,6 +205,17 @@ def progress(percent: float) -> None:
     _console.print(Text(f"progress: {whole}%", style="whiz.muted"))
 
 
+def download_progress(percent: float) -> None:
+    """Progress of a download, for the macOS UI only.
+
+    Piped, this is the same ``~ progress: N%`` machine line as ``progress``;
+    on a terminal it prints nothing — a download used to be silent there and
+    a hundred dim percent lines would only scroll the real output away.
+    """
+    if not _is_tty():
+        progress(percent)
+
+
 def speaker_prompt(label: str, quote: str, suggestion: str | None) -> None:
     """Render one interactive speaker-naming prompt's context.
 

@@ -309,13 +309,39 @@ def _stream_to_atomic(resp, target: Path) -> None:
     ``.part`` file is removed on any failure, so retries start clean.
     """
     part = target.with_name(target.name + ".part")
+    total = _content_length(resp)
     try:
         with part.open("wb") as fh:
-            shutil.copyfileobj(resp, fh, length=1024 * 1024)
+            if total is None:
+                shutil.copyfileobj(resp, fh, length=1024 * 1024)
+            else:
+                # Known size: report whole-percent steps (the macOS setup
+                # assistant shows them; a terminal sees nothing new).
+                from whiz import ui
+
+                done, last = 0, -1
+                while chunk := resp.read(1024 * 1024):
+                    fh.write(chunk)
+                    done += len(chunk)
+                    whole = min(100, done * 100 // total)
+                    if whole != last:
+                        ui.download_progress(whole)
+                        last = whole
         os.replace(part, target)
     except BaseException:
         part.unlink(missing_ok=True)
         raise
+
+
+def _content_length(resp) -> int | None:
+    """The response's Content-Length, or None when absent or unusable."""
+    headers = getattr(resp, "headers", None)
+    raw = headers.get("Content-Length") if headers is not None else None
+    try:
+        value = int(raw) if raw is not None else 0
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
 
 
 def download_vad(config: cfg.Config, dest_dir: Path | None = None, version: str = "") -> Path:
