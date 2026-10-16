@@ -54,6 +54,12 @@ One Python package, ~6,000 lines, no compiled parts:
 | `config.py` | `~/.config/whiz/config.toml`: flat-TOML read/write, tri-state consent key, foreign-key preservation |
 | `ui.py` | rich terminal output; degrades to clean plain text when piped |
 
+**The macOS app** (`macos/`, SwiftUI, since September 2026) is a front-end
+for the CLI, not a second pipeline — a different app from the dictation one
+that moved to mynah. It spawns `whiz transcribe` and reads its merged
+stdout+stderr; every decision about audio, speakers and analysis stays in
+the Python package. See *The pipe contract* below.
+
 Everything shells out or calls optional dependencies rather than bundling:
 whisper-cli and ffmpeg from PATH, sherpa-onnx as an optional extra installed
 on demand (with consent), the chat model over HTTP. The only vendored artifact
@@ -132,6 +138,38 @@ a coherent visual timeline, not a bag of images); transient HTTP failures
 (429/5xx, connection errors) retry with backoff, permanent errors surface
 immediately with the server's body. Pinned by `tests/test_ai.py`.
 
+**Extracted audio belongs to whoever made it.** A video's audio is extracted
+to `<stem>.wav` beside it, and every output is named after that path
+(`<stem>.wav.json`, the diarization cache, `whiz merge`'s lookup). whiz
+writes its source's name into the WAV (`comment=whiz-extracted:<source>`,
+RIFF INFO/ICMT) and overwrites, reuses or deletes a `<stem>.wav` only when it
+carries that marker for the same source. Any other file there — the user's
+own recording, a same-stem sibling's audio — is left alone: the audio goes to
+a temp dir and `-of` keeps whisper's outputs named as usual. Cleanup runs on
+every exit path, ^C included. Audio the diarization reader cannot take (m4a,
+mp3, 44.1 kHz) is converted to a temp 16 kHz copy for diarization only.
+Pinned by `tests/test_audio.py` / `tests/test_cli.py`.
+
+**The pipe contract.** Piped (non-TTY), `ui.py` emits four machine lines on
+stderr, which the macOS app parses (`CLIBackend.swift`):
+
+    ▸ <phase label>
+    ✓ <artifact label>: <absolute path>
+    ? speaker-name: <label> | <quote>[ | <suggestion>]
+    ~ progress: <whole percent>%
+
+Fields substitute U+01C0 `ǀ` for ` | ` so the split stays exact; an artifact
+path is always absolute, and the app accepts no other (model-written text is
+never echoed into the pipe). The app sets `WHIZ_UI_PIPE=1`, and only then —
+or on a TTY, or with an explicit `--name-speakers` — does an auto-enabled
+prompt read answers from stdin (`-` declines); any other piped stdin belongs
+to someone else. Prompts that cannot be answered over the pipe (the AI model
+picker) never block: they take the recommended choice for the run and
+persist nothing. The app reads the pipe to EOF before a run counts as
+finished, decodes per line (a chunk can end mid-character), and gives the
+child the Homebrew/pipx PATH a Finder launch lacks. Pinned on both sides:
+`tests/test_ui_machine_contract.py` and `macos/Tests/WhizUITests/`.
+
 **Config compatibility.** `config.toml` is written flat; `save()` preserves
 every key it does not know — including the `dictate_*` keys Mynah has not
 imported yet, and anything else a future reader puts there. A new key must
@@ -147,8 +185,16 @@ under a second:
 uv run --extra test pytest tests/ -q
 ```
 
-(264 tests at the time of the split.) Filesystem isolation via `monkeypatch`/
-`tmp_path` keeps host-installed models out of discovery assertions.
+Filesystem isolation via `monkeypatch`/`tmp_path` keeps host-installed models
+out of discovery assertions. The app's suite drives real `Process` plumbing
+against stub scripts, no whiz install needed:
+
+```
+cd macos && swift test
+```
+
+Both run in CI (`.github/workflows/tests.yml`, Python 3.11–3.14 plus
+`uv lock --check`, and the Swift suite + release build on macOS).
 
 ## Where the old contract went
 
