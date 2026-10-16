@@ -97,12 +97,16 @@ def _is_vad_model(name: str) -> bool:
     return name.startswith("ggml-silero-")
 
 
+def is_quantized(alias: str) -> bool:
+    """large-v3-turbo-q5_0 -> True; large-v3-turbo -> False."""
+    return re.search(r"-q\d+(_\d+|_k)?", alias) is not None
+
+
 def _preference_rank(alias: str) -> tuple[int, int, str]:
     """Sort key: PREFERENCE position, then unquantized before quantized (NS-15)."""
     aliases = [_alias_from_name(w) for w in PREFERENCE]
     pos = aliases.index(alias) if alias in aliases else len(aliases)
-    quantized = 1 if re.search(r"-q\d+(_\d+|_k)?", alias) else 0
-    return (pos, quantized, alias)
+    return (pos, 1 if is_quantized(alias) else 0, alias)
 
 
 def discover(config: cfg.Config) -> list[ModelInfo]:

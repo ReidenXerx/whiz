@@ -2348,11 +2348,12 @@ def test_run_live_missing_tool_is_not_a_traceback(monkeypatch):
 
 # ---------- doctor / setup (onboarding contract) ----------
 
-def _doctor_env(monkeypatch, tmp_path, *, whisper=True, ffmpeg=True, model=True):
+def _doctor_env(monkeypatch, tmp_path, *, whisper=True, ffmpeg=True, model=True,
+                model_file="ggml-large-v3-turbo.bin"):
     tools = {"whisper-cli": whisper, "ffmpeg": ffmpeg, "brew": True}
     monkeypatch.setattr(cli.shutil, "which",
                         lambda name: f"/bin/{name}" if tools.get(name) else None)
-    bin_path = tmp_path / "ggml-large-v3-turbo.bin"
+    bin_path = tmp_path / model_file
     bin_path.write_bytes(b"x" * 2048)
     monkeypatch.setattr(cli.M, "pick_best", lambda config: bin_path if model else None)
     monkeypatch.setattr(cli.M, "find_vad_model", lambda config: None)
@@ -2367,6 +2368,7 @@ def test_doctor_report_ready_when_the_three_essentials_exist(monkeypatch, tmp_pa
     assert report["ready"] is True
     assert report["checks"]["whisper_cli"]["path"] == "/bin/whisper-cli"
     assert report["checks"]["model"]["alias"] == "large-v3-turbo"
+    assert report["checks"]["model"]["quantized"] is False
     # Optional parts never block readiness.
     assert report["checks"]["speakers"]["ok"] is False
     assert report["checks"]["vad_model"]["ok"] is False
@@ -2397,6 +2399,26 @@ def test_doctor_ai_probe_is_opt_in(monkeypatch, tmp_path):
     assert calls == [], "no network unless asked"
     ai = cli._doctor_report(config, check_ai=True)["ai"]
     assert ai["reachable"] and ai["model_available"] and ai["models"] == ["qwen3:8b"]
+
+
+def test_doctor_flags_a_quantized_fallback_but_stays_ready(monkeypatch, tmp_path, capsys):
+    # NS-15: the only model on disk is quantized — it runs, so the doctor is
+    # ready, but it says so and names the unquantized download.
+    _doctor_env(monkeypatch, tmp_path, model_file="ggml-large-v3-turbo-q5_0.bin")
+    report = cli._doctor_report(cli.cfg.load())
+    assert report["ready"] is True
+    model = report["checks"]["model"]
+    assert model["ok"] is True and model["quantized"] is True
+    assert model["fix"] == "whiz models download turbo"
+    assert cli.cmd_doctor(SimpleNamespace(json=False, ai=False)) == 0
+    assert "quantized" in capsys.readouterr().err  # ui tables go to stderr
+
+
+def test_quantized_alias_detection():
+    for alias in ("large-v3-turbo-q5_0", "large-v3-q8_0", "medium-q5_1", "small-q4_k"):
+        assert cli.M.is_quantized(alias), alias
+    for alias in ("large-v3-turbo", "large-v3", "small", "small.en"):
+        assert not cli.M.is_quantized(alias), alias
 
 
 def test_doctor_text_mode_runs(monkeypatch, tmp_path):

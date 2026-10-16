@@ -1693,12 +1693,17 @@ def _doctor_report(config: cfg.Config, *, check_ai: bool = False) -> dict:
 
     model_ref = config.model
     model_path = M.resolve(model_ref, config) if model_ref else M.pick_best(config)
+    model_alias = M._alias_from_name(model_path.name) if model_path else None
     model = {
         "ok": model_path is not None,
         "configured": model_ref,
         "path": str(model_path) if model_path else None,
-        "alias": M._alias_from_name(model_path.name) if model_path else None,
+        "alias": model_alias,
         "size_mb": round(model_path.stat().st_size / (1024 * 1024), 1) if model_path else None,
+        # NS-15: a quantized model still runs (ok stays true), but one picked
+        # only because nothing better is on disk is worth replacing; a
+        # configured one is the user's informed choice and is not nagged.
+        "quantized": bool(model_alias and M.is_quantized(model_alias)),
         "fix": f"whiz models download {model_ref or 'turbo'}",
     }
 
@@ -1767,7 +1772,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     rows = []
     for key, label, required in labels:
         check = checks[key]
-        if check["ok"]:
+        if key == "model" and check["ok"] and check["quantized"] and not check["configured"]:
+            state = "quantized"
+            detail = f"{check['alias']} costs accuracy — {check['fix']} for full quality"
+        elif check["ok"]:
             state = "ok"
             detail = check.get("path") or check.get("segmentation") or ""
         else:
