@@ -10,12 +10,15 @@ model files, downloads them if needed, and returns structured segments.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 import tarfile
+import tempfile
 import urllib.request
+from array import array
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from whiz import config as cfg
 
@@ -116,16 +119,59 @@ def find_embedding_model(config: cfg.Config) -> Path | None:
 
 
 def _download(url: str, target: Path) -> None:
+    """Fetch ``url`` into ``target`` atomically (``.part`` + rename).
+
+    H (wave-3 audit): the body used to stream straight into the final path,
+    so a ^C mid-download left a truncated .onnx that ``find_*_model`` then
+    reported as present forever — never re-downloaded, failing to load
+    with an opaque onnxruntime error. Shares ``models._stream_to_atomic``.
+    """
+    from whiz.models import _stream_to_atomic
+
     req = urllib.request.Request(url, headers={"User-Agent": "whiz/0.3"})
     with urllib.request.urlopen(req) as resp:  # noqa: S310 - trusted release URL
         if resp.status >= 400:
             raise RuntimeError(f"Download failed: HTTP {resp.status} for {url}")
-        with target.open("wb") as fh:
-            shutil.copyfileobj(resp, fh, length=1024 * 1024)
+        _stream_to_atomic(resp, target)
+
+
+def _check_member(member: tarfile.TarInfo) -> None:
+    """Reject archive members that could land outside the extraction dir."""
+    for name in (member.name, member.linkname if (member.issym() or member.islnk()) else ""):
+        if not name:
+            continue
+        p = PurePosixPath(name.replace("\\", "/"))
+        if p.is_absolute() or ".." in p.parts or (len(name) > 1 and name[1] == ":"):
+            raise RuntimeError(f"Refusing unsafe path in diarization archive: {name!r}")
+    if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
+        raise RuntimeError(f"Refusing special file in diarization archive: {member.name!r}")
+
+
+def _safe_extractall(tf: tarfile.TarFile, dest: Path) -> None:
+    """Extract ``tf`` into ``dest`` with no member escaping it.
+
+    Every member is checked first (absolute paths, ``..``, device files —
+    on every Python), then ``filter="data"`` adds the stdlib's own checks
+    where it exists (3.12+, and 3.11.4+ backports).
+    """
+    members = tf.getmembers()
+    for m in members:
+        _check_member(m)
+    if hasattr(tarfile, "data_filter"):
+        tf.extractall(dest, members=members, filter="data")
+    else:  # pragma: no cover - pre-3.11.4 interpreters only
+        tf.extractall(dest, members=members)  # noqa: S202 - members vetted above
 
 
 def download_diarization_models(dest_dir: Path | None = None) -> tuple[Path, Path]:
-    """Download segmentation (tar.bz2, extracted) and embedding models."""
+    """Download segmentation (tar.bz2, extracted) and embedding models.
+
+    Both land atomically (wave-3 audit): files via ``.part`` + rename, and
+    the archive is extracted into a temp dir INSIDE ``base`` (same
+    filesystem) whose model dir is renamed into place only once it holds a
+    model — an interrupted run leaves nothing that ``find_segmentation_model``
+    would mistake for an installed model, so the next run downloads again.
+    """
     base = dest_dir or _default_diarization_dir()
     base.mkdir(parents=True, exist_ok=True)
 
@@ -137,11 +183,23 @@ def download_diarization_models(dest_dir: Path | None = None) -> tuple[Path, Pat
         print(f"Downloading segmentation model from {SEG_URL} ...", flush=True)
         _download(SEG_URL, tar_path)
         print(f"Extracting {tar_path.name} ...", flush=True)
-        with tarfile.open(tar_path, "r:bz2") as tf:
-            tf.extractall(base)  # noqa: S202 - trusted release asset
-        tar_path.unlink(missing_ok=True)
-        if not seg_int8.exists() and not (seg_dir / "model.onnx").exists():
-            raise RuntimeError(f"Extraction did not produce expected model in {seg_dir}")
+        staging = Path(tempfile.mkdtemp(prefix=".extract-", dir=base))
+        try:
+            with tarfile.open(tar_path, "r:bz2") as tf:
+                _safe_extractall(tf, staging)
+            staged = staging / SEG_DIR_NAME
+            if not (staged / SEG_MODEL_FILE).exists() and not (staged / "model.onnx").exists():
+                raise RuntimeError(f"Extraction did not produce expected model in {seg_dir}")
+            # Whatever sits at seg_dir now holds no model (checked above) —
+            # the debris of an older, non-atomic extraction. Replace it.
+            if seg_dir.is_symlink() or seg_dir.is_file():
+                seg_dir.unlink()
+            elif seg_dir.exists():
+                shutil.rmtree(seg_dir)
+            os.replace(staged, seg_dir)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+            tar_path.unlink(missing_ok=True)
 
     seg_path = (seg_dir / "model.onnx") if (seg_dir / "model.onnx").exists() else seg_int8
     # NS-15: prefer the unquantized model.onnx when the archive provided
@@ -284,6 +342,10 @@ def run_diarization(
     embedding pass is skipped and the cached segments are returned. A
     fresh result is always written back to the cache after a real run.
     """
+    # Fresh throttle state per run: a second diarization in the same process
+    # (merge after transcribe, the macOS UI's repeat runs) otherwise emitted
+    # nothing until its percent passed the previous run's last one.
+    _reset_progress()
     # Resolve the models BEFORE the cache check (H1): the cache key now
     # includes the resolved model paths, and dry_run needs them anyway.
     seg_model = find_segmentation_model(config)
@@ -378,27 +440,48 @@ def _progress_callback(num_processed: int, num_total: int) -> int:
     if num_total <= 0:
         return 0
     pct = num_processed / num_total * 100.0
-    whole = int(pct)
-    if whole == _last_emitted_percent[0]:
+    # ONE rounded integer drives both the throttle and the emitted value:
+    # throttling on int() floor while ui.progress rounds showed 100% at
+    # 99.5% and then emitted "100%" again (wave-3 audit).
+    whole = int(round(pct))
+    done = num_processed >= num_total
+    if not done:
+        _progress_finished[0] = False
+    elif _progress_finished[0]:
         return 0
+    if whole == _last_emitted_percent[0] and not done:
+        return 0
+    fresh = whole != _last_emitted_percent[0]
     _last_emitted_percent[0] = whole
     if _ui_tty():
         print(f"\rDiarization: {pct:5.1f}% ({num_processed}/{num_total})",
               end="", file=sys.stderr, flush=True)
-        if num_processed >= num_total:
-            print(file=sys.stderr)  # newline after completion
-    else:
+        if done:
+            # The newline after completion goes out even when the final
+            # percent was already drawn — the next output must not glue
+            # onto the counter line.
+            print(file=sys.stderr)
+    elif fresh:
         from whiz import ui
-        ui.progress(pct)
+        ui.progress(whole)
+    if done:
+        _progress_finished[0] = True
     return 0
 
 
 # The last percent the callback emitted, so repeated per-chunk calls at the
 # same percentage emit exactly one line. Starts at -1 (a percent outside the
-# real range) so a first call at 0% still emits once. Module-level state —
-# the CLI runs one diarization per process, so there is no run index to key
-# it on.
+# real range) so a first call at 0% still emits once. Reset by
+# ``run_diarization`` at the start of every run (``_reset_progress``).
 _last_emitted_percent = [-1]
+# Whether the completion call has been rendered (one TTY newline per run).
+_progress_finished = [False]
+
+
+def _reset_progress() -> None:
+    """Fresh throttle state for a new diarization run."""
+    _last_emitted_percent[0] = -1
+    _progress_finished[0] = False
 
 
 def _ui_tty() -> bool:
@@ -407,30 +490,51 @@ def _ui_tty() -> bool:
     return ui._is_tty()
 
 
-def _read_wav_pcm(path: Path) -> tuple[list[float], int]:
-    """Read a 16kHz mono PCM WAV into a float32 sample list.
+def _read_wav_pcm(path: Path, expected_rate: int | None = 16000) -> tuple[array, int]:
+    """Read a 16 kHz mono 16-bit PCM WAV into float32 samples in [-1, 1).
 
-    Uses the wave stdlib to avoid a numpy/soundfile dependency.
+    Returns ``(samples, sample_rate)``; ``samples`` is an ``array('f')`` —
+    a float sequence (``len``, slicing, iteration) that sherpa-onnx accepts
+    wherever it took the old list. Uses the wave stdlib, no numpy.
+
+    Wave-3 audit: the old ``struct.unpack`` tuple + list of Python floats
+    cost ~70 bytes/sample (~4 GB per hour of audio, built twice per run —
+    diarization and voice profiles); ``array`` costs 4 bytes/sample.
+
+    Every unusable input — not RIFF/WAVE, not 16-bit, not mono, not
+    ``expected_rate`` (None skips the rate check) — raises RuntimeError
+    with a clear message: callers map RuntimeError to a clean error, and a
+    raw ``wave.Error`` escaped that as a traceback. whiz always extracts
+    16 kHz mono itself, so any of these means a bad file, not a setting.
     """
-    import struct
     import wave
 
-    with wave.open(str(path), "rb") as wf:
-        n_channels = wf.getnchannels()
-        sample_width = wf.getsampwidth()
-        sample_rate = wf.getframerate()
-        n_frames = wf.getnframes()
-        raw = wf.readframes(n_frames)
+    try:
+        with wave.open(str(path), "rb") as wf:
+            n_channels = wf.getnchannels()
+            sample_width = wf.getsampwidth()
+            sample_rate = wf.getframerate()
+            n_frames = wf.getnframes()
+            if sample_width != 2:
+                raise RuntimeError(
+                    f"Expected 16-bit PCM WAV, got sample_width={sample_width}: {path}"
+                )
+            if n_channels != 1:
+                raise RuntimeError(f"Expected mono WAV, got {n_channels} channels: {path}")
+            if expected_rate is not None and sample_rate != expected_rate:
+                raise RuntimeError(
+                    f"Expected {expected_rate} Hz audio, got {sample_rate} Hz: {path}"
+                )
+            raw = wf.readframes(n_frames)
+    except (wave.Error, EOFError) as e:
+        raise RuntimeError(f"Not a readable PCM WAV file ({e}): {path}") from e
 
-    if sample_width != 2:
-        raise RuntimeError(f"Expected 16-bit PCM WAV, got sample_width={sample_width}")
-
-    n = n_frames * n_channels
-    ints = struct.unpack(f"<{n}h", raw)
-    if n_channels > 1:
-        mono: list[float] = []
-        for i in range(0, n, n_channels):
-            chunk = ints[i : i + n_channels]
-            mono.append(sum(chunk) / n_channels / 32768.0)
-        return mono, sample_rate
-    return [s / 32768.0 for s in ints], sample_rate
+    ints = array("h")
+    # A truncated data chunk can end mid-sample; drop the odd byte.
+    ints.frombytes(raw[: len(raw) - (len(raw) % 2)])
+    del raw
+    if sys.byteorder == "big":
+        ints.byteswap()  # WAV is little-endian
+    # 1/32768 is a power of two, so the multiply is exact (== the old divide).
+    samples = array("f", map((1.0 / 32768.0).__mul__, ints))
+    return samples, sample_rate

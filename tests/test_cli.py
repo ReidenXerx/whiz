@@ -21,6 +21,14 @@ from whiz import cli
 from whiz.diarize import DiarSegment
 
 
+@pytest.fixture(autouse=True)
+def _fake_audio_is_diarization_ready(monkeypatch):
+    """Test inputs are placeholder bytes, not real WAVs: without this, every
+    diarized run would try to ffmpeg-convert them for the diarization reader.
+    Tests of the conversion itself re-patch ``is_diarization_ready``."""
+    monkeypatch.setattr(cli.aud, "is_diarization_ready", lambda path: True)
+
+
 def test_recommend_model_empty_returns_zero():
     assert cli._recommend_model([], prefer_vision=False) == 0
 
@@ -309,6 +317,7 @@ def test_transcribe_html_and_frames_fallback_for_video(tmp_path, monkeypatch, ca
         lambda in_path, merged, of_base, ffmpeg, width, dry_run: (frames_dir, manifest, False),
     )
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    monkeypatch.setattr(cli.aud, "find_ffmpeg", lambda configured="": "ffmpeg")  # CI has no ffmpeg
 
     rc = cli.cmd_transcribe(_transcribe_args(video, outputs="html", speakers=1))
 
@@ -330,7 +339,9 @@ def test_transcribe_html_and_frames_fallback_for_video(tmp_path, monkeypatch, ca
 
 def test_transcribe_no_crash_when_json_missing(tmp_path, monkeypatch):
     """A missing whisper JSON on the unlabeled path must warn, not crash
-    (the old screenshots-only block read an unbound 'result')."""
+    (the old screenshots-only block read an unbound 'result'). The explicit
+    --outputs html it could not deliver makes the run exit 1 (wave-3): a 0
+    told wrappers and the macOS UI the HTML exists."""
     video = tmp_path / "recording.mov"
     video.write_bytes(b"fake video")
 
@@ -345,7 +356,7 @@ def test_transcribe_no_crash_when_json_missing(tmp_path, monkeypatch):
 
     rc = cli.cmd_transcribe(_transcribe_args(video, outputs="html", speakers=None))
 
-    assert rc == 0
+    assert rc == 1
     assert not (tmp_path / "recording.speakers.html").exists()
 
 
@@ -1639,9 +1650,11 @@ def test_merge_declined_setup_then_success_explains_cache_reuse(tmp_path, monkey
     rc = cli.cmd_merge(_merge_args(audio, outputs="html", speakers=1))
 
     assert rc == 0
-    flat = " ".join(capsys.readouterr().err.split())
-    assert "ran WITHOUT the one-time setup" in flat
-    assert ".diar.json" in flat
+    err = capsys.readouterr().err
+    assert "ran WITHOUT the one-time setup" in " ".join(err.split())
+    # The cache path is one long word; the console folds it wherever the
+    # temp dir's length puts the edge, so look for it with no whitespace.
+    assert ".diar.json" in "".join(err.split())
 
 
 def test_manifest_is_named_detection(tmp_path):
@@ -1744,6 +1757,7 @@ def test_transcribe_degraded_run_keeps_named_frames_manifest_rc0(tmp_path, monke
     monkeypatch.setattr(cli, "_run_whisper_streaming", lambda cmd: SimpleNamespace(returncode=0))
     monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    monkeypatch.setattr(cli.aud, "find_ffmpeg", lambda configured="": "ffmpeg")  # CI has no ffmpeg
 
     def _boom(*_a, **_k):
         raise AssertionError("extraction must not run when the named manifest is kept")
@@ -1977,3 +1991,300 @@ def test_merge_speakers_names_overrides_wrong_auto_match(tmp_path, monkeypatch, 
     wrong = json.loads((tmp_path / "WrongName.json").read_text(encoding="utf-8"))
     assert wrong["samples"] == 2
     assert all(abs(v - 0.5) < 1e-9 for v in wrong["embedding"])
+
+
+# ---------- wave-3 audit regressions ----------
+
+from tests.test_audio import _riff  # noqa: E402
+
+
+def test_transcribe_spares_a_foreign_wav_next_to_the_video(tmp_path, monkeypatch):
+    """talk.wav next to talk.mov is the user's: extraction goes to a temp dir,
+    whisper's outputs keep their usual names beside the video (-of), and
+    cleanup removes the temp copy — never the user's file."""
+    video = tmp_path / "talk.mov"
+    video.write_bytes(b"video")
+    mine = tmp_path / "talk.wav"
+    mine.write_bytes(b"my studio recording")
+    monkeypatch.setattr(cli.M, "pick_best", lambda config: Path("/models/turbo.bin"))
+    monkeypatch.setattr(cli, "_find_whisper_cli", lambda configured="": "whisper-cli")
+    monkeypatch.setattr(cli.aud, "find_ffmpeg", lambda configured="": "ffmpeg")
+
+    def fake_extract(src, ffmpeg, dest_dir=None, dry_run=False):
+        out = (dest_dir or src.parent) / (src.stem + ".wav")
+        out.write_bytes(_riff(comment=b"whiz-extracted:talk.mov"))
+        return out
+
+    monkeypatch.setattr(cli.aud, "extract_audio", fake_extract)
+    args = _transcribe_args(video, outputs="srt", speakers=None)
+    cmd, _m, wav, in_path, keep_wav, of_base, *_ = cli._build_transcribe_args(args, cli.cfg.Config(vad=False))
+
+    assert wav.parent != tmp_path
+    assert cmd[cmd.index("-of") + 1] == str(mine)  # -> talk.wav.json beside the video
+    assert of_base == tmp_path / "talk"
+    assert cli._naming_wav(in_path, wav) == mine
+
+    cli._remove_intermediate_audio(wav, in_path, keep_wav)
+    assert not wav.exists() and not wav.parent.exists()
+    assert mine.read_bytes() == b"my studio recording"
+
+
+def test_remove_intermediate_audio_only_deletes_whiz_extractions(tmp_path):
+    video = tmp_path / "talk.mov"
+    wav = tmp_path / "talk.wav"
+    wav.write_bytes(_riff())  # unmarked: not provably whiz's
+    cli._remove_intermediate_audio(wav, video, keep_wav=False)
+    assert wav.exists()
+
+    wav.write_bytes(_riff(comment=b"whiz-extracted:talk.mov"))
+    cli._remove_intermediate_audio(wav, video, keep_wav=True)
+    assert wav.exists()
+    cli._remove_intermediate_audio(wav, video, keep_wav=False)
+    assert not wav.exists()
+
+
+def test_transcribe_cleans_up_extracted_wav_when_the_run_raises(tmp_path, monkeypatch):
+    """^C / an exception mid-run used to leave the ~115 MB/hour WAV behind."""
+    video = tmp_path / "talk.mov"
+    video.write_bytes(b"video")
+    wav = tmp_path / "talk.wav"
+    wav.write_bytes(_riff(comment=b"whiz-extracted:talk.mov"))
+
+    def fake_build(args, config):
+        return (["whisper-cli"], "model.bin", wav, video, False, tmp_path / "talk", False, False)
+
+    def boom(cmd):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_build_transcribe_args", fake_build)
+    monkeypatch.setattr(cli, "_run_whisper_streaming", boom)
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    with pytest.raises(KeyboardInterrupt):
+        cli.cmd_transcribe(_transcribe_args(video, outputs="srt", speakers=None))
+    assert not wav.exists()
+
+
+def test_diarization_audio_converts_unreadable_input(tmp_path, monkeypatch):
+    """m4a / 44.1 kHz input reaches diarization as a temp 16 kHz copy that is
+    removed with the run (the reader only takes 16 kHz mono PCM)."""
+    import contextlib
+
+    memo = tmp_path / "memo.m4a"
+    memo.write_bytes(b"aac")
+    monkeypatch.setattr(cli.aud, "is_diarization_ready", lambda p: p.suffix == ".wav")
+    monkeypatch.setattr(cli.aud, "find_ffmpeg", lambda configured="": "ffmpeg")
+
+    def fake_extract(src, ffmpeg, dest_dir=None, dry_run=False):
+        out = dest_dir / (src.stem + ".wav")
+        out.write_bytes(_riff())
+        return out
+
+    monkeypatch.setattr(cli.aud, "extract_audio", fake_extract)
+    with contextlib.ExitStack() as stack:
+        got = cli._diarization_audio(memo, cli.cfg.Config(), stack)
+        assert got != memo and got.exists()
+    assert not got.exists()
+
+    ready = tmp_path / "ok.wav"
+    with contextlib.ExitStack() as stack:
+        assert cli._diarization_audio(ready, cli.cfg.Config(), stack) == ready
+
+
+def test_merge_does_not_diarize_a_foreign_wav_as_the_videos_audio(tmp_path, monkeypatch):
+    import contextlib
+
+    video = tmp_path / "talk.mov"
+    video.write_bytes(b"video")
+    (tmp_path / "talk.wav").write_bytes(b"someone else's audio")
+    monkeypatch.setattr(cli.aud, "find_ffmpeg", lambda configured="": "ffmpeg")
+
+    def fake_extract(src, ffmpeg, dest_dir=None, dry_run=False):
+        out = (dest_dir or src.parent) / (src.stem + ".wav")
+        out.write_bytes(_riff(comment=b"whiz-extracted:talk.mov"))
+        return out
+
+    monkeypatch.setattr(cli.aud, "extract_audio", fake_extract)
+    with contextlib.ExitStack() as stack:
+        wav = cli._video_audio_for_reuse(video, cli.cfg.Config(), stack)
+        assert wav.parent != tmp_path
+    assert not wav.exists()
+    assert (tmp_path / "talk.wav").read_bytes() == b"someone else's audio"
+
+    # whiz's own kept extraction is reused as-is.
+    (tmp_path / "talk.wav").write_bytes(_riff(comment=b"whiz-extracted:talk.mov"))
+    with contextlib.ExitStack() as stack:
+        assert cli._video_audio_for_reuse(video, cli.cfg.Config(), stack) == tmp_path / "talk.wav"
+
+
+def test_coerce_list_fields_become_lists():
+    """`config set outputs=srt,txt` stored the STRING, which every later run
+    iterated letter by letter ("Unknown output format 's'")."""
+    assert cli._coerce("srt, txt", "list[str]") == ["srt", "txt"]
+
+
+def test_coerce_rejects_bool_typos_and_empty_clears_tristate():
+    assert cli._coerce("Off", "bool") is False
+    assert cli._coerce("yes", "bool | None") is True
+    assert cli._coerce("", "bool | None") is None
+    with pytest.raises(SystemExit, match="Expected a boolean"):
+        cli._coerce("ture", "bool")
+    with pytest.raises(SystemExit):
+        cli._coerce("", "bool")
+
+
+def test_config_set_list_round_trips(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("WHIZ_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(cli.cfg, "CONFIG_DIR", tmp_path, raising=False)
+    monkeypatch.setattr(cli.cfg, "CONFIG_PATH", tmp_path / "config.toml", raising=False)
+    cli.cmd_config_set(SimpleNamespace(assignment="outputs=srt,txt"))
+    assert cli.cfg.load().outputs == ["srt", "txt"]
+
+
+def test_config_show_masks_the_api_key(monkeypatch, capsys):
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config(ai_api_key="sk-SECRET1234567"))
+    monkeypatch.setattr(cli.cfg, "model_search_dirs", lambda config: [])
+    cli.cmd_config_show(SimpleNamespace())
+    out = capsys.readouterr().out
+    assert "SECRET" not in out
+    assert "sk-…4567" in out
+
+
+def test_config_edit_splits_editor_command(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setenv("EDITOR", "code -w")
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
+    monkeypatch.setattr(cli.cfg, "save", lambda config: tmp_path / "config.toml")
+    monkeypatch.setattr(cli.subprocess, "run", lambda cmd: seen.setdefault("cmd", cmd) and SimpleNamespace(returncode=0))
+    cli.cmd_config_edit(SimpleNamespace())
+    assert seen["cmd"] == ["code", "-w", str(tmp_path / "config.toml")]
+
+
+def _naming_args(**kw):
+    return SimpleNamespace(no_name_speakers=False, name_speakers=False, **kw)
+
+
+def test_auto_naming_never_reads_someone_elses_piped_stdin(monkeypatch):
+    """`ls *.mov | while read f; do whiz transcribe "$f"; done` fed the
+    remaining filenames in as speaker names."""
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    monkeypatch.delenv(cli.UI_PIPE_ENV, raising=False)
+    assert cli._name_speakers_enabled(_naming_args(), diarize_enabled=True) is False
+
+
+def test_auto_naming_runs_for_the_macos_ui_and_explicit_flag(monkeypatch):
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    monkeypatch.setenv(cli.UI_PIPE_ENV, "1")
+    assert cli._name_speakers_enabled(_naming_args(), diarize_enabled=True) is True
+    monkeypatch.delenv(cli.UI_PIPE_ENV)
+    explicit = SimpleNamespace(no_name_speakers=False, name_speakers=True)
+    assert cli._name_speakers_enabled(explicit, diarize_enabled=True) is True
+
+
+def test_model_picker_without_a_terminal_never_blocks_or_saves(monkeypatch):
+    """The macOS UI keeps stdin open: input() here hung a GUI --analyze run
+    forever, and a pick nobody made replaced the configured model."""
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    monkeypatch.setattr(cli.AI, "list_ollama_models", lambda base_url: ["llama3.1", "llava"])
+    monkeypatch.setattr(cli.AI, "probe_model", lambda base_url, name, api_key: (True, ""))
+    monkeypatch.setattr(builtins, "input", lambda *a: pytest.fail("input() must not be called"))
+    monkeypatch.setattr(cli.cfg, "save", lambda config: pytest.fail("must not persist"))
+    chosen = cli._pick_model_interactive(cli.cfg.Config(), prefer_vision=True)
+    assert chosen in {"llama3.1", "llava"}
+
+
+def test_whisper_gets_no_prints_alongside_progress(tmp_path, monkeypatch):
+    """-np is whisper-cli's --no-prints, not "no progress": the staged -pp
+    default dropped it and a 5-line run became ~120 lines of init noise."""
+    audio = tmp_path / "a.wav"
+    audio.write_bytes(b"x")
+    monkeypatch.setattr(cli.M, "pick_best", lambda config: Path("/models/turbo.bin"))
+    monkeypatch.setattr(cli, "_find_whisper_cli", lambda configured="": "whisper-cli")
+    args = _transcribe_args(audio, outputs="srt", speakers=None)
+    args.no_progress = False
+    quiet = cli.cfg.Config(vad=False, verbose=False)
+    cmd, *_ = cli._build_transcribe_args(args, quiet)
+    assert "-pp" in cmd and "-np" in cmd
+    args.verbose = True
+    cmd, *_ = cli._build_transcribe_args(args, quiet)
+    assert "-pp" in cmd and "-np" not in cmd
+
+
+def _analyze_args(file, **kw):
+    base = dict(file=str(file), output="", model="m", base_url="", api_key=None, max_frames=None,
+                summary=True, actions=False, plan=False, prompt="", vision=False, no_vision=True)
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def _stub_analyze(monkeypatch, response="✓ Decision: ship Friday"):
+    monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config(ai_model="m"))
+    monkeypatch.setattr(cli.AI, "probe_model", lambda *a: (True, ""))
+    monkeypatch.setattr(cli.AI, "analyze", lambda *a, **k: response)
+
+
+def test_analyze_does_not_echo_model_text_into_a_pipe(tmp_path, monkeypatch, capsys):
+    """Over a pipe the reply is already in .analysis.md; echoing it let a line
+    like "✓ Decision: ship Friday" pose as an artifact in the macOS UI."""
+    rec = tmp_path / "rec.mov"
+    rec.write_bytes(b"v")
+    (tmp_path / "rec.speakers.txt").write_text("Alice: hi", encoding="utf-8")
+    _stub_analyze(monkeypatch)
+    monkeypatch.setattr(sys, "stdout", SimpleNamespace(isatty=lambda: False, write=sys.stdout.write, flush=sys.stdout.flush))
+    assert cli.cmd_analyze(_analyze_args(rec)) == 0
+    assert "ship Friday" not in capsys.readouterr().out
+    assert "ship Friday" in (tmp_path / "rec.analysis.md").read_text(encoding="utf-8")
+
+
+def test_analyze_reads_the_transcript_under_output_base(tmp_path, monkeypatch):
+    """transcribe -o out/run1 --analyze looked next to the input instead."""
+    rec = tmp_path / "rec.mov"
+    rec.write_bytes(b"v")
+    (tmp_path / "run1.speakers.txt").write_text("Alice: hi", encoding="utf-8")
+    _stub_analyze(monkeypatch, response="ok")
+    assert cli.cmd_analyze(_analyze_args(rec, output=str(tmp_path / "run1"))) == 0
+    assert (tmp_path / "run1.analysis.md").exists()
+
+
+def test_chained_analysis_runtime_error_keeps_the_reassurance(tmp_path, monkeypatch, capsys):
+    """An AI failure (RuntimeError) skipped straight to main(), losing the
+    "transcription itself succeeded" message. It also carries -o through."""
+    audio = _setup_transcribe(monkeypatch, tmp_path, diarize_enabled=False)
+    seen = {}
+
+    def _ai_down(analyze_args):
+        seen["output"] = analyze_args.output
+        raise RuntimeError("AI server dropped the connection")
+
+    monkeypatch.setattr(cli, "cmd_analyze", _ai_down)
+    args = _transcribe_args(audio, outputs="srt", speakers=None)
+    args.analyze = True
+
+    assert cli.cmd_transcribe(args) == 1
+    flat = " ".join(capsys.readouterr().err.split())
+    assert "Chained analysis failed: AI server dropped the connection" in flat
+    assert "transcription itself succeeded" in flat
+    assert seen["output"] == ""
+
+
+def test_upgrade_refuses_a_non_tool_install(monkeypatch):
+    monkeypatch.setattr(cli.sys, "prefix", "/Users/x/Projects/whiz/.venv")
+    monkeypatch.setattr(cli, "_run_live", lambda cmd: pytest.fail("must not reinstall"))
+    assert cli.cmd_upgrade(SimpleNamespace()) == 1
+
+
+def test_upgrade_reports_a_failed_inject(monkeypatch):
+    monkeypatch.setattr(cli.sys, "prefix", "/Users/x/.local/pipx/venvs/whiz")
+    monkeypatch.setattr(cli, "_diarize_extra_installed", lambda: True)
+    monkeypatch.setattr(cli, "_run_live", lambda cmd: 1 if "inject" in cmd else 0)
+    assert cli.cmd_upgrade(SimpleNamespace()) == 1
+
+
+def test_tool_installer_detection(monkeypatch):
+    monkeypatch.setattr(cli.sys, "prefix", "/Users/x/.local/share/uv/tools/whiz")
+    assert cli._tool_installer() == "uv"
+    monkeypatch.setattr(cli.sys, "prefix", "/Users/x/.local/pipx/venvs/whiz")
+    assert cli._tool_installer() == "pipx"
+
+
+def test_run_live_missing_tool_is_not_a_traceback(monkeypatch):
+    assert cli._run_live(["definitely-not-a-real-tool-xyz"]) == 127

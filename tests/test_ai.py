@@ -330,15 +330,20 @@ def test_chat_text_timeout_raises_runtime_error(monkeypatch):
         assert "timed out" in str(e)
 
 
-def test_chat_text_null_content_returns_empty(monkeypatch):
-    """Some servers return "content": null for an empty completion — that
-    is an empty string, not an AttributeError on .strip()."""
+def test_chat_text_null_content_raises_empty_completion(monkeypatch):
+    """Some servers return "content": null for an empty completion — that must
+    not crash with AttributeError on .strip(), and (wave-3 audit) must not be
+    accepted as a valid empty analysis either: it's a clean RuntimeError."""
     def fake_urlopen(req, timeout=600):
         return _mock_response({"choices": [{"message": {"content": None}}]})
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-    out = AI.chat_text("p: {transcript}", "t", base_url="http://x/v1", model="m", api_key="")
-    assert out == ""
+    try:
+        AI.chat_text("p: {transcript}", "t", base_url="http://x/v1", model="m", api_key="")
+        assert False, "expected RuntimeError"
+    except RuntimeError as e:
+        assert isinstance(e, AI.EmptyCompletionError)
+        assert "empty completion" in str(e)
 
 
 def test_resolve_prompt_auto_dead_plan_branch_removed():
@@ -482,12 +487,16 @@ def test_resolve_prompt_auto_fallback_on_error(monkeypatch):
 
 
 def test_resolve_prompt_auto_garbled_reply_defaults_to_meeting(monkeypatch):
+    """Wave-3 audit: an unrecognized reply takes the same safe default as a
+    failed call AND carries the fallback marker (it used to claim a real
+    'meeting' detection), with the reason stashed for the caller's warning."""
     monkeypatch.setattr(AI, "chat_text", lambda pt, t, **kw: "banana" if pt is AI.CLASSIFY_PROMPT else "x")
     prompt, mode = AI.resolve_prompt_auto(
         "t", base_url="http://x/v1", model="m", api_key="",
     )
     assert prompt is AI.SUMMARY_AND_ACTIONS_PROMPT
-    assert mode == "meeting"
+    assert mode == "meeting (fallback)"
+    assert "banana" in AI._last_classifier_error[0]
 
 
 def test_resolve_prompt_auto_routes_to_walkthrough(monkeypatch):
@@ -1151,3 +1160,451 @@ def test_analyze_long_vision_map_reduce_manifest_per_chunk(monkeypatch, tmp_path
     # The manifest is prepended before the MAP_PROMPT body.
     assert p1.startswith("Frame timeline")
     assert p2.startswith("Frame timeline")
+
+
+# ---------- wave-3 audit regressions ----------
+
+def _entries(n, frame=True):
+    from whiz.screenshots import FrameEntry
+    return [
+        FrameEntry(index=i, start=float(i), end=float(i + 1), speaker="A",
+                   text=f"seg {i}", frame=f"seg{i:04d}.jpg" if frame else "")
+        for i in range(1, n + 1)
+    ]
+
+
+def _write_frames(frames_dir, entries):
+    frames_dir.mkdir(exist_ok=True)
+    for e in entries:
+        (frames_dir / e.frame).write_bytes(b"\xff\xd8img\xff\xd9")
+
+
+# Fix 1 — size-budgeted hierarchical merge + char-capped rolling context.
+
+def test_analyze_hierarchical_merge_keeps_every_merge_under_budget(monkeypatch):
+    """Joined partials over the merge budget are merged in groups first; no
+    merge call carries more than the budget (two-item groups aside), and the
+    final merge sees the group results, not all raw partials."""
+    long_text = "\n".join(f"line {i} content here" for i in range(60))
+    budget = 1200
+    synth_inputs = []
+
+    def fake_chat_text(prompt, transcript, *, base_url, model, api_key):
+        if "combining" in prompt:
+            synth_inputs.append(prompt)
+            return "M" * 300
+        return "P" * 500  # each partial ~500 chars
+
+    monkeypatch.setattr(AI, "chat_text", fake_chat_text)
+    out = AI.analyze(
+        AI.SUMMARY_PROMPT, long_text, base_url="http://x/v1", model="m",
+        chunk_chars=120, merge_budget_chars=budget, context_turns=0,
+    )
+    n_chunks = len(AI._chunk_text(long_text, target_chars=120))
+    assert n_chunks * 500 > budget  # precondition: a single merge would overflow
+    assert out == "M" * 300
+    intermediate = [p for p in synth_inputs if "INTERMEDIATE merge" in p]
+    final = [p for p in synth_inputs if "INTERMEDIATE merge" not in p]
+    assert intermediate and len(final) == 1
+    for p in synth_inputs:
+        partials_block = p.split("Partial analyses:\n", 1)[1]
+        assert len(partials_block) <= budget
+    # The final merge sees merged group results, never every raw partial.
+    assert "(merged)" in final[0]
+    assert final[0].count("### Part ") < n_chunks
+
+
+def test_analyze_merge_under_budget_is_single_call(monkeypatch):
+    calls = []
+
+    def fake_chat_text(prompt, transcript, *, base_url, model, api_key):
+        calls.append(prompt)
+        return "SYNTH" if "combining" in prompt else "p"
+
+    monkeypatch.setattr(AI, "chat_text", fake_chat_text)
+    long_text = "\n".join(f"line {i} content here" for i in range(40))
+    AI.analyze(AI.SUMMARY_PROMPT, long_text, base_url="http://x/v1", model="m", chunk_chars=120)
+    synth = [p for p in calls if "combining" in p]
+    assert len(synth) == 1 and "INTERMEDIATE" not in synth[0]
+
+
+def test_group_by_budget_terminates_on_oversized_items():
+    """Items each larger than the budget still pair up, so every pass shrinks."""
+    items = [(k, k, "x" * 1000) for k in range(1, 6)]
+    groups = AI._group_by_budget(items, 100)
+    assert [len(g) for g in groups] == [2, 2, 1]
+    assert [it for g in groups for it in g] == items  # order preserved
+
+
+def test_running_context_capped_by_chars():
+    partials = [f"### Part {k}\n" + str(k) * 5000 for k in range(1, 4)]
+    block = AI._running_context(partials, 3, budget_chars=6000)
+    # Oldest dropped first: only the most recent partial fits.
+    assert "### Part 3" in block and "### Part 1" not in block and "### Part 2" not in block
+    # A lone partial over budget keeps its head with a marker.
+    block = AI._running_context(partials, 3, budget_chars=1000)
+    assert "truncated to fit" in block
+    assert len(block) < 1000 + len(AI._CONTEXT_BLOCK) + 100
+
+
+# Fix 2 — dropped connections are transient.
+
+def test_chat_text_remote_disconnected_is_retried(monkeypatch):
+    import http.client
+    monkeypatch.setattr(AI, "_RETRY_SLEEP", lambda _d: None)
+    calls = []
+
+    def fake_urlopen(req, timeout=600):
+        calls.append(1)
+        if len(calls) == 1:
+            raise http.client.RemoteDisconnected("Remote end closed connection without response")
+        return _mock_response({"choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    assert AI.chat_text("p: {transcript}", "t", base_url="http://x/v1", model="m") == "ok"
+    assert len(calls) == 2
+
+
+def test_chat_text_incomplete_read_exhausts_to_runtime_error(monkeypatch):
+    import http.client
+    monkeypatch.setattr(AI, "_RETRY_SLEEP", lambda _d: None)
+    calls = []
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return None
+
+        def read(self):
+            raise http.client.IncompleteRead(b"{\"choi", 200)
+
+    def fake_urlopen(req, timeout=600):
+        calls.append(1)
+        return _Resp()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    try:
+        AI.chat_text("p: {transcript}", "t", base_url="http://x/v1", model="m")
+        assert False, "expected RuntimeError"
+    except RuntimeError as e:
+        assert "dropped the connection" in str(e)
+        assert "IncompleteRead" in str(e)
+    assert len(calls) == AI._RETRY_MAX
+
+
+def test_chat_text_connection_reset_is_retried(monkeypatch):
+    monkeypatch.setattr(AI, "_RETRY_SLEEP", lambda _d: None)
+    calls = []
+
+    def fake_urlopen(req, timeout=600):
+        calls.append(1)
+        if len(calls) < 3:
+            raise ConnectionResetError(54, "Connection reset by peer")
+        return _mock_response({"choices": [{"message": {"content": "back"}}]})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    assert AI.chat_text("p: {transcript}", "t", base_url="http://x/v1", model="m") == "back"
+    assert len(calls) == 3
+
+
+# Fix 3 — finish_reason=length and empty content.
+
+def test_chat_text_length_finish_warns_and_flags(monkeypatch, capsys):
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=600: _mock_response(
+        {"choices": [{"message": {"content": "half an ans"}, "finish_reason": "length"}]}))
+    out = AI.chat_text("p: {transcript}", "t", base_url="http://localhost:1/v1", model="m")
+    assert out == "half an ans"
+    assert out.truncated is True
+    assert "finish_reason=length" in capsys.readouterr().err
+
+
+def test_chat_text_empty_string_with_length_hints_budget(monkeypatch):
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=600: _mock_response(
+        {"choices": [{"message": {"content": "   "}, "finish_reason": "length"}]}))
+    try:
+        AI.chat_text("p: {transcript}", "t", base_url="http://localhost:1/v1", model="m")
+        assert False, "expected RuntimeError"
+    except AI.EmptyCompletionError as e:
+        assert "output-token limit" in str(e)
+
+
+def test_analyze_marks_truncated_output(monkeypatch):
+    def fake_chat_text(prompt, transcript, *, base_url, model, api_key):
+        r = AI._Reply("partial answer")
+        r.truncated = True
+        return r
+
+    monkeypatch.setattr(AI, "chat_text", fake_chat_text)
+    out = AI.analyze(AI.SUMMARY_PROMPT, "short", base_url="http://x/v1", model="m")
+    assert out.startswith("partial answer")
+    assert "Possibly truncated" in out
+    assert type(out) is str
+
+
+def test_analyze_untruncated_output_has_no_note(monkeypatch):
+    monkeypatch.setattr(AI, "chat_text", lambda *a, **k: "fine")
+    assert AI.analyze(AI.SUMMARY_PROMPT, "short", base_url="http://x/v1", model="m") == "fine"
+
+
+# Fix 4 — probe timeout is not "unavailable".
+
+def test_probe_model_timeout_is_ok(monkeypatch):
+    import socket as _socket
+
+    def fake_urlopen(req, timeout=30):
+        raise _socket.timeout("timed out")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    assert AI.probe_model("http://localhost:1/v1", "cold-big-model") == (True, "")
+
+
+def test_probe_model_connect_timeout_is_ok(monkeypatch):
+    import socket as _socket
+    monkeypatch.setattr(AI, "_RETRY_SLEEP", lambda _d: None)
+
+    def fake_urlopen(req, timeout=30):
+        raise urllib.error.URLError(_socket.timeout("timed out"))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    ok, _ = AI.probe_model("http://localhost:1/v1", "m")
+    assert ok is True
+
+
+def test_probe_model_404_is_unavailable(monkeypatch):
+    def fake_urlopen(req, timeout=30):
+        raise urllib.error.HTTPError(req.full_url, 404, "NF", hdrs=None, fp=io.BytesIO(b"no model"))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    ok, err = AI.probe_model("http://localhost:1/v1", "m")
+    assert ok is False and "HTTP 404" in err
+
+
+# Fix 5 — max_frames applies to the whole video.
+
+def test_analyze_max_frames_is_global_not_per_chunk(monkeypatch, tmp_path):
+    entries = _entries(40)
+    frames_dir = tmp_path / "frames"
+    _write_frames(frames_dir, entries)
+    sent = []
+    text_calls = []
+
+    def fake_chat_vision(prompt, transcript, frames, *, base_url, model, api_key, max_frames):
+        sent.extend(frames)
+        return "v"
+
+    def fake_chat_text(prompt, transcript, *, base_url, model, api_key):
+        text_calls.append(prompt)
+        return "t"
+
+    monkeypatch.setattr(AI, "chat_vision", fake_chat_vision)
+    monkeypatch.setattr(AI, "chat_text", fake_chat_text)
+    AI.analyze(AI.PLAN_PROMPT, AI.transcript_text(entries), base_url="http://x/v1", model="m",
+               entries=entries, frames_dir=frames_dir, use_vision=True,
+               max_frames=4, chunk_size=8)
+    assert len(sent) == 4  # not 4 per chunk (= 20)
+    # Evenly spaced across the whole video, deterministic.
+    assert [p.name for p in sent] == ["seg0001.jpg", "seg0011.jpg", "seg0021.jpg", "seg0031.jpg"]
+    # Chunk 5 (seg 33-40) got no sampled frame: text call with vision wording off.
+    assert any(AI._NO_FRAMES_NOTE in p for p in text_calls)
+
+
+# Fix 6 — the timeline lists exactly the attached images.
+
+def test_analyze_timeline_skips_missing_frame_files(monkeypatch, tmp_path):
+    entries = _entries(3)
+    frames_dir = tmp_path / "frames"
+    _write_frames(frames_dir, [entries[0], entries[2]])  # seg0002.jpg missing
+    calls = []
+
+    def fake_chat_vision(prompt, transcript, frames, *, base_url, model, api_key, max_frames):
+        calls.append((prompt, frames))
+        return "v"
+
+    monkeypatch.setattr(AI, "chat_vision", fake_chat_vision)
+    AI.analyze(AI.SUMMARY_PROMPT, AI.transcript_text(entries), base_url="http://x/v1", model="m",
+               entries=entries, frames_dir=frames_dir, use_vision=True)
+    prompt, frames = calls[0]
+    assert len(frames) == 2
+    assert "Frame timeline (2 frames, in time order):" in prompt
+    assert "Frame 2: [00:00:03] A" in prompt  # 2nd image is entry 3's frame
+    assert "Frame 3:" not in prompt
+
+
+def test_analyze_no_frame_files_disables_vision_wording(monkeypatch, tmp_path):
+    entries = _entries(3)
+    frames_dir = tmp_path / "frames"
+    frames_dir.mkdir()  # no files at all
+    text_calls = []
+    monkeypatch.setattr(AI, "chat_vision", lambda *a, **k: "SHOULD NOT BE CALLED")
+
+    def fake_chat_text(prompt, transcript, *, base_url, model, api_key):
+        text_calls.append(prompt)
+        return "t"
+
+    monkeypatch.setattr(AI, "chat_text", fake_chat_text)
+    out = AI.analyze(AI.SUMMARY_PROMPT, AI.transcript_text(entries), base_url="http://x/v1",
+                     model="m", entries=entries, frames_dir=frames_dir, use_vision=True)
+    assert out == "t"
+    assert len(text_calls) == 1
+    assert text_calls[0].startswith(AI._NO_FRAMES_NOTE)
+    assert "Frame timeline" not in text_calls[0]
+
+
+# Fix 7 — custom prompt without {transcript}.
+
+def test_analyze_custom_prompt_without_placeholder_sends_transcript(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(req, timeout=600):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return _mock_response({"choices": [{"message": {"content": "answer"}}]})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    AI.analyze("Who talked most?", "[00:00:01] Alice: THE-REAL-TRANSCRIPT",
+               base_url="http://localhost:1/v1", model="m")
+    sent = captured["body"]["messages"][0]["content"]
+    assert sent.startswith("Who talked most?")
+    assert "----- BEGIN TRANSCRIPT -----\n[00:00:01] Alice: THE-REAL-TRANSCRIPT" in sent
+    assert "----- END TRANSCRIPT -----" in sent
+    assert "{transcript}" not in sent
+
+
+# Fix 8 — classifier input sample + reply parsing.
+
+def test_resolve_prompt_auto_classifies_bounded_sample(monkeypatch):
+    seen = {}
+
+    def fake_chat_text(pt, t, **kw):
+        seen["t"] = t
+        return "MEETING"
+
+    monkeypatch.setattr(AI, "chat_text", fake_chat_text)
+    transcript = "\n".join(f"[00:00:{i % 60:02d}] A: line {i} " + "w" * 40 for i in range(2000))
+    AI.resolve_prompt_auto(transcript, base_url="http://x/v1", model="m")
+    assert len(seen["t"]) <= AI._CLASSIFY_SAMPLE_CHARS + 100
+    assert seen["t"].startswith(transcript.splitlines()[0])
+    assert seen["t"].endswith(transcript.splitlines()[-1])
+    assert "omitted" in seen["t"]
+
+
+def test_resolve_prompt_auto_strips_think_and_reads_whole_reply(monkeypatch):
+    reply = "<think>Is it a PLAN or a MEETING? Hmm.</think>\n\nWALKTHROUGH"
+    monkeypatch.setattr(AI, "chat_text", lambda pt, t, **kw: reply)
+    _, mode = AI.resolve_prompt_auto("t", base_url="http://x/v1", model="m")
+    assert mode == "walkthrough"
+    monkeypatch.setattr(AI, "chat_text", lambda pt, t, **kw: "Sure, here you go:\nPLAN")
+    _, mode = AI.resolve_prompt_auto("t", base_url="http://x/v1", model="m")
+    assert mode == "plan"
+    assert AI._last_classifier_error[0] == ""
+
+
+def test_resolve_prompt_auto_think_only_reply_is_fallback(monkeypatch):
+    monkeypatch.setattr(AI, "chat_text", lambda pt, t, **kw: "<think>PLAN? MEETING?")
+    _, mode = AI.resolve_prompt_auto("t", base_url="http://x/v1", model="m")
+    assert mode == "meeting (fallback)"
+
+
+# Fix 9 — partials survive a failed final merge.
+
+def test_analyze_failed_merge_saves_partials(monkeypatch, tmp_path):
+    def fake_chat_text(prompt, transcript, *, base_url, model, api_key):
+        if "combining" in prompt:
+            raise AI.AITimeoutError("AI server timed out")
+        return f"PARTIAL<{transcript[:7]}>"
+
+    monkeypatch.setattr(AI, "chat_text", fake_chat_text)
+    partial = tmp_path / "talk.analysis.partial.md"
+    long_text = "\n".join(f"line {i} content here" for i in range(40))
+    try:
+        AI.analyze(AI.SUMMARY_PROMPT, long_text, base_url="http://x/v1", model="m",
+                   chunk_chars=120, partial_path=partial)
+        assert False, "expected RuntimeError"
+    except AI.AITimeoutError as e:
+        assert str(partial) in str(e)
+        assert "timed out" in str(e)
+    body = partial.read_text(encoding="utf-8")
+    assert "### Part 1 of" in body and "PARTIAL<line 0 >" in body
+    assert body.count("### Part ") == len(AI._chunk_text(long_text, target_chars=120))
+
+
+def test_analyze_failed_merge_without_partial_path_reraises(monkeypatch, tmp_path):
+    def fake_chat_text(prompt, transcript, *, base_url, model, api_key):
+        if "combining" in prompt:
+            raise RuntimeError("merge boom")
+        return "p"
+
+    monkeypatch.setattr(AI, "chat_text", fake_chat_text)
+    long_text = "\n".join(f"line {i} content here" for i in range(40))
+    try:
+        AI.analyze(AI.SUMMARY_PROMPT, long_text, base_url="http://x/v1", model="m", chunk_chars=120)
+        assert False, "expected RuntimeError"
+    except RuntimeError as e:
+        assert str(e) == "merge boom"
+    assert not list(tmp_path.iterdir())
+
+
+# Fix 10 — base URL normalization.
+
+def test_chat_base_normalization():
+    assert AI._chat_base("http://localhost:11434") == "http://localhost:11434/v1"
+    assert AI._chat_base("http://localhost:11434/") == "http://localhost:11434/v1"
+    assert AI._chat_base("http://localhost:11434/v1") == "http://localhost:11434/v1"
+    assert AI._chat_base("http://localhost:11434/v1/") == "http://localhost:11434/v1"
+    assert AI._chat_base("https://openrouter.ai/api/v1") == "https://openrouter.ai/api/v1"
+    # A custom path is the user's explicit choice — never doubled or rewritten.
+    assert AI._chat_base("https://g.example/v1beta/openai/") == "https://g.example/v1beta/openai"
+
+
+def test_chat_text_bare_host_posts_to_v1(monkeypatch):
+    seen = []
+
+    def fake_urlopen(req, timeout=600):
+        seen.append(req.full_url)
+        return _mock_response({"choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    for base in ("http://localhost:11434", "http://localhost:11434/", "http://localhost:11434/v1/"):
+        AI.chat_text("p: {transcript}", "t", base_url=base, model="m")
+    assert seen == ["http://localhost:11434/v1/chat/completions"] * 3
+
+
+def test_list_ollama_models_bare_host_fallback_uses_v1(monkeypatch):
+    calls = []
+    models_payload = json.dumps({"data": [{"id": "m1"}]}).encode()
+
+    def fake_urlopen(req, timeout=10):
+        calls.append(req.full_url)
+        if req.full_url.endswith("/api/tags"):
+            raise urllib.error.HTTPError(req.full_url, 404, "NF", hdrs=None, fp=io.BytesIO(b"{}"))
+        resp = io.BytesIO(models_payload); resp.status = 200
+        resp.__enter__ = lambda: resp; resp.__exit__ = lambda *a: None
+        return resp
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    assert AI.list_ollama_models("http://localhost:11434") == ["m1"]
+    assert calls == ["http://localhost:11434/api/tags", "http://localhost:11434/v1/models"]
+
+
+# Fix 11 — plain-http non-loopback warning (once per host).
+
+def test_insecure_http_warns_once_per_host(monkeypatch, capsys):
+    monkeypatch.setattr(AI, "_insecure_warned", set())
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=600: _mock_response(
+        {"choices": [{"message": {"content": "ok"}}]}))
+    AI.chat_text("p: {transcript}", "t", base_url="http://192.168.1.5:11434/v1", model="m", api_key="k")
+    AI.chat_text("p: {transcript}", "t", base_url="http://192.168.1.5:11434/v1", model="m", api_key="k")
+    err = capsys.readouterr().err
+    assert err.count("plain HTTP") == 1
+    assert "192.168.1.5:11434" in err
+
+
+def test_loopback_and_https_do_not_warn(monkeypatch, capsys):
+    monkeypatch.setattr(AI, "_insecure_warned", set())
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=600: _mock_response(
+        {"choices": [{"message": {"content": "ok"}}]}))
+    for base in ("http://localhost:11434/v1", "http://127.0.0.2:8080/v1",
+                 "http://[::1]:11434/v1", "https://api.example.com/v1"):
+        AI.chat_text("p: {transcript}", "t", base_url=base, model="m")
+    assert "plain HTTP" not in capsys.readouterr().err

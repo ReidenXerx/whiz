@@ -351,3 +351,39 @@ def test_download_vad_writes_atomically(tmp_path, monkeypatch):
     assert out.name == M.VAD_DEFAULT
     assert out.read_bytes() == b"vad"
     assert not (tmp_path / (M.VAD_DEFAULT + ".part")).exists()
+
+
+# ---------- wave-3 audit ----------
+
+def test_resolve_turbo_breaks_tie_by_preference(tmp_path, monkeypatch):
+    """Wave-3: with large-v3-turbo AND large-v3-turbo-q5_0 on disk, the short
+    alias 'turbo' was ambiguous and resolved to None. Ties now break by
+    PREFERENCE — the unquantized model wins (NS-15)."""
+    _touch(tmp_path / "ggml-large-v3-turbo-q5_0.bin")
+    _touch(tmp_path / "ggml-large-v3-turbo.bin")
+    _touch(tmp_path / "ggml-large-v3-turbo-q8_0.bin")
+    config = _make_isolated_config([tmp_path], monkeypatch)
+    p = M.resolve("turbo", config)
+    assert p is not None and p.name == "ggml-large-v3-turbo.bin"
+
+
+def test_resolve_turbo_quantized_only_prefers_q8(tmp_path, monkeypatch):
+    _touch(tmp_path / "ggml-large-v3-turbo-q5_0.bin")
+    _touch(tmp_path / "ggml-large-v3-turbo-q8_0.bin")
+    config = _make_isolated_config([tmp_path], monkeypatch)
+    assert M.resolve("turbo", config).name == "ggml-large-v3-turbo-q8_0.bin"
+
+
+def test_discover_excludes_silero_vad_models(tmp_path, monkeypatch):
+    """Wave-3: the Silero VAD file shares the ggml-*.bin naming and was listed
+    as a whisper model; pick_best's fallback could hand it to whisper-cli."""
+    for name in M.VAD_MODELS + ["ggml-silero-v9.9.9.bin"]:
+        _touch(tmp_path / name)
+    config = _make_isolated_config([tmp_path], monkeypatch)
+    assert M.discover(config) == []
+    assert M.pick_best(config) is None
+    # The VAD lookup itself still finds it.
+    assert M.find_vad_model(config).name == M.VAD_DEFAULT
+    _touch(tmp_path / "ggml-custom.bin")
+    assert [m.alias for m in M.discover(config)] == ["custom"]
+    assert M.pick_best(config).name == "ggml-custom.bin"

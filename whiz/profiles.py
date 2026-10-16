@@ -28,9 +28,12 @@ run. sherpa-onnx is an optional dependency, imported lazily.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import os
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,12 +47,80 @@ def profiles_dir() -> Path:
     return cfg.CONFIG_DIR / "speakers"
 
 
-def _profile_path(name: str) -> Path:
-    """Path of a single profile, sanitized so the name is filename-safe."""
+class CorruptProfileError(RuntimeError):
+    """A stored profile file exists but cannot be parsed.
+
+    Raised by ``save_profile`` instead of overwriting it: the file may hold
+    many recordings' worth of merged history, and "unreadable" is not
+    "absent" (wave-3 audit). Callers catch it as a RuntimeError and warn;
+    the user repairs or deletes the file by hand.
+    """
+
+
+def _sanitized_stem(name: str) -> str:
+    """The filename-safe stem of ``name`` (letters, digits, '-' and '_' only).
+
+    No path separator or dot can survive, so a name can never escape
+    ``profiles_dir()`` (``../x`` becomes ``___x``).
+    """
     safe = "".join(c if c.isalnum() or c in "-_ " else "_" for c in name).strip().replace(" ", "_")
-    if not safe:
-        safe = "speaker"
-    return profiles_dir() / f"{safe}.json"
+    return safe or "speaker"
+
+
+def _stored_name(path: Path) -> str | None:
+    """The ``name`` a profile file records (its stem if absent), or None if unreadable."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return str(data.get("name", path.stem))
+
+
+def _profile_path(name: str) -> Path:
+    """Path of the profile file that stores exactly ``name``.
+
+    The sanitizer is lossy — "Bob Smith", "Bob_Smith" and "Bob.Smith" all
+    map to ``Bob_Smith.json`` — and used to make three different speakers
+    share (and merge into) one file (wave-3 audit). The plain sanitized name
+    is still the first choice, so every existing profile keeps loading by
+    its old filename; when that file already belongs to a DIFFERENT stored
+    name, this name gets ``<stem>-<hash>.json`` instead, a short stable hash
+    of the exact name. An unreadable plain file cannot prove whose it is, so
+    it is returned as-is and ``save_profile`` refuses to overwrite it.
+    """
+    stem = _sanitized_stem(name)
+    d = profiles_dir()
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:10]
+    hashed = d / f"{stem}-{digest}.json"
+    if hashed.exists() and _stored_name(hashed) == name:
+        return hashed
+    plain = d / f"{stem}.json"
+    if not plain.exists():
+        return plain
+    stored = _stored_name(plain)
+    if stored is None or stored == name:
+        return plain
+    return hashed
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    """Write ``payload`` to ``path`` via a 0600 temp file + ``os.replace``.
+
+    A crash or ^C mid-write leaves either the old profile or the new one,
+    never a truncated file that the next load reads as corrupt.
+    """
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 @dataclass
@@ -73,15 +144,14 @@ def load_profiles() -> list[Profile]:
         return []
     out: list[Profile] = []
     for p in sorted(d.glob("*.json")):
+        # Wave-3: a corrupt profile used to vanish without a word — the
+        # speaker just stopped being recognized. Name the file instead.
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        emb = data.get("embedding")
-        if not isinstance(emb, list) or not emb:
-            continue
-        out.append(
-            Profile(
+            emb = data.get("embedding")
+            if not isinstance(emb, list) or not emb:
+                raise ValueError("no embedding")
+            prof = Profile(
                 name=str(data.get("name", p.stem)),
                 embedding=[float(x) for x in emb],
                 dim=int(data.get("dim", len(emb))),
@@ -89,19 +159,41 @@ def load_profiles() -> list[Profile]:
                 samples=int(data.get("samples", 0)),
                 source=str(data.get("source", "user")),
             )
-        )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError,
+                AttributeError, TypeError, ValueError) as e:
+            print(
+                f"Warning: skipping unreadable voice profile {p} ({e}); "
+                "fix or delete the file to stop this warning.",
+                file=sys.stderr,
+            )
+            continue
+        out.append(prof)
     return out
 
 
 def _load_profile_raw(name: str) -> dict | None:
-    """Load a single stored profile's raw JSON, or None if it doesn't exist."""
+    """Load a single stored profile's raw JSON, or None if it doesn't exist.
+
+    Raises ``CorruptProfileError`` when the file exists but cannot be parsed
+    — "unreadable" must not be mistaken for "absent" by a caller about to
+    write (wave-3 audit: ``save_profile`` overwrote the accumulated history).
+    """
     path = _profile_path(name)
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise CorruptProfileError(
+            f"voice profile {path} is unreadable ({e}); not overwriting it — "
+            "fix or delete the file by hand"
+        ) from e
+    if not isinstance(data, dict):
+        raise CorruptProfileError(
+            f"voice profile {path} is not a JSON object; not overwriting it — "
+            "fix or delete the file by hand"
+        )
+    return data
 
 
 # Cap on how much historical samples can outweigh a new one. Keeps the profile
@@ -160,9 +252,16 @@ def save_profile(
     warn), and a new file is marked ``source: "auto"`` so a later human
     confirmation (``auto_match=False``) still merges normally and upgrades
     the provenance to ``"user"``.
+
+    Wave-3 audit: the write is atomic (temp + ``os.replace``) and the file is
+    0600 (a voiceprint is biometric data); a speakers dir whiz creates is
+    0700. An existing file that cannot be parsed is NEVER overwritten — the
+    non-destructive choice: ``CorruptProfileError`` (a RuntimeError) is
+    raised and the caller warns, leaving the history recoverable by hand.
     """
     d = profiles_dir()
-    d.mkdir(parents=True, exist_ok=True)
+    if not d.exists():
+        d.mkdir(parents=True, exist_ok=True, mode=0o700)
     prior = _load_profile_raw(name)
     if auto_match and prior is not None:
         # An auto-match must not adopt an existing profile's slot.
@@ -193,7 +292,7 @@ def save_profile(
         "source": source,
     }
     path = _profile_path(name)
-    path.write_text(json.dumps(payload), encoding="utf-8")
+    _write_json_atomic(path, payload)
     return path
 
 

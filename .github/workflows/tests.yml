@@ -1,0 +1,51 @@
+# Tests — the gate the GitNexus workflows are not.
+#
+# Both halves of the pipe contract run here: the Python CLI's suite (which pins
+# the machine lines it emits) and the macOS app's Swift suite (which pins how
+# it parses them). A change that breaks either side fails the PR instead of
+# reaching a user's app.
+name: tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # requires-python = ">=3.11"; keep the floor in the matrix.
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      # The committed lock drifted for a whole release after the dictation
+      # split (it still resolved the removed `dictate` extra).
+      - name: Lock is current
+        run: uv lock --check
+      - name: pytest
+        run: uv run --extra test pytest tests/ -q
+
+  swift:
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: macos
+    steps:
+      - uses: actions/checkout@v4
+      - name: swift test
+        run: swift test
+      - name: Release build
+        run: swift build -c release

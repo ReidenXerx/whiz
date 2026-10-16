@@ -49,6 +49,8 @@ struct CLIOutputParsingTests {
             "✓",                       // marker with no body
             "▸",                       // phase with no label
             "✓ Wrote something",       // artifact with no separator
+            "✓ Decision: ship Friday", // LLM prose shaped like the marker
+            "✓ Wrote labeled SRT: a.speakers.srt",  // relative: not a file the UI can trust
         ] {
             #expect(CLIBackend.classify(line) == nil, "false positive on \(line.debugDescription)")
         }
@@ -163,6 +165,95 @@ struct WhizLocatorTests {
         // the wrong reason.
         let found = WhizLocator.find(environment: ["PATH": directory.path], candidates: [])
         #expect(found?.path == fake.path)
+    }
+}
+
+
+@Suite("Child environment")
+struct ChildEnvironmentTests {
+
+    private let home = "/Users/someone"
+
+    @Test("a Finder-launched PATH gains the tool directories, prepended")
+    func finderPathIsRepaired() {
+        // launchd hands a Finder-launched app this PATH; whiz shells out to
+        // whisper-cli and ffmpeg by name and would find neither.
+        let env = CLIBackend.childEnvironment(
+            from: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"], home: home)
+        #expect(env["PATH"] == "/opt/homebrew/bin:/usr/local/bin:/Users/someone/.local/bin"
+                + ":/usr/bin:/bin:/usr/sbin:/sbin")
+    }
+
+    @Test("entries already present keep their place and are not duplicated")
+    func existingEntriesKeepOrder() {
+        // A shell-launched app already has a rich PATH; its order is the
+        // user's choice and must survive, minus duplicates and empties.
+        let env = CLIBackend.childEnvironment(
+            from: ["PATH": "/usr/bin:/usr/local/bin::/usr/bin:/opt/homebrew/bin"], home: home)
+        #expect(env["PATH"] == "/Users/someone/.local/bin:/usr/bin:/usr/local/bin:/opt/homebrew/bin")
+    }
+
+    @Test("a missing PATH starts from the system default")
+    func missingPath() {
+        let env = CLIBackend.childEnvironment(from: [:], home: home)
+        #expect(env["PATH"] == "/opt/homebrew/bin:/usr/local/bin:/Users/someone/.local/bin"
+                + ":/usr/bin:/bin:/usr/sbin:/sbin")
+    }
+
+    @Test("the GUI-pipe opt-in is set and nothing else is lost")
+    func pipeOptInIsSet() {
+        // WHIZ_UI_PIPE=1 is the contract that lets the CLI ask speaker names
+        // over a non-TTY stdin; without it the naming bar never appears.
+        let env = CLIBackend.childEnvironment(
+            from: ["PATH": "/usr/bin", "WHIZ_CONFIG_DIR": "/tmp/cfg", "LANG": "ru_RU.UTF-8"], home: home)
+        #expect(env["WHIZ_UI_PIPE"] == "1")
+        #expect(env["WHIZ_CONFIG_DIR"] == "/tmp/cfg")
+        #expect(env["LANG"] == "ru_RU.UTF-8")
+    }
+}
+
+@Suite("Line splitting")
+struct LineCollectorTests {
+
+    private func split(_ chunks: [Data], flush: Bool = true) -> [TranscriptionEvent] {
+        let box = EventBox()
+        let collector = LineCollector(onEvent: { box.append($0) })
+        for chunk in chunks { collector.ingest(chunk) }
+        if flush { collector.flush() }
+        return box.events
+    }
+
+    @Test("a chunk boundary inside a multi-byte character loses nothing")
+    func utf8SplitAcrossChunks() {
+        // Every marker glyph is multi-byte, and so is Cyrillic speech. Cut
+        // the bytes at every possible offset: decoding chunk-by-chunk failed
+        // on a chunk ending mid-character and dropped it whole.
+        let bytes = Data("▸ транскрипция\n✓ Wrote analysis: /tmp/Отчёт.analysis.md\n".utf8)
+        for cut in 1..<bytes.count {
+            let events = split([bytes.prefix(cut), bytes.suffix(from: cut)])
+            #expect(events.contains(.phase("транскрипция")), "lost the phase at cut \(cut)")
+            #expect(events.contains(.artifact(Artifact(
+                label: "Wrote analysis",
+                url: URL(fileURLWithPath: "/tmp/Отчёт.analysis.md")))),
+                "lost the artifact at cut \(cut)")
+        }
+    }
+
+    @Test("an unterminated multi-byte tail is decoded by flush")
+    func flushDecodesTail() {
+        let bytes = Data("▸ диаризация".utf8)
+        let events = split([bytes.prefix(5), bytes.suffix(from: 5)])
+        #expect(events.contains(.phase("диаризация")))
+    }
+
+    @Test("invalid bytes cost a replacement character, not the line")
+    func invalidBytesKeepTheLine() {
+        var bytes = Data("error: bad ".utf8)
+        bytes.append(contentsOf: [0xFF, 0xFE])
+        bytes.append(Data(" byte\n".utf8))
+        let logs = split([bytes]).compactMap { if case .log(let l) = $0 { return l } else { return nil } }
+        #expect(logs.count == 1)
+        #expect(logs.first?.hasPrefix("error: bad ") == true)
     }
 }
 
@@ -396,6 +487,140 @@ struct CLIBackendRunTests {
         await #expect(throws: CancellationError.self) { try await task.value }
         #expect(Date().timeIntervalSince(started) < 10,
                 "cancel() must terminate the script, not wait out its sleep")
+    }
+}
+
+extension CLIBackendRunTests {
+
+    /// An executable stub from a raw shell body.
+    fileprivate func script(_ body: String) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("whiz")
+        try ("#!/bin/sh\n" + body).write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        return url
+    }
+
+    fileprivate func logs(_ events: [TranscriptionEvent]) -> [String] {
+        events.compactMap { if case .log(let l) = $0 { return l } else { return nil } }
+    }
+
+    @Test("every line is delivered before run returns, and none after")
+    func drainsBeforeReturning() async throws {
+        // The drain race: the termination handler fired while the tail was
+        // still in the pipe, so the last lines were dropped — and a reader
+        // still mid-chunk could emit after run returned (after the view
+        // model finished its stream). 20000 lines make the tail large.
+        let url = try script("/usr/bin/seq 1 20000\n/usr/bin/printf 'tail-no-newline'\n")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        let box = EventBox()
+        try await CLIBackend(executable: url).run(
+            TranscriptionRequest(input: URL(fileURLWithPath: "/tmp/a.mp4")),
+            onEvent: { box.append($0) })
+        let atReturn = box.events.count
+        let lines = logs(box.events)
+        #expect(lines.count == 20001)
+        #expect(lines.first == "1")
+        #expect(lines.dropLast().last == "20000")
+        #expect(lines.last == "tail-no-newline")
+
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(box.events.count == atReturn, "an event arrived after run returned")
+    }
+
+    @Test("the child sees the GUI-pipe opt-in and a repaired PATH")
+    func childEnvironmentReachesTheProcess() async throws {
+        let url = try script("echo \"pipe=$WHIZ_UI_PIPE\"\necho \"path=$PATH\"\n")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let box = EventBox()
+        try await CLIBackend(executable: url).run(
+            TranscriptionRequest(input: URL(fileURLWithPath: "/tmp/a.mp4")),
+            onEvent: { box.append($0) })
+        let lines = logs(box.events)
+        #expect(lines.contains("pipe=1"))
+        #expect(lines.contains { $0.hasPrefix("path=") && $0.contains("/opt/homebrew/bin") })
+    }
+
+    @Test("a grandchild holding the pipe open does not wedge the run")
+    func grandchildDoesNotWedge() async throws {
+        // whisper-cli or pip can outlive whiz (after a terminate() only the
+        // direct child is signalled) while still holding the write end. The
+        // EOF wait after exit is bounded; buffered output is still drained.
+        let url = try script("echo first\nsleep 8 &\necho last\nexit 0\n")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let box = EventBox()
+        let started = Date()
+        try await CLIBackend(executable: url).run(
+            TranscriptionRequest(input: URL(fileURLWithPath: "/tmp/a.mp4")),
+            onEvent: { box.append($0) })
+        #expect(Date().timeIntervalSince(started) < 6,
+                "run must not wait for the grandchild's EOF")
+        #expect(logs(box.events) == ["first", "last"])
+    }
+
+    @Test("Stop pressed after a clean exit does not relabel the run as stopped")
+    func cancelAfterExitIsNotAStop() async throws {
+        // The process exits 0 at once; a grandchild keeps run() in its
+        // post-exit EOF wait, which is exactly the window a late Stop lands
+        // in. The grandchild announces once `kill -0` fails on its parent —
+        // i.e. the shell has been reaped — so the Stop below provably lands
+        // after the exit, however loaded the machine is.
+        let url = try script("""
+            echo done
+            ( while kill -0 $$ 2>/dev/null; do sleep 0.05; done; echo parent-gone; sleep 3 ) &
+            exit 0
+
+            """)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let backend = CLIBackend(executable: url)
+        let box = EventBox()
+        let task = Task {
+            try await backend.run(
+                TranscriptionRequest(input: URL(fileURLWithPath: "/tmp/a.mp4")),
+                onEvent: { box.append($0) })
+        }
+        for _ in 0..<200 where !logs(box.events).contains("parent-gone") {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(logs(box.events).contains("parent-gone"))
+        backend.cancel()
+        // No throw: a run that exited 0 before Stop reached it finished.
+        try await task.value
+    }
+
+    @Test("answering a prompt after the run's process died does not crash")
+    func answerToDeadChildIsIgnored() async throws {
+        // The shell exits right after asking; its stdin read end closes with
+        // it, so the answer hits a dead pipe (EPIPE / SIGPIPE territory).
+        let url = try script("""
+            cat <<'WHIZEOF'
+            ? speaker-name: Speaker A | hello there
+            WHIZEOF
+            sleep 2 &
+            exit 0
+
+            """)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let box = EventBox()
+        let backend = CLIBackend(executable: url)
+        let task = Task {
+            try await backend.run(
+                TranscriptionRequest(input: URL(fileURLWithPath: "/tmp/a.mp4")),
+                onEvent: { box.append($0) })
+        }
+        var prompt: SpeakerNamePrompt?
+        for _ in 0..<100 where prompt == nil {
+            prompt = box.events.compactMap { if case .speakerName(let p) = $0 { return p } else { return nil } }.first
+            if prompt == nil { try await Task.sleep(for: .milliseconds(20)) }
+        }
+        let asked = try #require(prompt)
+        try await Task.sleep(for: .milliseconds(300))
+        backend.answerSpeakerName("Vadim", for: asked)
+        backend.answerSpeakerName("again", for: asked)
+        try await task.value
     }
 }
 

@@ -112,7 +112,14 @@ def _extract_one(
 
     Returns True on success. Seek-before-input (``-ss`` before ``-i``) is fast
     because ffmpeg seeks to the nearest keyframe before decoding.
+
+    Success means THIS run produced the file: any ``out`` left by a previous
+    run is deleted first. ffmpeg exits 0 without writing a frame when the
+    seek lands past the last frame, and "rc 0 and the file exists" then
+    passed off the stale ``segNNNN.jpg`` of an older video as this
+    segment's frame (wave-3 audit). An empty file is a failure too.
     """
+    out.unlink(missing_ok=True)
     cmd = [
         ffmpeg,
         "-y",
@@ -126,7 +133,7 @@ def _extract_one(
     cmd.append(str(out))
 
     proc = subprocess.run(cmd, capture_output=True, text=True)
-    return proc.returncode == 0 and out.exists()
+    return proc.returncode == 0 and out.exists() and out.stat().st_size > 0
 
 
 def frames_dir_for(of_base: Path) -> Path:

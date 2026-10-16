@@ -6,8 +6,12 @@ Run with: pytest tests/test_profiles.py
 from __future__ import annotations
 
 import json
+import os
+import stat
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -178,3 +182,114 @@ def test_save_profile_default_is_user_source(tmp_path, monkeypatch):
     data = json.loads(P._profile_path("Bob").read_text())
     assert data["source"] == "user"
     assert data["samples"] == 2
+
+
+# ---------- wave-3 audit: durability + filename collisions ----------
+
+
+def test_load_profiles_warns_on_corrupt_file(tmp_path, monkeypatch, capsys):
+    """Wave-3: a corrupt profile used to be skipped silently — the speaker
+    just stopped being recognized. The skip now names the file."""
+    monkeypatch.setattr(P, "profiles_dir", lambda: tmp_path)
+    P.save_profile("Alice", [1.0, 2.0], samples=1)
+    (tmp_path / "Broken.json").write_text('{"name": "Broken", "embedd', encoding="utf-8")
+    (tmp_path / "Empty.json").write_text('{"name": "Empty", "embedding": []}', encoding="utf-8")
+    (tmp_path / "List.json").write_text("[1, 2]", encoding="utf-8")
+    profiles = P.load_profiles()
+    assert [p.name for p in profiles] == ["Alice"]
+    err = capsys.readouterr().err
+    for name in ("Broken.json", "Empty.json", "List.json"):
+        assert name in err
+
+
+def test_save_profile_refuses_to_overwrite_corrupt_file(tmp_path, monkeypatch):
+    """Wave-3: save_profile read a corrupt prior file as "no profile" and
+    overwrote the accumulated history. It now raises (a RuntimeError the CLI
+    already catches and warns on) and leaves the file byte-for-byte."""
+    monkeypatch.setattr(P, "profiles_dir", lambda: tmp_path)
+    bad = tmp_path / "Bob.json"
+    bad.write_text('{"name": "Bob", "samples": 40, "embedding": [0.1,', encoding="utf-8")
+    before = bad.read_bytes()
+    for auto in (False, True):
+        with pytest.raises(P.CorruptProfileError, match="not overwriting"):
+            P.save_profile("Bob", [1.0, 1.0], samples=1, auto_match=auto)
+        assert bad.read_bytes() == before
+    assert issubclass(P.CorruptProfileError, RuntimeError)
+
+
+def test_save_profile_atomic_write_keeps_old_on_failure(tmp_path, monkeypatch):
+    """A crash mid-write leaves the previous profile intact, no temp debris."""
+    monkeypatch.setattr(P, "profiles_dir", lambda: tmp_path)
+    path = P.save_profile("Carol", [1.0, 1.0], samples=3)
+    before = path.read_bytes()
+
+    def boom(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(P.os, "replace", boom)
+    with pytest.raises(OSError):
+        P.save_profile("Carol", [5.0, 5.0], samples=1)
+    assert path.read_bytes() == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["Carol.json"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+def test_save_profile_private_permissions(tmp_path, monkeypatch):
+    """A voiceprint is biometric data: file 0600, created dir 0700."""
+    d = tmp_path / "speakers"
+    monkeypatch.setattr(P, "profiles_dir", lambda: d)
+    path = P.save_profile("Dana", [1.0], samples=1)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(d.stat().st_mode) == 0o700
+
+
+def test_distinct_names_with_same_sanitized_stem_stay_separate(tmp_path, monkeypatch):
+    """Wave-3: "Bob Smith" / "Bob_Smith" / "Bob.Smith" all sanitized to
+    Bob_Smith.json and MERGED three people's voices into one profile. The
+    first keeps the plain filename; later ones get a stable hashed name."""
+    monkeypatch.setattr(P, "profiles_dir", lambda: tmp_path)
+    names = ["Bob Smith", "Bob_Smith", "Bob.Smith"]
+    paths = [P.save_profile(n, [float(i), float(i)], samples=1) for i, n in enumerate(names)]
+    assert paths[0].name == "Bob_Smith.json"
+    assert len({p.name for p in paths}) == 3
+    for p in paths[1:]:
+        assert p.name.startswith("Bob_Smith-") and p.parent == tmp_path
+    by_name = {p.name: p for p in P.load_profiles()}
+    assert set(by_name) == set(names)
+    for i, n in enumerate(names):
+        assert by_name[n].embedding == [float(i), float(i)]
+        assert by_name[n].samples == 1
+        assert P._profile_path(n) == paths[i]  # stable across calls
+    # Re-saving merges into the RIGHT file only.
+    P.save_profile("Bob.Smith", [2.0, 2.0], samples=1)
+    assert json.loads(paths[2].read_text())["samples"] == 2
+    assert json.loads(paths[0].read_text())["samples"] == 1
+    # Forgetting one leaves the others, and the hashed one keeps resolving.
+    assert P.forget_profile("Bob Smith") is True
+    assert P._profile_path("Bob.Smith") == paths[2]
+    assert {p.name for p in P.load_profiles()} == {"Bob_Smith", "Bob.Smith"}
+
+
+def test_legacy_profile_files_still_load_and_match(tmp_path, monkeypatch):
+    """Backward compatibility: a file written under the old scheme (plain
+    sanitized stem, possibly with no 'name' field) still loads, still
+    resolves for its stored name, and still merges."""
+    monkeypatch.setattr(P, "profiles_dir", lambda: tmp_path)
+    (tmp_path / "Mary_Ann.json").write_text(
+        json.dumps({"name": "Mary Ann", "dim": 2, "embedding": [1.0, 1.0], "samples": 3}),
+        encoding="utf-8",
+    )
+    (tmp_path / "Old.json").write_text(json.dumps({"embedding": [0.5]}), encoding="utf-8")
+    assert {p.name for p in P.load_profiles()} == {"Mary Ann", "Old"}
+    assert P._profile_path("Mary Ann") == tmp_path / "Mary_Ann.json"
+    assert P._profile_path("Old") == tmp_path / "Old.json"
+    P.save_profile("Mary Ann", [1.0, 1.0], samples=1)
+    assert json.loads((tmp_path / "Mary_Ann.json").read_text())["samples"] == 4
+
+
+def test_profile_path_blocks_traversal(tmp_path, monkeypatch):
+    monkeypatch.setattr(P, "profiles_dir", lambda: tmp_path)
+    for evil in ("../evil", "../../etc/passwd", "/abs/path", "a/../../b", "..", ""):
+        p = P._profile_path(evil)
+        assert p.parent == tmp_path
+        assert "/" not in p.name and ".." not in p.name

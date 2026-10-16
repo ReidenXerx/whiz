@@ -88,11 +88,17 @@ final class TranscriptionViewModel: ObservableObject {
     /// domain (see LastRunStore for why the real domain must stay untouched).
     private let lastRunStore: LastRunStore
     private let optionsStore: OptionsStore
+    /// Injectable for tests: a stub executable instead of discovering the
+    /// developer's real whiz (which would run a real pipeline mid-suite, and
+    /// fail on a machine without one).
+    private let makeBackend: () throws -> CLIBackend
 
     init(lastRunStore: LastRunStore = LastRunStore(),
-         optionsStore: OptionsStore = OptionsStore()) {
+         optionsStore: OptionsStore = OptionsStore(),
+         makeBackend: @escaping () throws -> CLIBackend = { try CLIBackend() }) {
         self.lastRunStore = lastRunStore
         self.optionsStore = optionsStore
+        self.makeBackend = makeBackend
         lastRun = lastRunStore.load()
         recentRuns = lastRunStore.loadHistory()
         restoreOptions()
@@ -119,7 +125,7 @@ final class TranscriptionViewModel: ObservableObject {
 
         let resolved: CLIBackend
         do {
-            resolved = try CLIBackend()
+            resolved = try makeBackend()
         } catch {
             whizMissing = true
             return
@@ -182,6 +188,9 @@ final class TranscriptionViewModel: ObservableObject {
             isRunning = false
             phase = nil
             progressPercent = nil
+            // A prompt the run never got an answer to dies with the run: left
+            // up, the naming bar would offer a Submit that writes to nothing.
+            pendingSpeakerPrompt = nil
             lastOutcome = outcome
             lastDuration = Date().timeIntervalSince(runStartedAt ?? Date())
             // Persist the results only when the run actually produced

@@ -204,13 +204,48 @@ def test_format_speakers_html_frame_clickable_opens_lightbox(tmp_path):
 
 
 def test_format_speakers_html_no_lightbox_without_frames(tmp_path):
-    """No frames => no <img>, no lightbox overlay, no <script>."""
+    """No frames => no <img>, no lightbox overlay (the script still ships —
+    it drives search; see the next test)."""
     merged = [(_seg(0.0, 1.0, "hi"), "Speaker A")]
     empty_dir = tmp_path / "frames"
     empty_dir.mkdir()
     html = MR.format_speakers_html(merged, frames_dir=empty_dir)
     assert 'class="lightbox"' not in html
-    assert "<script>" not in html
+    assert "<img" not in html
+
+
+def test_format_speakers_html_search_script_without_frames():
+    """Wave-3: the <script> also drives the search box, which every page
+    has — it used to ship only when a frame was inlined, so search was dead
+    on every audio-only transcript. It always ships now, and its lightbox
+    half guards on the box existing (no TypeError on a frames-less page)."""
+    merged = [(_seg(0.0, 1.0, "hi"), "Speaker A")]
+    html = MR.format_speakers_html(merged)  # no frames_dir at all
+    assert 'id="search"' in html
+    assert "<script>" in html
+    assert "search.addEventListener('input'" in html
+    assert "if (box) {" in html
+    # The guard precedes every box dereference.
+    assert html.index("if (box) {") < html.index("box.querySelector")
+
+
+def test_speaker_colors_distinct_by_first_appearance():
+    """Wave-3: colors came from a char-code sum mod 10, so "Speaker A" and
+    "Speaker K" collided. They are assigned by first appearance now: ten
+    speakers in one document get ten distinct colors, stable per document."""
+    labels = [f"Speaker {c}" for c in "KABCDEFGHI"]  # K first, A second
+    # The old hash really did collide on this pair.
+    assert MR._speaker_color("Speaker A") == MR._speaker_color("Speaker K")
+    merged = [(_seg(float(i), float(i) + 1, "x"), lbl) for i, lbl in enumerate(labels)]
+    merged += [(_seg(20.0, 21.0, "again"), "Speaker K")]  # repeat keeps its color
+    html = MR.format_speakers_html(merged)
+    colors = [MR._speaker_color(lbl, labels) for lbl in labels]
+    assert len(set(colors)) == 10
+    assert colors[0] == MR._SPEAKER_COLORS[0]  # first to speak gets the first color
+    for lbl, color in zip(labels, colors):
+        assert f'background:{color}">{lbl}</span>' in html  # legend chip
+        assert f'<span class="speaker" style="color:{color}">{lbl}</span>' in html
+    assert MR.speaker_palette("Speaker A", labels) == colors[1]
 
 
 def test_format_speakers_html_note_renders_muted_and_escaped():

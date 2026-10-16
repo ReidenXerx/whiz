@@ -20,12 +20,14 @@ Run `whiz transcribe -h` for transcription flags.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from whiz import __version__
@@ -148,16 +150,27 @@ def _run_whisper_streaming(cmd: list[str]) -> subprocess.Popen:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        # Explicit, not the locale's: a GUI-launched child can have no LANG,
+        # and one undecodable byte must not end the run.
+        encoding="utf-8",
+        errors="replace",
         bufsize=1,
     )
     assert proc.stdout is not None
-    with ui.streaming_progress(cmd) as write:
-        for line in proc.stdout:
-            if (m := _WHISPER_PROGRESS_RE.search(line)) and ":" in line:
-                ui.progress(int(m.group(1)))
-                continue
-            elapsed = time.monotonic() - start
-            write(line, elapsed)
+    try:
+        with ui.streaming_progress(cmd) as write:
+            for line in proc.stdout:
+                if (m := _WHISPER_PROGRESS_RE.search(line)) and ":" in line:
+                    ui.progress(int(m.group(1)))
+                    continue
+                elapsed = time.monotonic() - start
+                write(line, elapsed)
+    except BaseException:
+        # ^C or a rendering error: don't leave whisper-cli running unreaped
+        # with nobody reading its pipe.
+        proc.kill()
+        proc.wait()
+        raise
     proc.wait()
     return proc
 
@@ -398,19 +411,39 @@ def _print_zero_segments_hints() -> None:
         ui.muted(f"  {hint}")
 
 
+# Set by the macOS UI for the child it spawns: the caller is a front-end that
+# reads the `? ...` machine lines and answers them over stdin. Without it, a
+# non-TTY stdin is never read for answers to prompts the user didn't ask for.
+UI_PIPE_ENV = "WHIZ_UI_PIPE"
+
+
 def _name_speakers_enabled(args: argparse.Namespace, diarize_enabled: bool) -> bool:
     """Resolve whether the interactive speaker-naming prompt should run.
 
     Naming only makes sense when diarization actually ran. It's auto-enabled
     in that case (so you get prompted to label speakers without passing
     ``--name-speakers``); ``--no-name-speakers`` opts out. An explicit
-    ``--name-speakers`` keeps working regardless.
+    ``--name-speakers`` keeps working regardless — including over a piped
+    stdin, where a script deliberately feeds the names.
+
+    The AUTO-enabled prompt needs someone to answer it: a terminal, or the
+    macOS UI, which sets ``WHIZ_UI_PIPE=1`` and answers ``? speaker-name:``
+    lines over stdin. Any other non-TTY stdin is somebody else's data —
+    ``ls *.mov | while read f; do whiz transcribe "$f"; done`` used to feed
+    the remaining filenames in as speaker names and save them as
+    user-confirmed voice profiles.
     """
     if not diarize_enabled:
         return False
     if getattr(args, "no_name_speakers", False):
         return False
-    return True
+    if getattr(args, "name_speakers", False):
+        return True
+    if sys.stdin.isatty() or os.environ.get(UI_PIPE_ENV) == "1":
+        return True
+    ui.muted("Speaker naming skipped: stdin is not a terminal "
+             "(pass --name-speakers to read names from stdin).")
+    return False
 
 
 def _discarded_naming_flags(args: argparse.Namespace) -> list[str]:
@@ -503,7 +536,14 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
         else:
             ui.phase("extracting audio")
             ui.kv("Video", in_path.name)
-            wav = aud.extract_audio(in_path, aud.find_ffmpeg(config.ffmpeg))
+            dest = aud.extraction_dir(in_path)
+            if dest is not None:
+                ui.status(
+                    f"{aud.extracted_wav_path(in_path).name} next to the video is not whiz's "
+                    "own extraction; leaving it untouched and extracting to a temp dir.",
+                    kind="warn",
+                )
+            wav = aud.extract_audio(in_path, aud.find_ffmpeg(config.ffmpeg), dest_dir=dest)
             ui.kv("Audio", str(wav))
     elif aud.is_audio(in_path):
         wav = in_path
@@ -535,9 +575,16 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
 
     # Output base path.
     of_flag: list[str] = []
-    of_base = Path(args.output).expanduser() if args.output else wav.with_suffix("")
+    naming_wav = _naming_wav(in_path, wav)
+    of_base = Path(args.output).expanduser() if args.output else naming_wav.with_suffix("")
     if args.output:
         of_flag = ["-of", str(of_base)]
+    elif naming_wav != wav:
+        # The audio was extracted to a temp dir (a foreign <stem>.wav holds
+        # the usual spot): name whisper's outputs as if it were in the usual
+        # spot, so <stem>.wav.json lands beside the video where merge,
+        # --resume and analyze look for it.
+        of_flag = ["-of", str(naming_wav)]
 
     # Language.
     lang = args.language or config.language
@@ -578,27 +625,35 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
         cmd.append("-tr")
     if args.no_timestamps:
         cmd.append("-nt")
-    # Progress: whisper-cli uses -pp (print progress) and -np (no progress).
-    # They are mutually exclusive. -pp is now the DEFAULT on both branches:
-    # on a TTY the user sees the live line; when piped, _run_whisper_streaming
+    # Progress: -pp (print progress) is the DEFAULT on both branches: on a
+    # TTY the user sees the live line; when piped, _run_whisper_streaming
     # swallows it and re-emits the `~ progress: N%` machine line the macOS
     # UI's status chip reads — a pipe is not "logs", it is the UI's channel.
-    # --no-progress forces -np everywhere; --print-progress forces -pp over
-    # any opt-out.
-    progress_enabled = args.print_progress or not args.no_progress
-    if progress_enabled:
+    # --no-progress drops it; --print-progress forces it over any opt-out.
+    #
+    # -np is NOT the opposite of -pp: it is whisper-cli's --no-prints (model
+    # load, Metal init and other diagnostics), and the two combine. Dropping
+    # -np whenever -pp was on turned a 5-line run into ~120 lines of init
+    # noise that crowded the UI's capped log. Only verbose lets it through.
+    if args.print_progress or not args.no_progress:
         cmd.append("-pp")
-    elif not config.verbose and not args.verbose:
+    if not config.verbose and not args.verbose:
         cmd.append("-np")
-    if config.verbose or args.verbose:
-        # verbose => let whisper-cli print everything; don't suppress.
-        pass
     if config.extra_args:
         cmd += config.extra_args
     if args.extra:
         cmd += args.extra
 
     return cmd, model_path, wav, in_path, keep_wav, of_base, diarize_enabled, screenshots
+
+
+def _naming_wav(in_path: Path, wav: Path) -> Path:
+    """The WAV path output names hang off, wherever the audio really is.
+
+    For a video that is always ``<stem>.wav`` beside it, even when the audio
+    was extracted to a temp dir to spare a foreign file at that path.
+    """
+    return aud.extracted_wav_path(in_path) if aud.needs_extraction(in_path) else wav
 
 
 def _find_whisper_json(of_base: Path, wav: Path, of_passed: bool) -> Path | None:
@@ -1144,9 +1199,71 @@ def _run_diarize_or_fallback(wav: Path, config: cfg.Config, args: argparse.Names
     return diar_segments
 
 
+def _diarization_audio(wav: Path, config: cfg.Config, stack: contextlib.ExitStack) -> Path:
+    """``wav`` itself when diarization can read it, else a temp 16 kHz copy.
+
+    whisper-cli decodes m4a/mp3/44.1 kHz WAV on its own, but the diarization
+    reader takes only 16 kHz mono 16-bit PCM — handing it anything else used
+    to crash the run with an uncaught ``wave.Error`` after (or, in
+    transcribe, before) the whole whisper pass. The temp copy is removed when
+    ``stack`` closes.
+    """
+    if aud.is_diarization_ready(wav):
+        return wav
+    tmp = Path(tempfile.mkdtemp(prefix="whiz-diar-"))
+    stack.callback(shutil.rmtree, tmp, ignore_errors=True)
+    ui.muted(f"Converting {wav.name} to 16 kHz mono for diarization")
+    return aud.extract_audio(wav, aud.find_ffmpeg(config.ffmpeg), dest_dir=tmp)
+
+
+def _remove_intermediate_audio(wav: Path, in_path: Path, keep_wav: bool, *, quiet: bool = False) -> None:
+    """Delete the WAV whiz extracted for this run — and nothing else.
+
+    A temp-dir extraction (the usual spot held a foreign file) goes with its
+    dir; ``--keep-wav`` keeps it and says where. Beside the source, only a
+    file carrying whiz's extraction marker for THIS source is deleted, so a
+    user's same-named recording can never be removed as "intermediate".
+    """
+    if wav == in_path or not wav.exists():
+        return
+    if wav != _naming_wav(in_path, wav):
+        if keep_wav:
+            if not quiet:
+                ui.status(f"Kept extracted audio in a temp dir: {wav}", kind="info")
+            return
+        shutil.rmtree(wav.parent, ignore_errors=True)
+        return
+    if keep_wav or not aud.is_whiz_extracted(wav, in_path):
+        return
+    try:
+        wav.unlink()
+        if not quiet:
+            ui.muted(f"Removed intermediate {wav}")
+    except OSError:
+        pass
+
+
 def cmd_transcribe(args: argparse.Namespace) -> int:
     config = cfg.load()
-    cmd, model_path, wav, in_path, keep_wav, of_base, diarize_enabled, screenshots = _build_transcribe_args(args, config)
+    built = _build_transcribe_args(args, config)
+    wav, in_path, keep_wav = built[2], built[3], built[4]
+    # The extracted WAV (~115 MB/hour) and any diarization temp copy are
+    # removed on EVERY exit — ^C during whisper or diarization included —
+    # not only on the success path.
+    with contextlib.ExitStack() as stack:
+        if not args.dry_run:
+            stack.callback(_remove_intermediate_audio, wav, in_path, keep_wav, quiet=True)
+        return _run_transcribe(args, config, built, stack)
+
+
+def _run_transcribe(
+    args: argparse.Namespace,
+    config: cfg.Config,
+    built: tuple,
+    stack: contextlib.ExitStack,
+) -> int:
+    cmd, model_path, wav, in_path, keep_wav, of_base, diarize_enabled, screenshots = built
+    naming_wav = _naming_wav(in_path, wav)
 
     ui.header("whiz", f"transcription · v{__version__}")
     ui.kv("Model", model_path)
@@ -1178,20 +1295,23 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     # --resume lets you re-run `whiz transcribe` to redo diarization + merge
     # (e.g. with a different --speakers count) without re-running whisper-cli.
     # It's an ergonomic alias for `whiz merge` triggered from transcribe.
-    json_path = _find_whisper_json(of_base, wav, of_passed=bool(args.output))
+    json_path = _find_whisper_json(of_base, naming_wav, of_passed=bool(args.output))
     resuming = bool(getattr(args, "resume", False) and json_path.exists())
     diar_segments: list[D.DiarSegment] = []
+    diar_wav = _diarization_audio(wav, config, stack) if diarize_enabled else wav
     if resuming:
         ui.info(f"--resume: found existing whisper JSON {json_path}; skipping transcription.")
         rc = 0
         # Diarization still runs so a new --speakers count / threshold takes
         # effect against the existing transcription.
         if diarize_enabled:
-            diar_segments = _run_diarize_or_fallback(wav, config, args)
+            ui.phase("diarizing")
+            diar_segments = _run_diarize_or_fallback(diar_wav, config, args)
     else:
         # --- Diarization path ---
         if diarize_enabled:
-            diar_segments = _run_diarize_or_fallback(wav, config, args)
+            ui.phase("diarizing")
+            diar_segments = _run_diarize_or_fallback(diar_wav, config, args)
 
         ui.phase("transcribing")
         proc = _run_whisper_streaming(cmd)
@@ -1208,15 +1328,18 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     explicit_html = _outputs_explicitly_include(args, "html")
     want_frames = screenshots and aud.needs_extraction(in_path)
     whisper_segs: list[MR.WhisperSeg] = []
+    json_missing = False
     if (diarize_enabled or want_frames or want_html) and rc == 0:
-        json_path = _find_whisper_json(of_base, wav, of_passed=bool(args.output))
+        json_path = _find_whisper_json(of_base, naming_wav, of_passed=bool(args.output))
         if not json_path.exists():
+            json_missing = True
             ui.status(f"Warning: expected whisper JSON output at {json_path} but it's missing; skipping merge.",
                       kind="warn")
         else:
             try:
                 whisper_segs = MR.parse_whisper_json(json_path)
             except Exception as e:  # noqa: BLE001
+                json_missing = True
                 ui.status(f"Warning: failed to parse {json_path}: {e}", kind="warn")
                 whisper_segs = []
 
@@ -1230,7 +1353,7 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             cluster_embeddings: dict[int, list[float]] = {}
             if not args.no_voice_profiles:
                 try:
-                    cluster_embeddings = P.compute_speaker_embeddings(wav, diar_segments, config)
+                    cluster_embeddings = P.compute_speaker_embeddings(diar_wav, diar_segments, config)
                     if cluster_embeddings:
                         profile_names, matches = P.auto_assign_names(
                             cluster_embeddings, threshold=config.speaker_match_threshold,
@@ -1368,15 +1491,18 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
                 kind="hint",
             )
 
-    # Clean up the intermediate WAV unless asked to keep it.
-    if wav != in_path and not keep_wav and wav.exists():
-        try:
-            wav.unlink()
-            ui.muted(f"Removed intermediate {wav}")
-        except OSError:
-            pass
+    # Clean up the intermediate WAV unless asked to keep it. (cmd_transcribe
+    # repeats this quietly on any exit path; here it is visible.)
+    _remove_intermediate_audio(wav, in_path, keep_wav)
 
     ui.summary(written)
+
+    # The whisper JSON every merge/frames/html output is built from was
+    # missing or unparseable: an explicitly requested speakers/html output
+    # was not delivered, and exit 0 would tell a wrapper (or the macOS UI)
+    # that it was. The plain transcript formats whisper wrote stand.
+    if json_missing and (args.speakers is not None or _outputs_explicitly_include(args, "html")):
+        return 1
 
     # L (wave-1 audit): rc symmetry with `whiz merge`. An EXPLICIT --speakers
     # that degraded to generic labels and wrote nothing speaker-related
@@ -1403,6 +1529,8 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
         from types import SimpleNamespace
         analyze_args = SimpleNamespace(
             file=str(in_path),
+            # The transcript lives under -o when one was given.
+            output=args.output or "",
             # --ai-model (the native-UI flag) rides along as the analyze
             # subcommand's --model; getattr keeps hand-built Namespaces in
             # tests working when the flag is absent.
@@ -1437,6 +1565,12 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
             if message and not isinstance(e.code, int):
                 ui.status(f"Chained analysis failed: {message.splitlines()[0]}", kind="warn")
             analyze_rc = e.code if isinstance(e.code, int) else 1
+        except RuntimeError as e:
+            # AI/network failures (ai.py raises RuntimeError) would otherwise
+            # reach main() and skip the reassurance below.
+            reason = str(e).splitlines()[0] if str(e) else repr(e)
+            ui.status(f"Chained analysis failed: {reason}", kind="warn")
+            analyze_rc = 1
         if analyze_rc:
             ui.status(
                 "The transcription itself succeeded — the artifacts above are "
@@ -1520,6 +1654,10 @@ def cmd_models_download_diarization(args: argparse.Namespace) -> int:
 
 def _analysis_output_path(of_base: Path) -> Path:
     return Path(str(of_base) + ".analysis.md")
+
+
+def _analysis_partial_path(of_base: Path) -> Path:
+    return Path(str(of_base) + ".analysis.partial.md")
 
 
 def _recommend_model(models: list[str], prefer_vision: bool) -> int:
@@ -1672,20 +1810,26 @@ def _pick_model_interactive(config: cfg.Config, *, prefer_vision: bool) -> str |
         rows,
     )
     default_name = models[rec_idx]
+    if not sys.stdin.isatty():
+        # Nobody to ask. The macOS UI holds stdin open for speaker answers,
+        # so input() here blocked a GUI --analyze run forever; a script's
+        # stdin would be consumed as a choice. Use the recommended live model
+        # for THIS run and persist nothing — a pick nobody made must not
+        # replace the user's configured model.
+        ui.status(
+            f"Using {default_name} for this run (no terminal to choose on; not saved).",
+            kind="info",
+            detail=f"Make it permanent with:  whiz config set ai_model={default_name}",
+        )
+        return default_name
     # Loop until the user picks a live model (or accepts the live default).
     while True:
         try:
-            # Same pipe discipline as the speaker prompt: input() echoes a
-            # non-empty prompt to stdout when stdin is not a TTY, and a piped
-            # caller (the native UI) merges both streams into one log — the
-            # echo would glue itself onto whatever line follows and corrupt
-            # it. Over a pipe there is nothing to read the echo anyway.
-            displayed = (
+            # Only reached on a TTY (the non-TTY case returned above).
+            choice = input(
                 f"Choose a model [1-{len(models)}] "
                 f"(default {rec_idx + 1} = {default_name}): "
-                if sys.stdin.isatty() else ""
-            )
-            choice = input(displayed).strip()
+            ).strip()
         except EOFError:
             choice = ""
         if not choice:
@@ -1734,9 +1878,11 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     if not in_path.exists():
         raise SystemExit(f"Input file not found: {in_path}")
 
-    of_base = in_path.with_suffix("")
     # For video inputs the manifest/transcript sit alongside, named after the
-    # video stem (not the .wav). We just use the video stem directly.
+    # video stem (not the .wav). We just use the video stem directly — unless
+    # transcribe was given -o, which moves every artifact under that base.
+    output = getattr(args, "output", "") or ""
+    of_base = Path(output).expanduser() if output else in_path.with_suffix("")
     manifest_path = SC.frames_manifest_path(of_base)
     txt_path = Path(str(of_base) + ".speakers.txt")
 
@@ -1821,6 +1967,9 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             entries=entries, frames_dir=frames_dir,
             use_vision=use_vision, max_frames=max_frames,
             on_progress=spin,
+            # A merge that fails after 30 minutes of chunk work keeps the
+            # chunk results here instead of losing them.
+            partial_path=_analysis_partial_path(of_base),
         )
 
     # Write the .analysis.md (prompt + response) and print response to stdout.
@@ -1831,11 +1980,51 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     out_path = _analysis_output_path(of_base)
     out_path.write_text(md, encoding="utf-8")
     ui.wrote("Wrote analysis", out_path)
-    print(response)
+    # A leftover from an earlier failed run would read as current.
+    _analysis_partial_path(of_base).unlink(missing_ok=True)
+    # On a terminal the response is the point of the command. Over a pipe it
+    # is already in .analysis.md, and echoing model-written text into the
+    # stream the macOS UI parses let a reply line like "✓ Decision: ship
+    # Friday" pose as an artifact.
+    if sys.stdout.isatty():
+        print(response)
     return 0
 
 
+def _video_audio_for_reuse(in_path: Path, config: cfg.Config, stack: contextlib.ExitStack) -> Path:
+    """merge / speakers match: the video's audio, reusing whiz's own copy.
+
+    A ``<stem>.wav`` a ``--keep-wav`` transcribe left behind is reused (it is
+    what the diarization cache is keyed on). Any OTHER file at that path —
+    the user's own recording, a same-stem sibling's audio — used to be
+    diarized as if it were this video's audio; now it is left alone and the
+    audio is extracted to a temp dir that ``stack`` removes. A fresh
+    extraction beside the video is kept, so the next merge is instant.
+    """
+    target = aud.extracted_wav_path(in_path)
+    if target.exists() and aud.is_whiz_extracted(target, in_path):
+        return target
+    ui.phase("extracting audio")
+    ui.kv("Video", in_path.name)
+    dest = aud.extraction_dir(in_path)
+    if dest is not None:
+        stack.callback(shutil.rmtree, dest, ignore_errors=True)
+        ui.status(
+            f"{target.name} next to the video is not whiz's own extraction of it; "
+            "leaving it untouched and extracting to a temp dir.",
+            kind="warn",
+        )
+    wav = aud.extract_audio(in_path, aud.find_ffmpeg(config.ffmpeg), dest_dir=dest)
+    ui.kv("Audio", str(wav))
+    return wav
+
+
 def cmd_merge(args: argparse.Namespace) -> int:
+    with contextlib.ExitStack() as stack:
+        return _run_merge(args, stack)
+
+
+def _run_merge(args: argparse.Namespace, stack: contextlib.ExitStack) -> int:
     """Re-run only diarization + merge against an existing whisper JSON.
 
     Lets you tune --speakers / --cluster-threshold without redoing the
@@ -1876,17 +2065,13 @@ def cmd_merge(args: argparse.Namespace) -> int:
     if aud.is_audio(in_path):
         wav = in_path
     elif aud.needs_extraction(in_path):
-        wav = in_path.with_suffix(".wav")
-        if not wav.exists():
-            ui.phase("extracting audio")
-            ui.kv("Video", in_path.name)
-            wav = aud.extract_audio(in_path, aud.find_ffmpeg(config.ffmpeg))
-            ui.kv("Audio", str(wav))
+        wav = _video_audio_for_reuse(in_path, config, stack)
     else:
         wav = in_path
 
     # Locate the whisper JSON produced by a prior transcribe run.
-    json_path = Path(args.json).expanduser() if args.json else _find_whisper_json(wav.with_suffix(""), wav, of_passed=False)
+    naming_wav = _naming_wav(in_path, wav)
+    json_path = Path(args.json).expanduser() if args.json else _find_whisper_json(naming_wav.with_suffix(""), naming_wav, of_passed=False)
     if not json_path.exists():
         raise SystemExit(
             f"No whisper JSON found (looked for {json_path}).\n"
@@ -1949,10 +2134,11 @@ def cmd_merge(args: argparse.Namespace) -> int:
     # genuinely-new case — diarization RAN and returned nothing.
     degraded_note_shown = False
     diar_segments: list[D.DiarSegment] = []
+    diar_wav = _diarization_audio(wav, config, stack) if speakers_requested else wav
     if speakers_requested:
         try:
             ui.phase("diarizing")
-            diar_segments = D.run_diarization(wav, config, num_speakers=num_sp, threshold=thr)
+            diar_segments = D.run_diarization(diar_wav, config, num_speakers=num_sp, threshold=thr)
         except D.DiarizationUnavailable as e:
             # M2 (wave-1 audit): setup/unavailability problems arrive as the
             # typed DiarizationUnavailable (missing package / models /
@@ -2022,7 +2208,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
             "Speakers: diarization ran WITHOUT the one-time setup — a cached "
             "diarization result was reused for this WAV.",
             kind="info",
-            detail=str(D.diar_cache_path(wav)),
+            detail=str(D.diar_cache_path(diar_wav)),
         )
 
     merged = MR.assign_speakers(whisper_segs, diar_segments) if diar_segments else []
@@ -2031,7 +2217,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
     if merged:
         from collections import Counter
         counts = Counter(label for _, label in merged)
-        ui.tally(counts.most_common())
+        ui.tally(counts.most_common(), order=MR.speakers_in_order(merged))
 
     # Voice profiles: compute per-cluster embeddings and auto-match against any
     # stored profiles. Matched names seed the speaker labels; --speakers-names
@@ -2040,7 +2226,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
     cluster_embeddings: dict[int, list[float]] = {}
     if merged and not args.no_voice_profiles:
         try:
-            cluster_embeddings = P.compute_speaker_embeddings(wav, diar_segments, config)
+            cluster_embeddings = P.compute_speaker_embeddings(diar_wav, diar_segments, config)
             if cluster_embeddings:
                 profile_names, _matches = P.auto_assign_names(
                     cluster_embeddings, threshold=config.speaker_match_threshold,
@@ -2207,6 +2393,11 @@ def cmd_speakers_forget(args: argparse.Namespace) -> int:
 
 
 def cmd_speakers_match(args: argparse.Namespace) -> int:
+    with contextlib.ExitStack() as stack:
+        return _run_speakers_match(args, stack)
+
+
+def _run_speakers_match(args: argparse.Namespace, stack: contextlib.ExitStack) -> int:
     """Show how a recording's clusters match against stored profiles (dry run).
 
     Runs diarization on the given file and prints the cosine-similarity scores
@@ -2223,12 +2414,7 @@ def cmd_speakers_match(args: argparse.Namespace) -> int:
     if aud.is_audio(in_path):
         wav = in_path
     elif aud.needs_extraction(in_path):
-        wav = in_path.with_suffix(".wav")
-        if not wav.exists():
-            ui.phase("extracting audio")
-            ui.kv("Video", in_path.name)
-            wav = aud.extract_audio(in_path, aud.find_ffmpeg(config.ffmpeg))
-            ui.kv("Audio", str(wav))
+        wav = _video_audio_for_reuse(in_path, config, stack)
     else:
         wav = in_path
 
@@ -2248,7 +2434,8 @@ def cmd_speakers_match(args: argparse.Namespace) -> int:
             "whiz models download-diarization"
         )
     ui.phase("diarizing")
-    diar_segments = D.run_diarization(wav, config, num_speakers=num_sp, threshold=thr)
+    diar_wav = _diarization_audio(wav, config, stack)
+    diar_segments = D.run_diarization(diar_wav, config, num_speakers=num_sp, threshold=thr)
     if not diar_segments:
         raise SystemExit("Diarization produced no segments.")
 
@@ -2257,7 +2444,7 @@ def cmd_speakers_match(args: argparse.Namespace) -> int:
         ui.info(f"No stored voice profiles in {P.profiles_dir()}; nothing to match against.")
         return 0
 
-    cluster_embeddings = P.compute_speaker_embeddings(wav, diar_segments, config)
+    cluster_embeddings = P.compute_speaker_embeddings(diar_wav, diar_segments, config)
     from whiz.merge import speaker_label
     matches = P.match_speakers(cluster_embeddings, profiles, threshold=config.speaker_match_threshold)
     rows = []
@@ -2305,7 +2492,11 @@ def cmd_config_show(args: argparse.Namespace) -> int:
     print(f"# {cfg.CONFIG_PATH}")
     print()
     for k, v in config.to_dict().items():
-        if isinstance(v, list):
+        if k in _SECRET_CONFIG_KEYS and isinstance(v, str) and v:
+            # Terminal scrollback, screen shares and pasted bug reports are
+            # where `config show` output ends up.
+            print(f"{k} = {_mask_secret(v)!r}")
+        elif isinstance(v, list):
             print(f"{k} = {v}")
         elif isinstance(v, str) and v == "":
             print(f'{k} = ""')
@@ -2323,12 +2514,30 @@ def cmd_config_show(args: argparse.Namespace) -> int:
     return 0
 
 
+_SECRET_CONFIG_KEYS = {"ai_api_key"}
+
+
+def _mask_secret(value: str) -> str:
+    """``sk-…1234`` — enough to tell keys apart, not enough to use one."""
+    return "…" if len(value) <= 8 else f"{value[:3]}…{value[-4:]}"
+
+
 def cmd_config_edit(args: argparse.Namespace) -> int:
+    import shlex
+
     config = cfg.load()
     path = cfg.save(config)
-    editor = os.environ.get("EDITOR", "vi")
-    subprocess.run([editor, str(path)])
-    return 0
+    # $EDITOR is a command line, not a program name: `code -w` and
+    # `subl --wait` are the usual values and need splitting.
+    editor = shlex.split(os.environ.get("EDITOR", "") or "vi")
+    try:
+        return subprocess.run([*editor, str(path)]).returncode
+    except FileNotFoundError:
+        raise SystemExit(f"Editor not found: {editor[0]} (from $EDITOR). Config is at {path}")
+
+
+_TRUE_WORDS = {"1", "true", "yes", "on"}
+_FALSE_WORDS = {"0", "false", "no", "off"}
 
 
 def _coerce(value: str, field_type: type):
@@ -2340,12 +2549,26 @@ def _coerce(value: str, field_type: type):
         # the string must NOT fall through to the raw-string branch below —
         # `whiz config set auto_diarization_setup=false` would otherwise
         # store the STRING "false", which is truthy on every later load.
-        return value.lower() in {"1", "true", "yes", "on"}
+        word = value.lower()
+        if word in _TRUE_WORDS:
+            return True
+        if word in _FALSE_WORDS:
+            return False
+        if word == "" and ft != "bool":
+            # Empty clears a tri-state back to "never answered".
+            return None
+        # A typo (`vad=ture`) used to save False without a word.
+        raise SystemExit(
+            f"Expected a boolean ({', '.join(sorted(_TRUE_WORDS | _FALSE_WORDS))}), got {value!r}"
+        )
     if ft == "int":
         return int(value)
     if ft == "float":
         return float(value)
-    if ft == "list":
+    if ft.startswith("list"):
+        # The annotation arrives as "list[str]"; matching only "list" let
+        # `config set outputs=srt,txt` store the STRING "srt,txt", which every
+        # later run iterated character by character.
         return [v.strip() for v in value.split(",") if v.strip()]
     return value
 
@@ -2406,8 +2629,30 @@ def _run_live(cmd: list[str]) -> int:
     Unlike service._run (capture_output), this lets the user see pipx's
     download/install progress in real time. Returns the exit code.
     """
-    proc = subprocess.run(cmd, check=False)
+    try:
+        proc = subprocess.run(cmd, check=False)
+    except FileNotFoundError:
+        ui.status(f"{cmd[0]} not found on PATH", kind="warn")
+        return 127
     return proc.returncode
+
+
+def _tool_installer() -> str | None:
+    """How this whiz was installed: "pipx", "uv" (uv tool), or None.
+
+    Read from the running interpreter's venv: pipx keeps tools under
+    ``…/pipx/venvs/<name>``, uv under ``…/uv/tools/<name>``. Anything else
+    (a pip install, a dev checkout) is not something upgrade can redo —
+    reinstalling through pipx there used to create a SECOND whiz that the
+    user's PATH never runs.
+    """
+    parts = Path(sys.prefix).resolve().parts
+    for i in range(len(parts) - 1):
+        if parts[i] == "pipx" and parts[i + 1] == "venvs":
+            return "pipx"
+        if parts[i] == "uv" and parts[i + 1] == "tools":
+            return "uv"
+    return None
 
 
 def cmd_upgrade(args: argparse.Namespace) -> int:
@@ -2421,12 +2666,36 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
     """
     ui.header("whiz", "upgrade")
 
+    installer = _tool_installer()
+    if installer is None:
+        ui.status(
+            f"This whiz is not a pipx or uv tool install (running from {sys.prefix}); "
+            "upgrade it the way it was installed.",
+            kind="warn",
+            detail=f"pipx:  pipx install --force {_INSTALL_SOURCE}\n"
+                   f"uv:    uv tool install --force {_INSTALL_SOURCE}",
+        )
+        return 1
+
     had_diarize = _diarize_extra_installed()
+
+    if installer == "uv":
+        # uv tool installs carry their extras in the one spec, so there is no
+        # separate inject step to forget.
+        spec = f"whiz[diarize] @ {_INSTALL_SOURCE}" if had_diarize else _INSTALL_SOURCE
+        ui.phase("reinstalling whiz")
+        rc = _run_live(["uv", "tool", "install", "--force", "--reinstall", spec])
+        if rc != 0:
+            ui.status(f"uv tool install failed (exit {rc}) — nothing else was changed", kind="warn")
+            return 1
+        ui.status("whiz reinstalled" + (" with the diarize extra" if had_diarize else ""), kind="ok")
+        ui.muted("\nDictation lives in Mynah now: https://github.com/ReidenXerx/mynah")
+        return 0
 
     ui.phase("reinstalling whiz")
     rc = _run_live(["pipx", "install", "--force", _INSTALL_SOURCE])
     if rc != 0:
-        ui.status(f"pipx install failed (exit {rc}) — nothing else was changed", kind="bad")
+        ui.status(f"pipx install failed (exit {rc}) — nothing else was changed", kind="warn")
         return 1
     ui.status("whiz reinstalled", kind="ok")
 
@@ -2439,6 +2708,8 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
                 "stale — re-run: pipx inject whiz 'whiz[diarize]'",
                 kind="warn",
             )
+            # An "OK" upgrade that left speaker detection broken is not OK.
+            return 1
         else:
             ui.status("diarize extra refreshed", kind="ok")
     else:
@@ -2536,6 +2807,7 @@ def build_parser() -> argparse.ArgumentParser:
     # analyze
     an = sub.add_parser("analyze", aliases=["a"], help="AI-analyze a prior transcript (+ frames): auto-detects meeting vs implementation-plan, or use --summary/--actions/--plan/--prompt. Every analysis also appends a dense ## Essentials section (concentrated points for later context)")
     an.add_argument("file", help="Input file (used to find the .frames.json manifest or .speakers.txt alongside it)")
+    an.add_argument("-o", "--output", default="", help="Output base the transcript was written under (as passed to `whiz transcribe -o`; default: the input path without its extension)")
     an.add_argument("--model", default="", help="AI model name (default: config ai_model, e.g. llava, qwen2.5-vl, gpt-4o-mini)")
     an.add_argument("--base-url", dest="base_url", default="", help="Chat API base URL (default: config ai_base_url, http://localhost:11434/v1)")
     an.add_argument("--api-key", dest="api_key", default=None, help="API key (default: config ai_api_key; Ollama ignores it)")
@@ -2577,7 +2849,7 @@ def build_parser() -> argparse.ArgumentParser:
     cs.set_defaults(func=cmd_config_set)
 
     # upgrade
-    up = sub.add_parser("upgrade", aliases=["up"], help="One-command upgrade: reinstall whiz from git, refresh the dictate extra if installed, restart the background dictation service if installed, and re-verify. Handles the full update dance so you don't need manual pipx/service-restart steps.")
+    up = sub.add_parser("upgrade", aliases=["up"], help="One-command upgrade: reinstall whiz from git (pipx or uv tool, whichever installed it), keeping the diarize extra if it was installed.")
     up.set_defaults(func=cmd_upgrade)
 
     return p

@@ -110,3 +110,42 @@ def test_load_manifest_clean_no_warning(tmp_path, capsys):
     loaded = SC.load_manifest(manifest)
     assert loaded is not None and len(loaded) == 1
     assert capsys.readouterr().err == ""
+
+
+def _fake_ffmpeg(tmp_path: Path, writes: bool) -> str:
+    """A stand-in ffmpeg that exits 0 and writes a frame only if ``writes``."""
+    script = tmp_path / ("ffmpeg-writes" if writes else "ffmpeg-silent")
+    body = '#!/bin/sh\nfor last; do :; done\n'
+    if writes:
+        body += 'printf "JPEGDATA" > "$last"\n'
+    script.write_text(body + "exit 0\n", encoding="utf-8")
+    script.chmod(0o755)
+    return str(script)
+
+
+def test_stale_frame_from_previous_run_is_not_counted(tmp_path, capsys):
+    """Wave-3: success was judged by rc==0 and the file existing, so a
+    segNNNN.jpg left by an earlier run (another video, same stem) passed as
+    this segment's frame when ffmpeg exited 0 without writing one (seek past
+    the last frame). The target is now deleted before each extraction."""
+    merged = [(_seg(0.0, 2.0, "first"), "Speaker A"), (_seg(99.0, 100.0, "late"), "Speaker A")]
+    out_dir = tmp_path / "frames"
+    out_dir.mkdir()
+    for i in (1, 2):
+        (out_dir / SC._frame_name(i)).write_bytes(b"STALE")
+    entries = SC.extract_segment_frames(
+        tmp_path / "v.mp4", merged, out_dir, ffmpeg=_fake_ffmpeg(tmp_path, writes=False),
+    )
+    assert [e.frame for e in entries] == ["", ""]
+    assert not (out_dir / "seg0001.jpg").exists()  # stale bytes are gone too
+    assert "failed to extract frame 1" in capsys.readouterr().err
+
+
+def test_fresh_frame_is_counted(tmp_path):
+    merged = [(_seg(0.0, 2.0, "first"), "Speaker A")]
+    out_dir = tmp_path / "frames"
+    entries = SC.extract_segment_frames(
+        tmp_path / "v.mp4", merged, out_dir, ffmpeg=_fake_ffmpeg(tmp_path, writes=True),
+    )
+    assert entries[0].frame == "seg0001.jpg"
+    assert (out_dir / "seg0001.jpg").read_bytes() == b"JPEGDATA"
