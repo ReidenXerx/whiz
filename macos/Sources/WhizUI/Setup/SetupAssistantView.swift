@@ -125,7 +125,11 @@ private struct ChecklistPage: View {
     var onDone: () -> Void
 
     private var subtitle: String {
-        guard setup.isReady else { return "Whiz needs the first three. Each one installs with a click." }
+        guard setup.isReady else {
+            return setup.isBundled
+                ? "Whiz needs a speech model: a one-time download."
+                : "Whiz needs the first three. Each one installs with a click."
+        }
         if setup.isDone(.speakers) == true, setup.isDone(.ai) == true { return "Everything is set up." }
         return "Everything needed is in place. The last two are optional extras."
     }
@@ -146,7 +150,7 @@ private struct ChecklistPage: View {
             ScrollView {
                 VStack(spacing: 10) {
                     CLIItem()
-                    ToolsItem()
+                    if setup.visibleItems.contains(.tools) { ToolsItem() }
                     ModelItem()
                     SpeakersItem()
                     AIItem()
@@ -315,7 +319,7 @@ private struct CLIItem: View {
     @EnvironmentObject private var setup: SetupModel
 
     var body: some View {
-        ChecklistItem(item: .cli, number: 1, title: "The whiz engine", optional: false,
+        ChecklistItem(item: .cli, number: setup.number(of: .cli), title: "The whiz engine", optional: false,
                       summary: summary) {
             if setup.isDone(.cli) != true {
                 HStack(spacing: 10) {
@@ -332,6 +336,9 @@ private struct CLIItem: View {
     }
 
     private var summary: String {
+        if let report = setup.report, setup.isBundled {
+            return "Built into Whiz (version \(report.version)), with whisper.cpp and the audio tools. Nothing to install."
+        }
         if let report = setup.report, let path = setup.whizExecutable?.path {
             return "Version \(report.version), at \(path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))."
         }
@@ -346,7 +353,7 @@ private struct ToolsItem: View {
     @EnvironmentObject private var setup: SetupModel
 
     var body: some View {
-        ChecklistItem(item: .tools, number: 2, title: "whisper.cpp and ffmpeg", optional: false,
+        ChecklistItem(item: .tools, number: setup.number(of: .tools), title: "whisper.cpp and ffmpeg", optional: false,
                       summary: summary) {
             if setup.isDone(.tools) == false, setup.report != nil {
                 HStack(spacing: 10) {
@@ -383,7 +390,7 @@ private struct ModelItem: View {
     @State private var choice = SpeechModelChoice.all[0]
 
     var body: some View {
-        ChecklistItem(item: .model, number: 3, title: "A speech model", optional: false,
+        ChecklistItem(item: .model, number: setup.number(of: .model), title: "A speech model", optional: false,
                       summary: summary) {
             if setup.isDone(.model) == false || setup.hasQuantizedFallback {
                 if setup.hasQuantizedFallback {
@@ -436,7 +443,7 @@ private struct SpeakersItem: View {
     @EnvironmentObject private var setup: SetupModel
 
     var body: some View {
-        ChecklistItem(item: .speakers, number: 4, title: "Speaker detection", optional: true,
+        ChecklistItem(item: .speakers, number: setup.number(of: .speakers), title: "Speaker detection", optional: true,
                       summary: setup.isDone(.speakers) == true
                         ? "Ready. Recordings are split by who is talking."
                         : "Tells voices apart and labels who said what. About 90 MB.") {
@@ -454,7 +461,7 @@ private struct AIItem: View {
     @State private var selected = ""
 
     var body: some View {
-        ChecklistItem(item: .ai, number: 5, title: "AI summaries", optional: true, summary: summary) {
+        ChecklistItem(item: .ai, number: setup.number(of: .ai), title: "AI summaries", optional: true, summary: summary) {
             if setup.isCheckingAI {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)

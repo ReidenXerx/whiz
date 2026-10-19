@@ -21,22 +21,33 @@ enum WhizLocator {
         ]
     }
 
+    /// The engine Whiz.app carries (macos/build-engine.sh), when this is
+    /// that app; nil for a bare `swift run` or a test runner.
+    static var bundledEngine: URL? {
+        Bundle.main.resourceURL?.appendingPathComponent("engine/bin/whiz")
+    }
+
     /// The first executable whiz on disk, or nil.
     ///
     /// An explicit override wins: `WHIZ_EXECUTABLE` lets a developer point the
-    /// app at a checkout without installing anything.
+    /// app at a checkout without installing anything. Then the app's own
+    /// engine, ahead of any whiz the user installed: the app was built and
+    /// tested against that one, so the version the UI talks to is never a
+    /// surprise.
     /// `candidates` is injectable for the same reason `resolve(searchDirs:)`
     /// is on the Python side: without it a test cannot tell "found the fake in
     /// PATH" from "found the real whiz in the developer's ~/.local/bin", and
     /// the host silently decides the result.
     static func find(
         environment: [String: String] = ProcessInfo.processInfo.environment,
+        bundled: URL? = bundledEngine,
         candidates: [URL] = searchPaths
     ) -> URL? {
         if let override = environment["WHIZ_EXECUTABLE"], !override.isEmpty {
             let url = URL(fileURLWithPath: (override as NSString).expandingTildeInPath)
             return isExecutable(url) ? url : nil
         }
+        if let bundled, isExecutable(bundled) { return bundled }
         if let found = candidates.first(where: isExecutable) { return found }
         // PATH last rather than first: when the app *is* launched from a shell
         // it may be richer than the list above, but it is the unreliable case.
