@@ -15,11 +15,20 @@ import PackageDescription
 // when the shared core becomes C++, a second conformance replaces
 // `CLIBackend` and the UI does not change.
 //
+// One exception, and it is not pipeline logic: `whiz-media` decodes audio
+// and grabs video frames with AVFoundation so Whiz.app can carry its engine
+// without ffmpeg. whiz still decides what to extract and when; the helper
+// is a codec behind the same argv-and-exit-status contract as ffmpeg.
+//
 // macOS 13 (Ventura) floor: the oldest release with MenuBarExtra and
 // SMAppService, and it still covers Macs back to 2017.
 let package = Package(
     name: "WhizUI",
     platforms: [.macOS(.v13)],
+    products: [
+        .executable(name: "WhizUI", targets: ["WhizUI"]),
+        .executable(name: "whiz-media", targets: ["WhizMedia"]),
+    ],
     targets: [
         .executableTarget(
             name: "WhizUI",
@@ -29,6 +38,15 @@ let package = Package(
             name: "WhizUITests",
             dependencies: ["WhizUI"],
             path: "Tests/WhizUITests"
+        ),
+        .executableTarget(
+            name: "WhizMedia",
+            path: "Sources/WhizMedia"
+        ),
+        .testTarget(
+            name: "WhizMediaTests",
+            dependencies: ["WhizMedia"],
+            path: "Tests/WhizMediaTests"
         ),
     ]
 )
