@@ -22,6 +22,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from whiz import audio as aud
 from whiz.merge import WhisperSeg
 
 
@@ -37,10 +38,10 @@ class FrameEntry:
 
 
 def find_ffmpeg(configured: str = "") -> str:
-    """Locate ffmpeg: explicit path or PATH lookup (mirrors audio.find_ffmpeg)."""
+    """Locate the media tool (mirrors audio.find_ffmpeg, whiz-media included)."""
     if configured:
         return configured
-    found = shutil.which("ffmpeg")
+    found = shutil.which("ffmpeg") or shutil.which(aud.MEDIA_HELPER)
     if not found:
         raise RuntimeError("ffmpeg not found on PATH — set ffmpeg in config or install it.")
     return found
@@ -71,7 +72,6 @@ def extract_segment_frames(
     keeps frame sizes reasonable for LLM context windows.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    scale_filter = f"scale={width}:-1" if width and width > 0 else None
 
     entries: list[FrameEntry] = []
     for i, (seg, label) in enumerate(segments, start=1):
@@ -91,7 +91,7 @@ def extract_segment_frames(
             entries.append(entry)
             continue
 
-        ok = _extract_one(video, seg.start, frame_path, ffmpeg, quality, scale_filter)
+        ok = _extract_one(video, seg.start, frame_path, ffmpeg, quality, width)
         if ok:
             entry.frame = frame_path.name
         else:
@@ -106,7 +106,7 @@ def _extract_one(
     out: Path,
     ffmpeg: str,
     quality: int,
-    scale_filter: str | None,
+    width: int,
 ) -> bool:
     """Extract a single frame at timestamp ``ts`` via seek-before-input.
 
@@ -120,17 +120,24 @@ def _extract_one(
     segment's frame (wave-3 audit). An empty file is a failure too.
     """
     out.unlink(missing_ok=True)
-    cmd = [
-        ffmpeg,
-        "-y",
-        "-ss", f"{max(0.0, ts):.3f}",
-        "-i", str(video),
-        "-frames:v", "1",
-        "-q:v", str(quality),
-    ]
-    if scale_filter:
-        cmd += ["-vf", scale_filter]
-    cmd.append(str(out))
+    scale = width if width and width > 0 else 0
+    if aud.is_media_helper(ffmpeg):
+        # whiz-media fails (rc 1) past the last frame rather than exiting 0
+        # with nothing written; the file checks below hold either way.
+        cmd = [ffmpeg, "frame", str(video), f"{max(0.0, ts):.3f}", str(out),
+               "--quality", str(quality), "--width", str(scale)]
+    else:
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-ss", f"{max(0.0, ts):.3f}",
+            "-i", str(video),
+            "-frames:v", "1",
+            "-q:v", str(quality),
+        ]
+        if scale:
+            cmd += ["-vf", f"scale={scale}:-1"]
+        cmd.append(str(out))
 
     proc = subprocess.run(cmd, capture_output=True, text=True)
     return proc.returncode == 0 and out.exists() and out.stat().st_size > 0

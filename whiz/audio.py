@@ -1,8 +1,14 @@
-"""Audio extraction via ffmpeg.
+"""Audio extraction via ffmpeg (or Whiz.app's whiz-media).
 
 whisper-cli only decodes audio files; it cannot demux video containers
 like .mov/.mp4. This module extracts a 16 kHz mono PCM WAV — the format
 Whisper natively expects — so there are no resampling surprises.
+
+The tool is ffmpeg whenever one is installed. Without it, ``whiz-media``
+stands in: the AVFoundation helper Whiz.app bundles so a buyer needs no
+Homebrew (macos/Sources/WhizMedia). Same WAV, same marker, same exit-status
+contract; it reads what macOS reads (mov, mp4, m4a, mp3, wav…), not mkv
+or webm.
 """
 
 from __future__ import annotations
@@ -19,14 +25,23 @@ AUDIO_EXTS = {".flac", ".mp3", ".ogg", ".wav", ".m4a", ".aac", ".opus", ".wma"}
 VIDEO_EXTS = {".mov", ".mp4", ".mkv", ".avi", ".webm", ".m4v", ".mpg", ".mpeg", ".ts"}
 
 
+# The bundled stand-in for ffmpeg, found on PATH after ffmpeg itself.
+MEDIA_HELPER = "whiz-media"
+
+
 def find_ffmpeg(configured: str = "") -> str:
-    """Locate ffmpeg: explicit path or PATH lookup."""
+    """Locate the media tool: explicit path, ffmpeg on PATH, then whiz-media."""
     if configured:
         return configured
-    found = shutil.which("ffmpeg")
+    found = shutil.which("ffmpeg") or shutil.which(MEDIA_HELPER)
     if not found:
         raise RuntimeError("ffmpeg not found on PATH — install it (brew install ffmpeg) or set ffmpeg in config.")
     return found
+
+
+def is_media_helper(tool: str) -> bool:
+    """True if ``tool`` is whiz-media, which takes its own argv, not ffmpeg's."""
+    return Path(tool).name == MEDIA_HELPER
 
 
 def needs_extraction(path: Path) -> bool:
@@ -138,27 +153,32 @@ def extract_audio(
             "refusing to overwrite it."
         )
 
-    cmd = [
-        ffmpeg,
-        "-y",
-        "-i", str(src),
-        "-vn",            # no video
-        "-ac", "1",       # mono
-        "-ar", "16000",   # 16 kHz, Whisper's native rate
-        "-c:a", "pcm_s16le",
-        "-metadata", f"comment={_MARKER.decode()}{src.name}",
-        str(out),
-    ]
+    comment = f"{_MARKER.decode()}{src.name}"
+    if is_media_helper(ffmpeg):
+        cmd = [ffmpeg, "audio", str(src), str(out), "--comment", comment]
+    else:
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-i", str(src),
+            "-vn",            # no video
+            "-ac", "1",       # mono
+            "-ar", "16000",   # 16 kHz, Whisper's native rate
+            "-c:a", "pcm_s16le",
+            "-metadata", f"comment={comment}",
+            str(out),
+        ]
     if dry_run:
         print("DRY-RUN audio extraction:")
         print("  " + " ".join(cmd))
         return out
 
+    tool = Path(ffmpeg).name
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError(
-            f"ffmpeg failed (exit {proc.returncode}):\n{proc.stderr.strip()}"
+            f"{tool} failed (exit {proc.returncode}):\n{proc.stderr.strip()}"
         )
     if not out.exists():
-        raise RuntimeError(f"ffmpeg reported success but {out} was not created")
+        raise RuntimeError(f"{tool} reported success but {out} was not created")
     return out

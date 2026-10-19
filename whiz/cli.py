@@ -225,6 +225,16 @@ def _diarization_available(config: cfg.Config) -> bool:
     return True
 
 
+def _bundled() -> bool:
+    """True when this whiz is the engine inside Whiz.app.
+
+    The app's launcher (macos/build-engine.sh) sets ``WHIZ_BUNDLED=1``.
+    That Python lives in a signed bundle: nothing may be installed into it,
+    and updating it means updating the app.
+    """
+    return os.environ.get("WHIZ_BUNDLED") == "1"
+
+
 def _install_sherpa_onnx() -> bool:
     """Install the ``diarize`` extra (sherpa-onnx) into the running venv.
 
@@ -241,6 +251,13 @@ def _install_sherpa_onnx() -> bool:
     whiz 'whiz[diarize]'`` is the equivalent manual command (see README).
     """
     import importlib
+
+    if _bundled():
+        # Whiz.app ships sherpa-onnx; missing means a damaged bundle, and a
+        # pip install would break its signature rather than fix it.
+        ui.status("Warning: speaker detection is missing from this copy of Whiz.app.", kind="warn",
+                  detail="Reinstall Whiz.app (drag a fresh copy to Applications).")
+        return False
 
     ui.status("Speakers: sherpa-onnx missing — installing the diarize extra now", kind="info")
     ui.muted("One-time setup (a ~90 MB wheel + model download on first run). Opt out with: --no-auto-diarization-setup")
@@ -1689,7 +1706,7 @@ def _doctor_report(config: cfg.Config, *, check_ai: bool = False) -> dict:
     speakers and AI are optional extras with their own ``ok``.
     """
     whisper = _tool_path(config.whisper_cli, "whisper-cli", "whisper")
-    ffmpeg = _tool_path(config.ffmpeg, "ffmpeg")
+    ffmpeg = _tool_path(config.ffmpeg, "ffmpeg", aud.MEDIA_HELPER)
 
     model_ref = config.model
     model_path = M.resolve(model_ref, config) if model_ref else M.pick_best(config)
@@ -1744,6 +1761,8 @@ def _doctor_report(config: cfg.Config, *, check_ai: bool = False) -> dict:
                          "fix": "whiz setup speakers"},
         },
         "ai": ai,
+        # Inside Whiz.app the tools ship with the app: nothing to brew.
+        "bundled": _bundled(),
         "brew": _tool_path("", "brew") or next(
             (b for b in ("/opt/homebrew/bin/brew", "/usr/local/bin/brew") if Path(b).exists()), None),
     }
@@ -2900,6 +2919,11 @@ def cmd_upgrade(args: argparse.Namespace) -> int:
     surprised by a download they never asked for.
     """
     ui.header("whiz", "upgrade")
+
+    if _bundled():
+        ui.status("This whiz is part of Whiz.app; it updates with the app.", kind="warn",
+                  detail="Install the new version of Whiz.app to upgrade.")
+        return 1
 
     installer = _tool_installer()
     if installer is None:

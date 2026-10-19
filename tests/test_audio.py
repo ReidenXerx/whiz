@@ -89,6 +89,48 @@ def test_extract_audio_writes_the_marker(tmp_path, monkeypatch):
     assert seen["cmd"][i + 1] == "comment=whiz-extracted:talk.mov"
 
 
+def test_find_ffmpeg_prefers_ffmpeg_then_the_bundled_helper(monkeypatch):
+    on_path = {"ffmpeg", "whiz-media"}
+    monkeypatch.setattr(aud.shutil, "which", lambda name: f"/bin/{name}" if name in on_path else None)
+    assert aud.find_ffmpeg() == "/bin/ffmpeg"
+    assert aud.find_ffmpeg("/opt/ff/ffmpeg") == "/opt/ff/ffmpeg"
+    on_path.discard("ffmpeg")
+    assert aud.find_ffmpeg() == "/bin/whiz-media"
+    on_path.clear()
+    with pytest.raises(RuntimeError, match="ffmpeg not found"):
+        aud.find_ffmpeg()
+
+
+def test_extract_audio_with_whiz_media_passes_its_own_argv(tmp_path, monkeypatch):
+    """whiz-media takes `audio <in> <out> --comment <marker>`, and the WAV it
+    writes must still read as whiz's own extraction."""
+    video = tmp_path / "talk.mov"
+    video.write_bytes(b"video")
+    seen = {}
+
+    def fake_run(cmd, capture_output, text):
+        seen["cmd"] = cmd
+        Path(cmd[3]).write_bytes(_riff(comment=cmd[5].encode()))
+        return type("P", (), {"returncode": 0, "stderr": ""})()
+
+    monkeypatch.setattr(aud.subprocess, "run", fake_run)
+    out = aud.extract_audio(video, "/Applications/Whiz.app/Contents/Resources/engine/bin/whiz-media")
+    assert seen["cmd"][1:] == ["audio", str(video), str(tmp_path / "talk.wav"),
+                               "--comment", "whiz-extracted:talk.mov"]
+    assert aud.is_whiz_extracted(out, video)
+
+
+def test_extract_audio_failure_names_the_tool_that_failed(tmp_path, monkeypatch):
+    video = tmp_path / "talk.mkv"
+    video.write_bytes(b"video")
+    monkeypatch.setattr(aud.subprocess, "run", lambda cmd, capture_output, text: type(
+        "P", (), {"returncode": 1, "stderr": "whiz-media: macOS cannot read talk.mkv"})())
+    with pytest.raises(RuntimeError, match=r"^whiz-media failed \(exit 1\):\nwhiz-media: macOS cannot read"):
+        aud.extract_audio(video, "/x/whiz-media")
+    with pytest.raises(RuntimeError, match=r"^ffmpeg failed"):
+        aud.extract_audio(video, "/usr/bin/ffmpeg")
+
+
 def test_is_diarization_ready(tmp_path):
     good = tmp_path / "a.wav"
     good.write_bytes(_riff())
