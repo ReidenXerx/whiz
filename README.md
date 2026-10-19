@@ -114,13 +114,25 @@ whiz models download turbo      # ggml-large-v3-turbo.bin — unquantized (NS-15
 
 ## macOS app
 
-`macos/` holds a native SwiftUI front-end for the CLI (macOS 13+). It runs
-the installed `whiz` for every transcription, so install the CLI first; then:
+`macos/` holds a native SwiftUI front-end for the CLI (macOS 13.3+, Apple
+silicon). Whiz.app carries its own engine, so it needs nothing installed:
+a private Python with whiz and speaker detection, whisper.cpp built with
+Metal, and `whiz-media`, which reads audio and video frames with macOS's
+own decoders in place of ffmpeg. Models download on first launch. Building
+it needs the Xcode command line tools, `cmake` and `uv`:
 
 ```bash
 cd macos && ./build-app.sh            # → macos/dist/Whiz.app (ad-hoc signed, this Mac only)
 cp -R dist/Whiz.app /Applications/
 ```
+
+`build-engine.sh` (run by `build-app.sh`) pins every engine part (Python,
+whisper.cpp by release hash, the Python packages by hash in
+`bundle/engine-requirements.txt`) and caches downloads and the whisper.cpp
+build in `macos/.engine/`. The app prefers its own engine over an installed
+`whiz`; `WHIZ_EXECUTABLE=/path/to/whiz` points it elsewhere. `whiz-media`
+reads what macOS reads (mov, mp4, m4a, mp3, wav…); for mkv or webm, install
+ffmpeg and whiz uses it instead.
 
 To give the app to other Macs, sign it with a Developer ID and notarize the
 DMG (needs an Apple Developer Program membership; `build-dmg.sh` explains
@@ -136,7 +148,7 @@ WHIZ_NOTARY_PROFILE=whiz-notary ./build-dmg.sh   # → signed, notarized, staple
 <img src="docs/assets/app-setup.png" alt="The Setup Assistant on a fresh Mac: the whiz engine is installed; whisper.cpp offers Install with Homebrew; the speech model step offers Turbo, Large v3 or Small to download." width="49%">
 </p>
 
-- **Setup Assistant:** on first launch, a checklist of what Whiz needs (the CLI, whisper.cpp and ffmpeg, a speech model, optionally speaker detection and an AI model), each installed with one click through Homebrew, pipx and `whiz`, with progress. Without Homebrew, *Install Homebrew…* runs its official installer in Terminal (it asks for your password); coming back to the app checks again. A quantized speech model that is only there by default is flagged, with the full-quality download offered. It reopens from the app menu.
+- **Setup Assistant:** on first launch, a checklist of what Whiz needs: a speech model, and optionally speaker detection and an AI model, each downloaded with one click, with progress. A Whiz.app built without its engine (a bare `swift run`) also lists the CLI and whisper.cpp and ffmpeg, installed through Homebrew and pipx. Without Homebrew, *Install Homebrew…* runs its official installer in Terminal (it asks for your password); coming back to the app checks again. A quantized speech model that is only there by default is flagged, with the full-quality download offered. It reopens from the app menu.
 - **Sidebar:** New Transcription, the run in progress, and recent runs (right-click to re-run or remove).
 - **New Transcription:** drop a recording (or ⌘O, or Finder's *Open With*), choose language, speakers, names, frames and AI summary, then press Return.
 - **While it runs:** a step list with progress and time left, a card that asks you to name unknown speakers, and the full log under *Details*.
