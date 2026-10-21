@@ -131,6 +131,15 @@ def test_extract_audio_failure_names_the_tool_that_failed(tmp_path, monkeypatch)
         aud.extract_audio(video, "/usr/bin/ffmpeg")
 
 
+def test_what_needs_decoding_before_whisper():
+    for name in ("a.mov", "a.mp4", "a.m4a", "a.AAC", "a.opus", "a.wma"):
+        assert aud.needs_decoding(Path(name)), name
+    for name in ("a.wav", "a.mp3", "a.flac", "a.ogg"):
+        assert not aud.needs_decoding(Path(name)), name
+    # needs_extraction keeps meaning "a video": frames and speaker auto-detection.
+    assert not aud.needs_extraction(Path("a.m4a")) and aud.needs_extraction(Path("a.mov"))
+
+
 def test_is_diarization_ready(tmp_path):
     good = tmp_path / "a.wav"
     good.write_bytes(_riff())
