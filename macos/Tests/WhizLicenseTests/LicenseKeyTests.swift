@@ -82,6 +82,23 @@ struct LicenseKeyTests {
         }
     }
 
+    @Test("the store's keys verify here, and both issuers encode the same payload (store/test/vector.js)")
+    func sharedVector() throws {
+        // Test-only seed: bytes 1…32. The store's JS signer produced `key`.
+        let seed = Data(base64Encoded: "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=")!
+        let signer = try Curve25519.Signing.PrivateKey(rawRepresentation: seed)
+        #expect(signer.publicKey.rawRepresentation.base64EncodedString() == "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=")
+        let license = License(id: "txn_01testvector00000000000000", name: "Олена O'Brien / Ølsen",
+                              issued: "2026-10-21", major: 1)
+        let key = "WHIZ1-eyJpZCI6InR4bl8wMXRlc3R2ZWN0b3IwMDAwMDAwMDAwMDAwMCIsImlzc3VlZCI6IjIwMjYtMTAtMjEiLCJtYWpvciI6MSwibmFtZSI6ItCe0LvQtdC90LAgTydCcmllbiAvIMOYbHNlbiIsInByb2R1Y3QiOiJ3aGl6In0.i0o0drm-XCCvUlxp191W7KwE0uuxs6DAtCipVpACyDZmgityrQZ6PdNcoJgA58OO6gZ00lInoYBoCM7YtqLiAg"
+        #expect(try LicenseKey.verify(key, publicKey: signer.publicKey, appMajor: 1) == license)
+        // CryptoKit signs with added randomness, so the signatures differ;
+        // the payload bytes must not, and this side's key must verify too.
+        let ours = try LicenseKey.issue(license, signingKey: signer)
+        #expect(ours.split(separator: ".").first == key.split(separator: ".").first)
+        #expect(try LicenseKey.verify(ours, publicKey: signer.publicKey, appMajor: 1) == license)
+    }
+
     @Test("the public key built into the app is a valid Ed25519 key")
     func builtInKey() {
         #expect(LicenseKey.publicKey.rawRepresentation.count == 32)

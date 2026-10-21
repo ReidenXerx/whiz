@@ -1,0 +1,9 @@
+{
+  "name": "whiz-store",
+  "private": true,
+  "type": "module",
+  "description": "Paddle payment → Whiz license key (Cloudflare Worker).",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}

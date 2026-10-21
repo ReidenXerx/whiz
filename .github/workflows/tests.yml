@@ -52,3 +52,19 @@ jobs:
         run: swift test
       - name: Release build
         run: swift build -c release
+
+  store:
+    # The Paddle → license-key Worker. Its signer shares a test vector with
+    # the Swift LicenseKeyTests, so a drift on either side fails CI.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: store
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: node --test
+        run: npm test
