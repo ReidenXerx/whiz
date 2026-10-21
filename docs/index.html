@@ -871,7 +871,9 @@ Carol    4 recordings</pre>
     }
 
     function show(license) {
-      status.textContent = "Your license key, for " + license.name + ":";
+      status.textContent = mode === "sandbox"
+        ? "Sandbox test key, for " + license.name + " (Whiz verifies it, then refuses it as a test purchase):"
+        : "Your license key, for " + license.name + ":";
       keyBox.querySelector("code").textContent = license.key;
       keyBox.hidden = false;
       help.hidden = false;
