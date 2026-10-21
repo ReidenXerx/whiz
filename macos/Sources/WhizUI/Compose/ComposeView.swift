@@ -66,7 +66,7 @@ struct ComposeView: View {
                     Text("or click to choose a file  ·  ⌘O")
                         .foregroundStyle(.secondary)
                 }
-                Text("MOV, MP4, M4A, MP3, WAV and anything else ffmpeg reads")
+                Text("MOV, MP4, M4A, MP3, WAV and other common formats")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }

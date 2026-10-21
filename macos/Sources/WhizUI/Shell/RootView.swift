@@ -7,6 +7,7 @@ struct RootView: View {
     @EnvironmentObject private var model: TranscriptionViewModel
     @EnvironmentObject private var settings: SettingsModel
     @EnvironmentObject private var setup: SetupModel
+    @EnvironmentObject private var license: LicenseModel
     @ObservedObject private var router = FileOpenRouter.shared
     /// Set once the assistant has been finished or skipped; until then it
     /// opens on launch.
@@ -20,6 +21,10 @@ struct RootView: View {
             detail
                 .frame(minWidth: 560)
                 .background(Color(nsColor: .windowBackgroundColor))
+                // On the detail, not beside the setup sheet: one view, one sheet.
+                .sheet(isPresented: $license.isActivationPresented) {
+                    ActivationView().environmentObject(license)
+                }
         }
         .navigationTitle(title)
         .fileImporter(isPresented: $model.isPickingFile,
@@ -132,6 +137,7 @@ private struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        .safeAreaInset(edge: .bottom, spacing: 0) { TrialFooter() }
         .toolbar {
             ToolbarItem {
                 Button {

@@ -111,12 +111,17 @@ final class TranscriptionViewModel: ObservableObject {
     /// developer's real whiz (which would run a real pipeline mid-suite, and
     /// fail on a machine without one).
     private let makeBackend: () throws -> CLIBackend
+    /// The trial and license gate; nil runs ungated (tests that are not
+    /// about licensing).
+    private let license: LicenseModel?
 
     init(lastRunStore: LastRunStore = LastRunStore(),
          optionsStore: OptionsStore = OptionsStore(),
+         license: LicenseModel? = nil,
          makeBackend: @escaping () throws -> CLIBackend = { try CLIBackend() }) {
         self.lastRunStore = lastRunStore
         self.optionsStore = optionsStore
+        self.license = license
         self.makeBackend = makeBackend
         lastRun = lastRunStore.load()
         recentRuns = lastRunStore.loadHistory()
@@ -197,6 +202,8 @@ final class TranscriptionViewModel: ObservableObject {
 
     func start() {
         guard !isRunning, let input = inputURL else { return }
+        // Past the trial this opens the license sheet instead.
+        if let license, !license.requestTranscription() { return }
 
         let resolved: CLIBackend
         do {
@@ -284,6 +291,7 @@ final class TranscriptionViewModel: ObservableObject {
             // A clean run with results now lives in history: show it there.
             // Failures and stops stay on the live view, with the reason.
             if outcome == .finished, !artifacts.isEmpty {
+                license?.recordTranscription()
                 liveRunInput = nil
                 if selection == .live { selection = .run(input.path) }
             }

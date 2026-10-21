@@ -46,6 +46,8 @@ struct SettingsView: View {
                         .tabItem { Label("AI", systemImage: "sparkles") }
                     AboutSettings()
                         .tabItem { Label("whiz", systemImage: "terminal") }
+                    LicenseSettings()
+                        .tabItem { Label("License", systemImage: "checkmark.seal") }
                 }
             }
         }
@@ -371,7 +373,9 @@ private struct AboutSettings: View {
                             .truncationMode(.middle)
                     }
                 }
-                Text("The app runs this whiz for every transcription. Update it with `whiz upgrade` in Terminal.")
+                Text(isBundled
+                     ? "Built into Whiz: it updates with the app."
+                     : "The app runs this whiz for every transcription. Update it with `whiz upgrade` in Terminal.")
                     .font(.caption).foregroundStyle(.secondary)
                 Button("Open Setup Assistant…") { setup.isPresented = true }
             }
@@ -400,5 +404,9 @@ private struct AboutSettings: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    private var isBundled: Bool {
+        settings.executable?.path.contains(".app/Contents/Resources/engine/") == true
     }
 }
