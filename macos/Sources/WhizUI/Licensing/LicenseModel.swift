@@ -24,7 +24,7 @@ final class LicenseModel: ObservableObject {
 
     static let freeTranscriptions = 5
     /// Where "Buy Whiz" goes.
-    static let purchaseURL = URL(string: "https://duduphudu.app/whiz")!
+    static let purchaseURL = URL(string: "https://duduphudu.app/whiz/#buy")!
 
     static let licenseDefault = "dev.reidenxerx.whiz.license"
     static let trialUsedDefault = "dev.reidenxerx.whiz.trialUsed"
