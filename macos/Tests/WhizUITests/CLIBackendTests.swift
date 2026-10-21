@@ -133,8 +133,20 @@ struct WhizLocatorTests {
     func installedLocationWins() {
         // pipx's ~/.local/bin should beat whatever PATH happens to hold.
         let installed = URL(fileURLWithPath: "/bin/sh")
-        let found = WhizLocator.find(environment: ["PATH": "/usr/bin"], candidates: [installed])
+        let found = WhizLocator.find(environment: ["PATH": "/usr/bin"], bundled: nil, candidates: [installed])
         #expect(found?.path == "/bin/sh")
+    }
+
+    @Test("the app's own engine wins over an installed whiz; the override still wins over both")
+    func bundledEngineWins() {
+        let bundled = URL(fileURLWithPath: "/bin/sh")
+        let installed = URL(fileURLWithPath: "/bin/ls")
+        #expect(WhizLocator.find(environment: [:], bundled: bundled, candidates: [installed])?.path == "/bin/sh")
+        #expect(WhizLocator.find(environment: ["WHIZ_EXECUTABLE": "/bin/ls"], bundled: bundled,
+                                 candidates: [])?.path == "/bin/ls")
+        // A missing engine (swift run, a damaged copy) falls through to discovery.
+        #expect(WhizLocator.find(environment: [:], bundled: URL(fileURLWithPath: "/nope/engine/bin/whiz"),
+                                 candidates: [installed])?.path == "/bin/ls")
     }
 
     @Test("an explicit override wins over discovery")
@@ -163,7 +175,7 @@ struct WhizLocatorTests {
         // No candidates, so PATH is the only source — otherwise a real whiz in
         // the developer's ~/.local/bin answers instead and the test passes for
         // the wrong reason.
-        let found = WhizLocator.find(environment: ["PATH": directory.path], candidates: [])
+        let found = WhizLocator.find(environment: ["PATH": directory.path], bundled: nil, candidates: [])
         #expect(found?.path == fake.path)
     }
 }

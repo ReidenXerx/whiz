@@ -76,6 +76,31 @@ struct SetupModelTests {
         #expect(!chosen.hasQuantizedFallback)
     }
 
+    @Test("inside Whiz.app the tools are not a step, and the checklist renumbers")
+    func bundledEngine() async throws {
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        func setup(bundled: String) async throws -> SetupModel {
+            let whiz = try script(directory, "whiz-\(bundled)", """
+            printf '{"version": "1", "checks": {"whisper_cli": {"ok": true}, "ffmpeg": {"ok": true}, "model": {"ok": false}}, "ai": {"configured": false, "base_url": "", "model": ""}, \(bundled)"ready": false}\\n'
+            exit 1
+            """)
+            let model = SetupModel(locateWhiz: { whiz }, locateTool: { _ in nil })
+            await model.refresh()
+            return model
+        }
+        let app = try await setup(bundled: "\"bundled\": true, ")
+        #expect(app.isBundled)
+        #expect(app.visibleItems == [.cli, .model, .speakers, .ai])
+        #expect(app.number(of: .model) == 2 && app.number(of: .ai) == 4)
+        #expect(app.isDone(.cli) == true && app.isDone(.model) == false)
+        // A whiz from before the bundled engine says nothing: the full list.
+        let installed = try await setup(bundled: "")
+        #expect(!installed.isBundled)
+        #expect(installed.visibleItems == SetupItem.allCases)
+        #expect(installed.number(of: .model) == 3)
+    }
+
     @Test("a missing CLI is not ready and points at step one")
     func missingCLI() async {
         let setup = SetupModel(locateWhiz: { nil }, locateTool: { _ in nil })

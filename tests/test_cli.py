@@ -2339,6 +2339,21 @@ def test_upgrade_reports_a_failed_inject(monkeypatch):
     assert cli.cmd_upgrade(SimpleNamespace()) == 1
 
 
+def test_upgrade_inside_the_app_points_at_the_app(monkeypatch, capsys):
+    monkeypatch.setenv("WHIZ_BUNDLED", "1")
+    monkeypatch.setattr(cli, "_run_live", lambda cmd: pytest.fail("must not reinstall a bundled engine"))
+    assert cli.cmd_upgrade(SimpleNamespace()) == 1
+    # Rich folds long lines at the console width; compare without whitespace.
+    assert "itupdateswiththeapp" in "".join(capsys.readouterr().err.split())
+
+
+def test_install_sherpa_never_pip_installs_into_the_app(monkeypatch):
+    """A pip install into Whiz.app's signed Python would break the bundle."""
+    monkeypatch.setenv("WHIZ_BUNDLED", "1")
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: pytest.fail("must not pip install"))
+    assert cli._install_sherpa_onnx() is False
+
+
 def test_tool_installer_detection(monkeypatch):
     monkeypatch.setattr(cli.sys, "prefix", "/Users/x/.local/share/uv/tools/whiz")
     assert cli._tool_installer() == "uv"
@@ -2353,8 +2368,8 @@ def test_run_live_missing_tool_is_not_a_traceback(monkeypatch):
 # ---------- doctor / setup (onboarding contract) ----------
 
 def _doctor_env(monkeypatch, tmp_path, *, whisper=True, ffmpeg=True, model=True,
-                model_file="ggml-large-v3-turbo.bin"):
-    tools = {"whisper-cli": whisper, "ffmpeg": ffmpeg, "brew": True}
+                model_file="ggml-large-v3-turbo.bin", media_helper=False):
+    tools = {"whisper-cli": whisper, "ffmpeg": ffmpeg, "whiz-media": media_helper, "brew": True}
     monkeypatch.setattr(cli.shutil, "which",
                         lambda name: f"/bin/{name}" if tools.get(name) else None)
     bin_path = tmp_path / model_file
@@ -2378,6 +2393,15 @@ def test_doctor_report_ready_when_the_three_essentials_exist(monkeypatch, tmp_pa
     assert report["checks"]["vad_model"]["ok"] is False
     assert report["ai"] == {"configured": False, "base_url": "http://x/v1", "model": ""}
     assert report["brew"] == "/bin/brew"
+
+
+def test_doctor_counts_the_bundled_media_helper_as_ffmpeg(monkeypatch, tmp_path):
+    _doctor_env(monkeypatch, tmp_path, ffmpeg=False, media_helper=True)
+    monkeypatch.setenv("WHIZ_BUNDLED", "1")
+    report = cli._doctor_report(cli.cfg.load())
+    assert report["checks"]["ffmpeg"] == {"ok": True, "path": "/bin/whiz-media", "fix": "brew install ffmpeg"}
+    assert report["ready"] is True
+    assert report["bundled"] is True
 
 
 @pytest.mark.parametrize("missing", ["whisper", "ffmpeg", "model"])

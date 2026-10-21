@@ -14,6 +14,8 @@ macos/build/
 # moved to mynah with its submodule. Nothing in whiz builds or reads it; an old
 # checkout can still hold ~60 MB of it, which `git add -A` must not pick up.
 macos/vendor/
+# build-engine.sh's cache: downloads, the whisper.cpp build, the staged engine.
+macos/.engine/
 *.xcodeproj/
 *.xcworkspace/
 # Per-user Xcode state written into the package when it is opened in the IDE.

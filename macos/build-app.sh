@@ -3,9 +3,11 @@
 # build-app.sh — assemble Whiz.app from a release build.
 #
 # One command between "the tests pass" and "the app is in /Applications":
-# builds the release binary, copies the bundle directory around it, stamps
-# the version from pyproject.toml (one version for the project, not two),
-# and codesigns.
+# builds the release binary, copies the bundle directory around it, puts the
+# transcription engine inside (build-engine.sh: Python + whiz, whisper.cpp,
+# whiz-media — so the app needs nothing installed), stamps the version from
+# pyproject.toml (one version for the project, not two), and codesigns every
+# binary in it.
 #
 # Signing:
 #   default             ad-hoc (`codesign --sign -`), no identity needed.
@@ -37,6 +39,9 @@ CONTENTS="$APP/Contents"
 VERSION="$(/usr/bin/awk -F '"' '/^version = / {print $2}' "$REPO_ROOT/pyproject.toml")"
 [ -n "$VERSION" ] || { echo "build-app.sh: could not read version from pyproject.toml" >&2; exit 1; }
 
+"$SCRIPT_DIR/build-engine.sh"
+ENGINE="$MACOS_DIR/.engine/stage/engine"
+
 echo "Building $APP_NAME $VERSION (release)…"
 cd "$MACOS_DIR"
 swift build -c release --disable-sandbox >/dev/null
@@ -48,6 +53,9 @@ mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 
 cp "$BINARY" "$CONTENTS/MacOS/$APP_NAME"
 cp "$MACOS_DIR/bundle/Info.plist" "$CONTENTS/Info.plist"
+# Resources/engine, not MacOS/: on a case-insensitive disk MacOS/whiz and
+# MacOS/Whiz are one file. The app finds it there (WhizLocator.bundledEngine).
+cp -R "$ENGINE" "$CONTENTS/Resources/engine"
 
 # The icon ships in the bundle directory so a fresh clone has it; a missing
 # icns is a warning, not a failure — the app still runs, it just looks
@@ -63,9 +71,30 @@ fi
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$CONTENTS/Info.plist"
 
 # --force because a previous build may have left a stale signature on a
-# copied bundle. No entitlements: the app only runs whiz as a child process
-# and reads the files whiz writes, which the hardened runtime allows.
+# copied bundle. No entitlements: the app runs the engine as child
+# processes and reads the files they write, which the hardened runtime
+# allows, and every library the bundled Python loads carries the same
+# signature, which library validation requires.
+#
+# Inside out: each Mach-O in the engine first (the interpreter, its
+# extension modules, onnxruntime, whisper-cli, whiz-media), the app last,
+# sealing them. Notarization rejects any binary signed without the
+# hardened runtime and a timestamp, so they get the same flags as the app.
 IDENTITY="${WHIZ_SIGN_IDENTITY:-}"
+if [ -n "$IDENTITY" ]; then
+  SIGN=(codesign --force --options runtime --timestamp --sign "$IDENTITY")
+else
+  SIGN=(codesign --force --sign -)
+fi
+count=0
+while IFS= read -r -d '' file; do
+  if file -b "$file" | grep -q '^Mach-O'; then
+    "${SIGN[@]}" "$file" 2>/dev/null || { echo "build-app.sh: could not sign $file" >&2; exit 1; }
+    count=$((count + 1))
+  fi
+done < <(find "$CONTENTS/Resources/engine" -type f \( -perm -u+x -o -name '*.so' -o -name '*.dylib' \) -print0)
+echo "Signed $count engine binaries."
+
 if [ -n "$IDENTITY" ]; then
   codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
   codesign --verify --strict "$APP"

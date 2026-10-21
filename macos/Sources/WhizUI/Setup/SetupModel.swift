@@ -28,6 +28,9 @@ struct DoctorReport: Decodable, Equatable, Sendable {
     var checks: [String: Check]
     var ai: AI
     var brew: String?
+    /// whiz is the engine inside Whiz.app: whisper.cpp and the media tool
+    /// ship with it. Absent from a whiz older than the bundled engine.
+    var bundled: Bool?
     var ready: Bool
 
     func check(_ key: String) -> Check? { checks[key] }
@@ -120,6 +123,19 @@ final class SetupModel: ObservableObject {
     }
 
     // MARK: - State
+
+    /// The engine came with the app, so there is nothing to install for it.
+    var isBundled: Bool { report?.bundled == true }
+
+    /// The checklist, numbered in this order. Inside Whiz.app "whisper.cpp
+    /// and ffmpeg" is not a step: both ship with the engine.
+    var visibleItems: [SetupItem] {
+        isBundled ? SetupItem.allCases.filter { $0 != .tools } : SetupItem.allCases
+    }
+
+    func number(of item: SetupItem) -> Int {
+        (visibleItems.firstIndex(of: item) ?? 0) + 1
+    }
 
     var hasBrew: Bool { locateTool("brew") != nil }
     var hasPipx: Bool { locateTool("pipx") != nil }

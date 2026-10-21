@@ -149,3 +149,50 @@ def test_fresh_frame_is_counted(tmp_path):
     )
     assert entries[0].frame == "seg0001.jpg"
     assert (out_dir / "seg0001.jpg").read_bytes() == b"JPEGDATA"
+
+
+def _capture_frame_argv(monkeypatch, tool, width):
+    seen = {}
+
+    def fake_run(cmd, capture_output, text):
+        seen["cmd"] = cmd
+        out = Path(cmd[4] if SC.aud.is_media_helper(tool) else cmd[-1])
+        out.write_bytes(b"jpeg")
+        return type("P", (), {"returncode": 0})()
+
+    monkeypatch.setattr(SC.subprocess, "run", fake_run)
+    return seen
+
+
+def test_ffmpeg_frame_argv_is_unchanged(tmp_path, monkeypatch):
+    out = tmp_path / "seg0001.jpg"
+    seen = _capture_frame_argv(monkeypatch, "ffmpeg", 1280)
+    assert SC._extract_one(Path("/v/talk.mov"), 12.5, out, "ffmpeg", 2, 1280)
+    assert seen["cmd"] == ["ffmpeg", "-y", "-ss", "12.500", "-i", "/v/talk.mov", "-frames:v", "1",
+                           "-q:v", "2", "-vf", "scale=1280:-1", str(out)]
+    assert SC._extract_one(Path("/v/talk.mov"), -1, out, "ffmpeg", 2, 0)
+    assert seen["cmd"] == ["ffmpeg", "-y", "-ss", "0.000", "-i", "/v/talk.mov", "-frames:v", "1",
+                           "-q:v", "2", str(out)]
+
+
+def test_whiz_media_frame_argv(tmp_path, monkeypatch):
+    out = tmp_path / "seg0001.jpg"
+    tool = "/Applications/Whiz.app/Contents/Resources/engine/bin/whiz-media"
+    seen = _capture_frame_argv(monkeypatch, tool, 1280)
+    assert SC._extract_one(Path("/v/talk.mov"), 12.5, out, tool, 2, 1280)
+    assert seen["cmd"] == [tool, "frame", "/v/talk.mov", "12.500", str(out), "--quality", "2", "--width", "1280"]
+    assert SC._extract_one(Path("/v/talk.mov"), 3, out, tool, 5, 0)
+    assert seen["cmd"][-4:] == ["--quality", "5", "--width", "0"]
+
+
+def test_whiz_media_failure_past_the_end_is_a_missing_frame(tmp_path, monkeypatch):
+    out = tmp_path / "seg0009.jpg"
+    out.write_bytes(b"stale frame of an older video")
+    monkeypatch.setattr(SC.subprocess, "run", lambda cmd, capture_output, text: type("P", (), {"returncode": 1})())
+    assert not SC._extract_one(Path("/v/talk.mov"), 9999, out, "/x/whiz-media", 2, 1280)
+    assert not out.exists()
+
+
+def test_find_ffmpeg_falls_back_to_whiz_media(monkeypatch):
+    monkeypatch.setattr(SC.shutil, "which", lambda name: "/e/bin/whiz-media" if name == "whiz-media" else None)
+    assert SC.find_ffmpeg() == "/e/bin/whiz-media"
