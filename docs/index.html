@@ -259,6 +259,15 @@
   }
   .nav .back:hover { opacity: 1; border-color: currentColor; }
   .nav .back span { line-height: 0; font-size: 1.1em; }
+  /* ------------------------------------------------------------ mac app */
+  .shot { width: 100%; height: auto; border-radius: 10px; border: 1px solid var(--rule); box-shadow: 0 18px 40px -24px rgba(0,0,0,.45); }
+  .price { margin-top: 22px; padding: 20px 22px; border: 1px solid var(--rule); border-radius: 12px; background: var(--surface); }
+  .price .amount { font: 800 2.4rem/1 var(--display); letter-spacing: -.03em; }
+  .price .amount small { font: 500 .95rem/1 var(--body); color: var(--muted); letter-spacing: 0; margin-left: 6px; }
+  .price ul { margin: 14px 0 18px; padding-left: 1.1em; color: var(--muted); }
+  .price li { margin-bottom: 4px; }
+  .price .soon { font: 500 12px/1.4 var(--mono); color: var(--muted); margin: 10px 0 0; }
+  .legal { display: flex; flex-wrap: wrap; gap: 6px 18px; font-family: var(--mono); font-size: 12.5px; margin-top: 10px; }
 </style>
 </head>
 <body>
@@ -281,6 +290,7 @@
     <a href="#vision">Frames</a>
     <a href="#essentials">Essentials</a>
     <a href="#local">Local</a>
+    <a href="#mac">Mac app</a>
     <a href="#install">Install</a>
     <a href="https://github.com/ReidenXerx/whiz">GitHub</a>
   </nav>
@@ -665,6 +675,33 @@ Carol    4 recordings</pre>
   </div>
 </section>
 
+<section id="mac">
+  <p class="label">Whiz for Mac</p>
+  <h2>The same engine in a Mac app. Nothing to install.</h2>
+  <div class="two">
+    <div>
+      <img class="shot" src="assets/app-transcript.png" width="1600" height="1057" loading="lazy"
+           alt="Whiz for Mac showing a three-person meeting: each line labeled with the speaker's name and color, beside the slide that was on screen, with a player and search.">
+    </div>
+    <div>
+      <p class="section-lede">Drop a recording in the window. Whiz transcribes it, tells the speakers apart, recognizes voices you named before, captures what was on screen and writes the summary. <b>Everything it needs comes inside the app</b>: no Homebrew, no Python, no terminal. The speech model downloads on first launch.</p>
+      <div class="price" id="buy">
+        <div class="amount">$39 <small>once</small></div>
+        <ul>
+          <li>No subscription: every 1.x update included</li>
+          <li>Five free transcriptions to try it on your own recordings</li>
+          <li>One license per person, on all of their Macs</li>
+          <li>30-day refund, no questions asked</li>
+          <li>Apple silicon, macOS 13.3 or later</li>
+        </ul>
+        <!-- Checkout (Paddle) and the notarized download go here once the store is live. -->
+        <p class="soon">Checkout and download open with the first signed release.</p>
+      </div>
+      <p class="legal"><a href="terms/">Terms</a><a href="privacy/">Privacy</a><a href="refunds/">Refunds</a></p>
+    </div>
+  </div>
+</section>
+
 <section id="install">
   <p class="label">Install</p>
   <h2>One install, then one command per recording</h2>
@@ -701,6 +738,9 @@ Carol    4 recordings</pre>
       <a href="https://github.com/ReidenXerx/whiz">GitHub</a>
       <a href="https://github.com/ReidenXerx/whiz#readme">README</a>
       <a href="https://github.com/ReidenXerx/whiz/releases">Releases</a>
+      <a href="terms/">Terms</a>
+      <a href="privacy/">Privacy</a>
+      <a href="refunds/">Refunds</a>
       <a href="https://github.com/ggerganov/whisper.cpp">whisper.cpp</a>
       <a href="https://github.com/k2-fsa/sherpa-onnx">sherpa-onnx</a>
       <a href="https://ollama.com">Ollama</a>
