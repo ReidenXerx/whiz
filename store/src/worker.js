@@ -88,14 +88,25 @@ export async function licenseFor(env, transactionId, fetchImpl = fetch, today = 
   // "Licensed to <name>", and an email reads fine there.
   const name = (customer.name ?? "").trim() || email || "Whiz customer";
   const issued = (transaction.billed_at ?? transaction.created_at ?? today.toISOString()).slice(0, 10);
-  const key = await issue({ id: transactionId, name, issued, major }, await importSigningKey(env.LICENSE_SIGNING_KEY));
-  const record = { key, name, email, issued, major, customer_id: transaction.customer_id ?? null };
+  const product = productFor(env);
+  const key = await issue({ id: transactionId, name, issued, major, product }, await importSigningKey(env.LICENSE_SIGNING_KEY));
+  const record = { key, name, email, issued, major, product, customer_id: transaction.customer_id ?? null };
 
   // A concurrent first call (webhook and page at once) may also issue: the
   // two keys differ only if the inputs did, and either verifies. Last write
   // wins and later reads agree.
   await env.LICENSES.put(transactionId, JSON.stringify(record));
   return { status: "issued", record };
+}
+
+/**
+ * Sandbox purchases are paid with test cards, so their keys must not open
+ * Whiz: they are signed for "whiz-sandbox", which the app verifies and then
+ * refuses as another product. That still proves the whole chain (signature
+ * included) in a test purchase, and a found `?store=sandbox` buys nothing.
+ */
+export function productFor(env) {
+  return env.PADDLE_ENV === "production" ? "whiz" : "whiz-sandbox";
 }
 
 /** The license major version a transaction buys, from its Whiz price; 0 if none. */

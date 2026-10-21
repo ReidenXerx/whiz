@@ -57,6 +57,14 @@ test("the key is deterministic: a concurrent second issue would be the same byte
   assert.equal(a.record.key, b.record.key);
 });
 
+test("sandbox keys are for whiz-sandbox, which the app refuses; production keys are for whiz", async () => {
+  const decode = (key) => JSON.parse(Buffer.from(key.slice(6).split(".")[0], "base64url").toString());
+  const sandbox = await licenseFor(environment(), TXN, paddle(transaction()).fetchImpl);
+  assert.equal(decode(sandbox.record.key).product, "whiz-sandbox");
+  const production = await licenseFor(environment({ PADDLE_ENV: "production" }), TXN, paddle(transaction()).fetchImpl);
+  assert.equal(decode(production.record.key).product, "whiz");
+});
+
 test("no name at checkout: the email is the licensee", async () => {
   const result = await licenseFor(environment(), TXN, paddle(transaction({ customer: { email: "ada@example.com", name: null } })).fetchImpl);
   assert.equal(result.record.name, "ada@example.com");
