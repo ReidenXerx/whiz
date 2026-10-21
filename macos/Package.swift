@@ -28,10 +28,12 @@ let package = Package(
     products: [
         .executable(name: "WhizUI", targets: ["WhizUI"]),
         .executable(name: "whiz-media", targets: ["WhizMedia"]),
+        .executable(name: "whiz-license", targets: ["WhizLicenseTool"]),
     ],
     targets: [
         .executableTarget(
             name: "WhizUI",
+            dependencies: ["WhizLicense"],
             path: "Sources/WhizUI"
         ),
         .testTarget(
@@ -47,6 +49,22 @@ let package = Package(
             name: "WhizMediaTests",
             dependencies: ["WhizMedia"],
             path: "Tests/WhizMediaTests"
+        ),
+        // The licence key format, shared by the app (which verifies) and
+        // the seller's whiz-license tool (which signs; never shipped).
+        .target(
+            name: "WhizLicense",
+            path: "Sources/WhizLicense"
+        ),
+        .executableTarget(
+            name: "WhizLicenseTool",
+            dependencies: ["WhizLicense"],
+            path: "Sources/WhizLicenseTool"
+        ),
+        .testTarget(
+            name: "WhizLicenseTests",
+            dependencies: ["WhizLicense"],
+            path: "Tests/WhizLicenseTests"
         ),
     ]
 )
