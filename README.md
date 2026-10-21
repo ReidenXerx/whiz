@@ -158,8 +158,12 @@ WHIZ_NOTARY_PROFILE=whiz-notary ./build-dmg.sh   # → signed, notarized, staple
 ```
 
 <p>
-<img src="docs/assets/app-compose.png" alt="New Transcription: a drop zone for a recording, then options for language, speakers, names, video frames and AI summary." width="49%">
-<img src="docs/assets/app-setup.png" alt="The Setup Assistant on a fresh Mac: the whiz engine is installed; whisper.cpp offers Install with Homebrew; the speech model step offers Turbo, Large v3 or Small to download." width="49%">
+<img src="docs/assets/app-compose.png" alt="New Transcription with a customer call chosen: language, two speakers, names, video frames, and AI summary turned on." width="49%">
+<img src="docs/assets/app-setup.png" alt="Get Whiz Ready: the whiz engine is built in; a speech model, speaker detection and AI summaries are all checked." width="49%">
+</p>
+<p>
+<img src="docs/assets/app-recognized.png" alt="A run in progress asks: Who is Speaker A? This sounds like Tom. Press Return to confirm." width="49%">
+<img src="docs/assets/app-summary.png" alt="The Summary tab: overview, key topics, decisions, and action items with owners." width="49%">
 </p>
 
 - **Setup Assistant:** on first launch, a checklist of what Whiz needs: a speech model, and optionally speaker detection and an AI model, each downloaded with one click, with progress. A Whiz.app built without its engine (a bare `swift run`) also lists the CLI and whisper.cpp and ffmpeg, installed through Homebrew and pipx. Without Homebrew, *Install Homebrew…* runs its official installer in Terminal (it asks for your password); coming back to the app checks again. A quantized speech model that is only there by default is flagged, with the full-quality download offered. It reopens from the app menu.
