@@ -1,0 +1,24 @@
+# whiz-store: Paddle payment → Whiz license key. See src/worker.js.
+name = "whiz-store"
+main = "src/worker.js"
+compatibility_date = "2026-10-01"
+
+# store.duduphudu.app: Paddle's webhook destination and what the thank-you
+# page asks for its key. The zone is already on this Cloudflare account.
+routes = [{ pattern = "store.duduphudu.app", custom_domain = true }]
+
+[vars]
+PADDLE_ENV = "sandbox"          # "production" once the live account is approved
+ALLOWED_ORIGIN = "https://duduphudu.app"
+
+# Issued keys by transaction id. Create once with
+#   npx wrangler kv namespace create LICENSES
+# and put the printed id here.
+[[kv_namespaces]]
+binding = "LICENSES"
+id = "00e8608197294693853ba6c7ccde211c"
+
+# Secrets, set with `npx wrangler secret put NAME` (never committed):
+#   PADDLE_API_KEY          Paddle API key (sandbox: pdl_sdbx_apikey_…)
+#   PADDLE_WEBHOOK_SECRET   the notification destination's secret (pdl_ntfset_…)
+#   LICENSE_SIGNING_KEY     contents of ~/.config/whiz-license/signing.key
