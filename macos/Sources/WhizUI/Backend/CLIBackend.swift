@@ -357,7 +357,7 @@ private final class ProcessState: @unchecked Sendable {
         terminateLocked()
     }
 
-    /// Honour a cancel() that arrived before the process existed.
+    /// Honor a cancel() that arrived before the process existed.
     func terminateIfCancelRequested() {
         lock.lock()
         defer { lock.unlock() }

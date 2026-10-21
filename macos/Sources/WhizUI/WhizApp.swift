@@ -10,9 +10,17 @@ import SwiftUI
 /// windows each starting a run is how the old app got confusing.
 struct WhizApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var model = TranscriptionViewModel()
+    @StateObject private var license: LicenseModel
+    @StateObject private var model: TranscriptionViewModel
     @StateObject private var settings = SettingsModel()
     @StateObject private var setup = SetupModel()
+
+    init() {
+        // One license model, shared: the run gate and the views read it.
+        let license = LicenseModel()
+        _license = StateObject(wrappedValue: license)
+        _model = StateObject(wrappedValue: TranscriptionViewModel(license: license))
+    }
 
     var body: some Scene {
         Window("Whiz", id: "main") {
@@ -20,15 +28,17 @@ struct WhizApp: App {
                 .environmentObject(model)
                 .environmentObject(settings)
                 .environmentObject(setup)
+                .environmentObject(license)
                 .frame(minWidth: 860, minHeight: 560)
         }
         .defaultSize(width: 1180, height: 780)
-        .commands { WhizCommands(model: model, setup: setup) }
+        .commands { WhizCommands(model: model, setup: setup, license: license) }
 
         Settings {
             SettingsView()
                 .environmentObject(settings)
                 .environmentObject(setup)
+                .environmentObject(license)
         }
     }
 }
@@ -37,8 +47,15 @@ struct WhizApp: App {
 private struct WhizCommands: Commands {
     @ObservedObject var model: TranscriptionViewModel
     @ObservedObject var setup: SetupModel
+    @ObservedObject var license: LicenseModel
 
     var body: some Commands {
+        CommandGroup(after: .appInfo) {
+            if !license.isLicensed {
+                Button("Buy Whiz…") { NSWorkspace.shared.open(LicenseModel.purchaseURL) }
+            }
+            Button(license.isLicensed ? "License…" : "Enter License Key…") { license.presentActivation() }
+        }
         CommandGroup(after: .appSettings) {
             Button("Setup Assistant…") { setup.isPresented = true }
         }

@@ -134,6 +134,20 @@ build in `macos/.engine/`. The app prefers its own engine over an installed
 reads what macOS reads (mov, mp4, m4a, mp3, wav…); for mkv or webm, install
 ffmpeg and whiz uses it instead.
 
+Whiz.app is a one-time purchase with a free trial of five transcriptions
+(finished runs with results; failed and stopped ones do not count). Past
+transcripts, their files and the command-line tool are never locked. A
+license key is checked on the Mac: an Ed25519 signature over who bought it
+and the major version it covers (a 1.x key also opens 0.x), with no account
+or server. Keys come from `whiz-license`, which only works with the signing
+key on the seller's Mac:
+
+```bash
+swift run whiz-license keygen                                 # once ever; back the key up off this Mac
+swift run whiz-license issue --id ORDER-123 --name "Ada Lovelace"
+swift run whiz-license verify WHIZ1-…
+```
+
 To give the app to other Macs, sign it with a Developer ID and notarize the
 DMG (needs an Apple Developer Program membership; `build-dmg.sh` explains
 the one-time `notarytool store-credentials` step):
