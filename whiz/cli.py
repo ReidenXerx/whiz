@@ -544,19 +544,19 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
                 "No models found. Run `whiz models download turbo` to get a fast one."
             )
 
-    # Extract audio if it's a video container.
+    # Decode to WAV for a video, or audio whisper-cli cannot read itself.
     keep_wav = args.keep_wav
-    if aud.needs_extraction(in_path):
+    if aud.needs_decoding(in_path):
         if args.dry_run:
             wav = aud.extract_audio(in_path, aud.find_ffmpeg(config.ffmpeg), dry_run=True)
             print(f"DRY-RUN: would extract audio ->> {wav}")
         else:
             ui.phase("extracting audio")
-            ui.kv("Video", in_path.name)
+            ui.kv("Video" if aud.needs_extraction(in_path) else "Recording", in_path.name)
             dest = aud.extraction_dir(in_path)
             if dest is not None:
                 ui.status(
-                    f"{aud.extracted_wav_path(in_path).name} next to the video is not whiz's "
+                    f"{aud.extracted_wav_path(in_path).name} next to the recording is not whiz's "
                     "own extraction; leaving it untouched and extracting to a temp dir.",
                     kind="warn",
                 )
@@ -667,10 +667,11 @@ def _build_transcribe_args(args: argparse.Namespace, config: cfg.Config) -> list
 def _naming_wav(in_path: Path, wav: Path) -> Path:
     """The WAV path output names hang off, wherever the audio really is.
 
-    For a video that is always ``<stem>.wav`` beside it, even when the audio
-    was extracted to a temp dir to spare a foreign file at that path.
+    For a video (or audio whisper-cli cannot read) that is always
+    ``<stem>.wav`` beside it, even when the audio was extracted to a temp dir
+    to spare a foreign file at that path.
     """
-    return aud.extracted_wav_path(in_path) if aud.needs_extraction(in_path) else wav
+    return aud.extracted_wav_path(in_path) if aud.needs_decoding(in_path) else wav
 
 
 def _find_whisper_json(of_base: Path, wav: Path, of_passed: bool) -> Path | None:
@@ -2194,7 +2195,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
 
 def _video_audio_for_reuse(in_path: Path, config: cfg.Config, stack: contextlib.ExitStack) -> Path:
-    """merge / speakers match: the video's audio, reusing whiz's own copy.
+    """merge / speakers match: the recording's WAV, reusing whiz's own copy.
 
     A ``<stem>.wav`` a ``--keep-wav`` transcribe left behind is reused (it is
     what the diarization cache is keyed on). Any OTHER file at that path —
@@ -2207,7 +2208,7 @@ def _video_audio_for_reuse(in_path: Path, config: cfg.Config, stack: contextlib.
     if target.exists() and aud.is_whiz_extracted(target, in_path):
         return target
     ui.phase("extracting audio")
-    ui.kv("Video", in_path.name)
+    ui.kv("Video" if aud.needs_extraction(in_path) else "Recording", in_path.name)
     dest = aud.extraction_dir(in_path)
     if dest is not None:
         stack.callback(shutil.rmtree, dest, ignore_errors=True)
@@ -2263,10 +2264,9 @@ def _run_merge(args: argparse.Namespace, stack: contextlib.ExitStack) -> int:
     # comment above (and the 1607-1611 gate) promise.
 
     # Resolve the audio (WAV) to diarize. Reuse an existing sibling WAV if the
-    # transcribe run kept it; otherwise re-extract from the video.
-    if aud.is_audio(in_path):
-        wav = in_path
-    elif aud.needs_extraction(in_path):
+    # transcribe run kept it; otherwise re-extract (a video, or audio that
+    # transcribe decoded too, so the names below match its outputs).
+    if aud.needs_decoding(in_path):
         wav = _video_audio_for_reuse(in_path, config, stack)
     else:
         wav = in_path
@@ -2624,9 +2624,7 @@ def _run_speakers_match(args: argparse.Namespace, stack: contextlib.ExitStack) -
     in_path = Path(args.file).expanduser()
     if not in_path.exists():
         raise SystemExit(f"Input file not found: {in_path}")
-    if aud.is_audio(in_path):
-        wav = in_path
-    elif aud.needs_extraction(in_path):
+    if aud.needs_decoding(in_path):
         wav = _video_audio_for_reuse(in_path, config, stack)
     else:
         wav = in_path

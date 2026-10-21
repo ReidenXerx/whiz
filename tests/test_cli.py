@@ -228,9 +228,9 @@ def _setup_transcribe(monkeypatch, tmp_path, *, diarize_enabled, screenshots=Fal
     --speakers/video detection). The proactive diarization auto-setup is
     stubbed ready=True so no test ever runs pip or downloads models.
     """
-    audio = tmp_path / f"{name}.m4a"
+    audio = tmp_path / f"{name}.mp3"
     audio.write_bytes(b"fake audio")
-    (tmp_path / f"{name}.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    (tmp_path / f"{name}.mp3.json").write_text(_WHISPER_JSON, encoding="utf-8")
 
     def fake_build(args, config):
         return (["whisper-cli"], "model.bin", audio, audio, False,
@@ -363,7 +363,7 @@ def test_transcribe_no_crash_when_json_missing(tmp_path, monkeypatch):
 def test_build_args_forces_json_with_html_output(tmp_path, monkeypatch):
     """--outputs html must force -oj so the HTML can be rendered even when
     diarization is unavailable (segments are needed to build the page)."""
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
     monkeypatch.setattr(cli.M, "pick_best", lambda config: Path("/models/turbo.bin"))
     monkeypatch.setattr(cli, "_find_whisper_cli", lambda configured="": "whisper-cli")
@@ -444,9 +444,9 @@ def _stub_setup_ready(monkeypatch):
 def test_merge_html_fallback_when_diarization_unavailable(tmp_path, monkeypatch, capsys):
     """whiz merge --speakers --outputs html with sherpa-onnx missing degrades
     to a generic-label HTML transcript instead of exiting."""
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
-    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    (tmp_path / "meeting.mp3.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
     _stub_setup_unavailable(monkeypatch)
     monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
@@ -454,7 +454,7 @@ def test_merge_html_fallback_when_diarization_unavailable(tmp_path, monkeypatch,
     rc = cli.cmd_merge(_merge_args(audio, outputs="html", speakers=1))
 
     assert rc == 0
-    html_path = tmp_path / "meeting.m4a.speakers.html"
+    html_path = tmp_path / "meeting.mp3.speakers.html"
     assert html_path.exists(), "HTML transcript was silently skipped"
     content = html_path.read_text(encoding="utf-8")
     assert "hello world" in content
@@ -462,10 +462,10 @@ def test_merge_html_fallback_when_diarization_unavailable(tmp_path, monkeypatch,
     assert 'class="note"' in content  # degraded page self-identifies
     # Labeled SRT is not faked (this previously asserted meeting.speakers.srt
     # — a file this code path never writes, so it guarded nothing).
-    assert not (tmp_path / "meeting.m4a.speakers.srt").exists()
+    assert not (tmp_path / "meeting.mp3.speakers.srt").exists()
     # Audio fallback also writes a generic-label .speakers.txt so
     # `whiz analyze` finds a transcript.
-    txt = (tmp_path / "meeting.m4a.speakers.txt").read_text(encoding="utf-8")
+    txt = (tmp_path / "meeting.mp3.speakers.txt").read_text(encoding="utf-8")
     assert "Speaker (00:00:00):" in txt
     assert "diarization unavailable" in capsys.readouterr().err
 
@@ -473,9 +473,9 @@ def test_merge_html_fallback_when_diarization_unavailable(tmp_path, monkeypatch,
 def test_merge_still_raises_when_nothing_else_requested(tmp_path, monkeypatch):
     """Without --outputs html (or screenshots) there is nothing to fall back
     to: an explicit --speakers merge against missing sherpa-onnx stays loud."""
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
-    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    (tmp_path / "meeting.mp3.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
     _stub_setup_unavailable(monkeypatch)
     monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
@@ -512,9 +512,9 @@ def test_transcribe_diarized_success_writes_labeled_outputs(tmp_path, monkeypatc
 def test_merge_diarized_success_writes_labeled_outputs(tmp_path, monkeypatch):
     """whiz merge happy path: diarization succeeds -> labeled srt/txt/html
     written under the JSON stem with letterized labels, no note."""
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
-    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    (tmp_path / "meeting.mp3.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
     _stub_setup_ready(monkeypatch)
     monkeypatch.setattr(
@@ -528,11 +528,11 @@ def test_merge_diarized_success_writes_labeled_outputs(tmp_path, monkeypatch):
     rc = cli.cmd_merge(_merge_args(audio, outputs="html", speakers=2))
 
     assert rc == 0
-    srt = (tmp_path / "meeting.m4a.speakers.srt").read_text(encoding="utf-8")
+    srt = (tmp_path / "meeting.mp3.speakers.srt").read_text(encoding="utf-8")
     assert "Speaker A:" in srt and "Speaker B:" in srt
-    txt = (tmp_path / "meeting.m4a.speakers.txt").read_text(encoding="utf-8")
+    txt = (tmp_path / "meeting.mp3.speakers.txt").read_text(encoding="utf-8")
     assert "Speaker A (00:00:00):" in txt
-    html = (tmp_path / "meeting.m4a.speakers.html").read_text(encoding="utf-8")
+    html = (tmp_path / "meeting.mp3.speakers.html").read_text(encoding="utf-8")
     assert "Speaker A" in html
     assert 'class="note"' not in html
 
@@ -555,9 +555,9 @@ def test_transcribe_fallback_warns_discarded_speakers_names(tmp_path, monkeypatc
 
 
 def test_merge_fallback_warns_discarded_speakers_names(tmp_path, monkeypatch, capsys):
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
-    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    (tmp_path / "meeting.mp3.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
     _stub_setup_unavailable(monkeypatch)
     monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
@@ -573,9 +573,9 @@ def test_merge_fallback_warns_discarded_speakers_names(tmp_path, monkeypatch, ca
 def test_merge_zero_segments_falls_back_to_unlabeled_html(tmp_path, monkeypatch, capsys):
     """Diarization runs but finds no speech: warn + generic-label HTML
     (and .speakers.txt on audio runs) instead of crashing or skipping."""
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
-    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    (tmp_path / "meeting.mp3.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
     _stub_setup_ready(monkeypatch)
     monkeypatch.setattr(
@@ -586,10 +586,10 @@ def test_merge_zero_segments_falls_back_to_unlabeled_html(tmp_path, monkeypatch,
     rc = cli.cmd_merge(_merge_args(audio, outputs="html", speakers=1))
 
     assert rc == 0
-    html = (tmp_path / "meeting.m4a.speakers.html").read_text(encoding="utf-8")
+    html = (tmp_path / "meeting.mp3.speakers.html").read_text(encoding="utf-8")
     assert ">Speaker<" in html
     assert 'class="note"' in html
-    assert (tmp_path / "meeting.m4a.speakers.txt").exists()
+    assert (tmp_path / "meeting.mp3.speakers.txt").exists()
     assert "Diarization produced no segments; writing unlabeled output" in capsys.readouterr().err
 
 
@@ -597,9 +597,9 @@ def test_merge_returns_1_when_nothing_written(tmp_path, monkeypatch, capsys):
     """No html/screenshots requested + no segments -> nothing written, AND
     nothing was kept either -> rc=1: a silent rc=0 would read as success.
     (The kept-only case is now rc=0 — see the no-clobber test above.)"""
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
-    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    (tmp_path / "meeting.mp3.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
     _stub_setup_ready(monkeypatch)
     monkeypatch.setattr(
@@ -626,7 +626,7 @@ def _capture_status(monkeypatch):
 def test_diarize_fallback_warns_for_explicit_speakers(tmp_path, monkeypatch):
     """Explicit --speakers degrades loudly (warn), not with the quiet hint
     used for merely auto-enabled diarization."""
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
     monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
     calls = _capture_status(monkeypatch)
@@ -638,7 +638,7 @@ def test_diarize_fallback_warns_for_explicit_speakers(tmp_path, monkeypatch):
 
 
 def test_diarize_fallback_stays_hint_when_auto_enabled(tmp_path, monkeypatch):
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
     monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
     calls = _capture_status(monkeypatch)
@@ -684,14 +684,14 @@ def test_merge_fallback_never_clobbers_existing_named_outputs(tmp_path, monkeypa
     the named outputs were correctly preserved, and an rc=1 here would
     false-alarm `whiz merge ... || alert` wrappers on identical re-runs
     (review follow-up). Warnings explain the keeps."""
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
-    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    (tmp_path / "meeting.mp3.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
     _stub_setup_unavailable(monkeypatch)
     monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
-    named_txt = tmp_path / "meeting.m4a.speakers.txt"
-    named_html = tmp_path / "meeting.m4a.speakers.html"
+    named_txt = tmp_path / "meeting.mp3.speakers.txt"
+    named_html = tmp_path / "meeting.mp3.speakers.html"
     named_txt.write_text("Vadim (00:00:00): real named content\n", encoding="utf-8")
     named_html.write_text("\u003chtml\u003enamed run\u003c/html\u003e", encoding="utf-8")
 
@@ -701,8 +701,8 @@ def test_merge_fallback_never_clobbers_existing_named_outputs(tmp_path, monkeypa
     assert named_txt.read_text(encoding="utf-8") == "Vadim (00:00:00): real named content\n"
     assert named_html.read_text(encoding="utf-8") == "\u003chtml\u003enamed run\u003c/html\u003e"
     err = capsys.readouterr().err
-    assert "kept" in err and "meeting.m4a.speakers.txt" in err
-    assert "kept" in err and "meeting.m4a.speakers.html" in err
+    assert "kept" in err and "meeting.mp3.speakers.txt" in err
+    assert "kept" in err and "meeting.mp3.speakers.html" in err
 
 
 def test_transcribe_fallback_rerun_overwrites_existing_degraded_outputs(tmp_path, monkeypatch, capsys):
@@ -742,17 +742,17 @@ def test_merge_fallback_rerun_overwrites_existing_degraded_outputs(tmp_path, mon
     """Merge half of the idempotence fix: the second identical degraded
     merge rewrites its own degraded outputs (rc=0, "overwriting" note),
     instead of keeping them and exiting 1 on a no-op run."""
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
-    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    (tmp_path / "meeting.mp3.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
     _stub_setup_unavailable(monkeypatch)
     monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
 
     rc1 = cli.cmd_merge(_merge_args(audio, outputs="html", speakers=1))
     assert rc1 == 0
-    degraded_html = tmp_path / "meeting.m4a.speakers.html"
-    degraded_txt = tmp_path / "meeting.m4a.speakers.txt"
+    degraded_html = tmp_path / "meeting.mp3.speakers.html"
+    degraded_txt = tmp_path / "meeting.mp3.speakers.txt"
     assert degraded_html.exists() and degraded_txt.exists()
 
     rc2 = cli.cmd_merge(_merge_args(audio, outputs="html", speakers=1))
@@ -820,9 +820,9 @@ def test_transcribe_config_html_is_not_degraded(tmp_path, monkeypatch, capsys):
 def test_merge_config_html_is_not_degraded(tmp_path, monkeypatch, capsys):
     """Blocker 3 on the merge path: config-only html + explicit --speakers
     with sherpa missing stays loud (SystemExit), exactly like master."""
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
-    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    (tmp_path / "meeting.mp3.json").write_text(_WHISPER_JSON, encoding="utf-8")
 
     def fake_load():
         config = cli.cfg.Config()
@@ -862,9 +862,9 @@ def test_merge_sherpa_missing_does_not_double_warn(tmp_path, monkeypatch, capsys
     labels'; the follow-up 'produced no segments' block must not repeat it.
     It stays for the genuinely-new case (ran and returned nothing) — covered
     by test_merge_zero_segments_falls_back_to_unlabeled_html."""
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
-    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    (tmp_path / "meeting.mp3.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
     _stub_setup_unavailable(monkeypatch)
     monkeypatch.setattr(cli.D, "run_diarization", _raise_sherpa_missing)
@@ -1125,9 +1125,9 @@ def test_merge_auto_diarization_setup_success_writes_labeled_outputs(tmp_path, m
     on a fresh machine just works."""
     events: list[str] = []
     _fresh_machine_stubs(monkeypatch, events)
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
-    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    (tmp_path / "meeting.mp3.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(
         cli.D, "run_diarization",
         lambda wav, config, num_speakers=0, threshold=0.9: [
@@ -1139,18 +1139,18 @@ def test_merge_auto_diarization_setup_success_writes_labeled_outputs(tmp_path, m
 
     assert rc == 0
     assert events == ["install", "download"]
-    html = (tmp_path / "meeting.m4a.speakers.html").read_text(encoding="utf-8")
+    html = (tmp_path / "meeting.mp3.speakers.html").read_text(encoding="utf-8")
     assert "Speaker A" in html
-    srt = (tmp_path / "meeting.m4a.speakers.srt").read_text(encoding="utf-8")
+    srt = (tmp_path / "meeting.mp3.speakers.srt").read_text(encoding="utf-8")
     assert "Speaker A:" in srt
 
 
 def test_merge_zero_segments_message_is_actionable(tmp_path, monkeypatch, capsys):
     """Zero segments is an audio-content verdict, not a defect: the warning
     must say what to DO next, not just what happened."""
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
-    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    (tmp_path / "meeting.mp3.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
     _stub_setup_ready(monkeypatch)
     monkeypatch.setattr(
@@ -1174,7 +1174,7 @@ def test_speakers_match_setup_failure_exits_with_hint(tmp_path, monkeypatch):
     """`whiz speakers match` needs diarization by definition: when the
     setup cannot make it work, exit loudly with the manual command —
     there is no degraded path to fall back to here."""
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
     _stub_setup_unavailable(monkeypatch)
@@ -1188,7 +1188,7 @@ def test_speakers_match_setup_failure_exits_with_hint(tmp_path, monkeypatch):
 def test_speakers_match_runs_after_setup_success(tmp_path, monkeypatch, capsys):
     """Setup made diarization work → the match command proceeds (and
     reports honestly when there are no profiles yet)."""
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
     _stub_setup_ready(monkeypatch)
@@ -1472,9 +1472,9 @@ def test_merge_no_speakers_gate_skips_diarization_entirely(tmp_path, monkeypatch
     """M1: an audio merge with no --speakers never reaches run_diarization
     (or the one-time setup) — it goes straight to the JSON merge path and
     writes the generic-label fallback output."""
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
-    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    (tmp_path / "meeting.mp3.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
 
     def _boom(*_a, **_k):
@@ -1486,7 +1486,7 @@ def test_merge_no_speakers_gate_skips_diarization_entirely(tmp_path, monkeypatch
     rc = cli.cmd_merge(_merge_args(audio, outputs="html", speakers=None))
 
     assert rc == 0
-    html = (tmp_path / "meeting.m4a.speakers.html").read_text(encoding="utf-8")
+    html = (tmp_path / "meeting.mp3.speakers.html").read_text(encoding="utf-8")
     assert ">Speaker<" in html  # explicit html degraded to generic labels
 
 
@@ -1494,9 +1494,9 @@ def test_merge_degraded_info_fires_without_diarization(tmp_path, monkeypatch, ca
     """M14: a merge requesting degraded output (explicit html) without
     speakers must explain WHY the artifacts carry generic labels — the old
     explanation only existed inside the diarization branch."""
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
-    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    (tmp_path / "meeting.mp3.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
     monkeypatch.setattr(
         cli.D, "run_diarization",
@@ -1514,7 +1514,7 @@ def test_diarize_or_fallback_catches_typed_validate_failure(tmp_path, monkeypatc
     """M2 (transcribe site): the config-validation DiarizationUnavailable —
     the path the old RuntimeError string matcher never matched — degrades
     with a hint instead of crashing."""
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
 
     def _raise_validate(wav, config, num_speakers=0, threshold=0.9):
@@ -1537,9 +1537,9 @@ def test_merge_validate_failure_raises_systemexit_with_hint(tmp_path, monkeypatc
     """M2 (merge site): with nothing else requested, the typed catch turns
     the validate failure into the loud SystemExit + enable hint. (Under the
     old string matcher this escaped as a raw RuntimeError.)"""
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
-    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    (tmp_path / "meeting.mp3.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
     _stub_setup_unavailable(monkeypatch)
 
@@ -1635,9 +1635,9 @@ def test_merge_declined_setup_then_success_explains_cache_reuse(tmp_path, monkey
     """L-b: setup failed/declined yet diarization succeeded — only possible
     via the diarization cache; the run says so instead of leaving the
     surprise unexplained."""
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
-    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    (tmp_path / "meeting.mp3.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
     _stub_setup_unavailable(monkeypatch)
     monkeypatch.setattr(
@@ -1789,7 +1789,7 @@ def test_speakers_match_dim_mismatch_renders_na_not_crash(tmp_path, monkeypatch,
     and the score table must render an honest n/a — the old code crashed
     sorting None among floats, and read scores[0][0] on what could be an
     empty list."""
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
     _stub_setup_ready(monkeypatch)
@@ -1823,9 +1823,9 @@ def test_merge_auto_match_never_merges_existing_profile(tmp_path, monkeypatch, c
     stored centroid byte-identical and the run says so. (Before the adoption
     every named speaker was merged, so a self-confirming auto-match chain
     silently drifted the stored centroid.)"""
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
-    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    (tmp_path / "meeting.mp3.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
     _stub_setup_ready(monkeypatch)
     monkeypatch.setattr(
@@ -1859,9 +1859,9 @@ def test_merge_confirmed_name_merges_existing_profile(tmp_path, monkeypatch, cap
     """M3 flip side: --speakers-names is a HUMAN confirmation — it overrides
     any auto-match for the same label and merges into the stored profile
     normally (auto_match=False), upgrading provenance to 'user'."""
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
-    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    (tmp_path / "meeting.mp3.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
     _stub_setup_ready(monkeypatch)
     monkeypatch.setattr(
@@ -1954,9 +1954,9 @@ def test_merge_speakers_names_overrides_wrong_auto_match(tmp_path, monkeypatch, 
     correcting it, so the run must use the name they gave, merge into (or
     create) that profile, and not leave the wrong profile's keep-hint
     around."""
-    audio = tmp_path / "meeting.m4a"
+    audio = tmp_path / "meeting.mp3"
     audio.write_bytes(b"fake audio")
-    (tmp_path / "meeting.m4a.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    (tmp_path / "meeting.mp3.json").write_text(_WHISPER_JSON, encoding="utf-8")
     monkeypatch.setattr(cli.cfg, "load", lambda: cli.cfg.Config())
     _stub_setup_ready(monkeypatch)
     monkeypatch.setattr(
@@ -2029,6 +2029,59 @@ def test_transcribe_spares_a_foreign_wav_next_to_the_video(tmp_path, monkeypatch
     assert mine.read_bytes() == b"my studio recording"
 
 
+@pytest.mark.parametrize("suffix", [".m4a", ".aac", ".opus", ".wma"])
+def test_audio_whisper_cannot_read_is_decoded_to_wav_first(tmp_path, monkeypatch, suffix):
+    """whisper-cli decodes only wav/mp3/flac/ogg. A Voice Memo (.m4a) handed
+    over as-is failed with "failed to read audio data"; it now goes through
+    the same extraction as a video, named and cleaned up the same way."""
+    memo = tmp_path / f"memo{suffix}"
+    memo.write_bytes(b"aac")
+    monkeypatch.setattr(cli.M, "pick_best", lambda config: Path("/models/turbo.bin"))
+    monkeypatch.setattr(cli, "_find_whisper_cli", lambda configured="": "whisper-cli")
+    monkeypatch.setattr(cli.aud, "find_ffmpeg", lambda configured="": "whiz-media")
+    extracted = []
+
+    def fake_extract(src, ffmpeg, dest_dir=None, dry_run=False):
+        out = (dest_dir or src.parent) / (src.stem + ".wav")
+        out.write_bytes(_riff(comment=f"whiz-extracted:{src.name}".encode()))
+        extracted.append(src)
+        return out
+
+    monkeypatch.setattr(cli.aud, "extract_audio", fake_extract)
+    args = _transcribe_args(memo, outputs="srt", speakers=None)
+    cmd, _m, wav, in_path, keep_wav, _of, *_ = cli._build_transcribe_args(args, cli.cfg.Config(vad=False))
+
+    assert extracted == [memo]
+    assert wav == tmp_path / "memo.wav" and str(wav) in cmd and str(memo) not in cmd
+    assert cli._naming_wav(in_path, wav) == wav  # outputs: memo.wav.json, like a video's
+    cli._remove_intermediate_audio(wav, in_path, keep_wav)
+    assert not wav.exists() and memo.exists()
+
+
+def test_audio_whisper_reads_is_passed_straight_through(tmp_path, monkeypatch):
+    clip = tmp_path / "clip.mp3"
+    clip.write_bytes(b"mp3")
+    monkeypatch.setattr(cli.M, "pick_best", lambda config: Path("/models/turbo.bin"))
+    monkeypatch.setattr(cli, "_find_whisper_cli", lambda configured="": "whisper-cli")
+    monkeypatch.setattr(cli.aud, "extract_audio", lambda *a, **k: pytest.fail("mp3 needs no decoding"))
+    _cmd, _m, wav, in_path, *_ = cli._build_transcribe_args(_transcribe_args(clip, outputs="srt", speakers=None),
+                                                            cli.cfg.Config(vad=False))
+    assert wav == clip and cli._naming_wav(in_path, wav) == clip
+
+
+def test_merge_finds_a_decoded_recordings_wav(tmp_path, monkeypatch):
+    """merge / speakers match must use the WAV transcribe named its outputs
+    after (memo.wav.json), not the .m4a itself."""
+    import contextlib
+
+    memo = tmp_path / "memo.m4a"
+    memo.write_bytes(b"aac")
+    kept = tmp_path / "memo.wav"
+    kept.write_bytes(_riff(comment=b"whiz-extracted:memo.m4a"))
+    with contextlib.ExitStack() as stack:
+        assert cli._video_audio_for_reuse(memo, cli.cfg.Config(), stack) == kept
+
+
 def test_remove_intermediate_audio_only_deletes_whiz_extractions(tmp_path):
     video = tmp_path / "talk.mov"
     wav = tmp_path / "talk.wav"
@@ -2065,11 +2118,11 @@ def test_transcribe_cleans_up_extracted_wav_when_the_run_raises(tmp_path, monkey
 
 
 def test_diarization_audio_converts_unreadable_input(tmp_path, monkeypatch):
-    """m4a / 44.1 kHz input reaches diarization as a temp 16 kHz copy that is
+    """mp3 / 44.1 kHz input reaches diarization as a temp 16 kHz copy that is
     removed with the run (the reader only takes 16 kHz mono PCM)."""
     import contextlib
 
-    memo = tmp_path / "memo.m4a"
+    memo = tmp_path / "memo.mp3"
     memo.write_bytes(b"aac")
     monkeypatch.setattr(cli.aud, "is_diarization_ready", lambda p: p.suffix == ".wav")
     monkeypatch.setattr(cli.aud, "find_ffmpeg", lambda configured="": "ffmpeg")

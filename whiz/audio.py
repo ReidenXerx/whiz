@@ -19,8 +19,13 @@ import tempfile
 import wave
 from pathlib import Path
 
-# Extensions whisper-cli accepts directly (no extraction needed).
+# Audio formats whiz takes.
 AUDIO_EXTS = {".flac", ".mp3", ".ogg", ".wav", ".m4a", ".aac", ".opus", ".wma"}
+# The ones whisper-cli decodes itself (miniaudio + stb_vorbis). The rest —
+# m4a from Voice Memos and Zoom, aac, opus, wma — reach it as a WAV whiz
+# made, exactly like a video's audio; handed over as-is they failed with
+# "failed to read audio data".
+WHISPER_READS = {".wav", ".mp3", ".flac", ".ogg"}
 # Video containers we extract from.
 VIDEO_EXTS = {".mov", ".mp4", ".mkv", ".avi", ".webm", ".m4v", ".mpg", ".mpeg", ".ts"}
 
@@ -49,8 +54,16 @@ def needs_extraction(path: Path) -> bool:
     return path.suffix.lower() in VIDEO_EXTS
 
 
+def needs_decoding(path: Path) -> bool:
+    """True if whiz must make the WAV whisper-cli reads: a video, or audio
+    whisper-cli cannot decode itself. (``needs_extraction`` stays "is this a
+    video" — frames and speaker auto-detection hang off that.)"""
+    suffix = path.suffix.lower()
+    return suffix in VIDEO_EXTS or (suffix in AUDIO_EXTS and suffix not in WHISPER_READS)
+
+
 def is_audio(path: Path) -> bool:
-    """True if whisper-cli can read this format directly."""
+    """True if this is an audio format whiz takes (see WHISPER_READS)."""
     return path.suffix.lower() in AUDIO_EXTS
 
 
