@@ -56,3 +56,5 @@ htmlcov/
 docs/ARCHITECTURE.gitnexus.md
 .agents/skills/
 # --- end bearing ---
+# wrangler's local state (store/)
+store/.wrangler/

@@ -298,6 +298,11 @@
   .license-key { display: grid; gap: 10px; margin: 10px 0; }
   .license-key code { display: block; padding: 10px 12px; font-size: 12px; line-height: 1.5; word-break: break-all; user-select: all; }
   .license-key .button { justify-self: start; }
+  .gallery { display: grid; gap: 22px; margin-top: 34px; }
+  @media (min-width: 760px) { .gallery { grid-template-columns: repeat(2, 1fr); } }
+  .gallery figure { margin: 0; }
+  .gallery img { width: 100%; height: auto; border-radius: 8px; border: 1px solid var(--rule); }
+  .gallery figcaption { margin-top: 8px; font-size: .9rem; color: var(--muted); }
   .legal { display: flex; flex-wrap: wrap; gap: 6px 18px; font-family: var(--mono); font-size: 12.5px; margin-top: 10px; }
 </style>
 </head>
@@ -639,15 +644,19 @@ Carol    4 recordings</pre>
 </section>
 
 <section id="vision">
-  <p class="label">Frames, and what the model does with them</p>
-  <h2>It reads the screen as a timeline, not a pile of screenshots</h2>
+  <p class="label">Frames, for you and for your AI</p>
+  <h2>Your AI agent doesn't just read the call. It sees it.</h2>
   <div class="two">
     <div>
-      <p class="section-lede">Every segment gets the frame that was on screen when it was said. That alone makes a screen recording readable — but the analysis goes further when your model can see.</p>
-      <p class="section-lede">The analyst posture <b>reconciles what is visible with what was said</b> and surfaces the discrepancies: the number on the slide that nobody read out, the dialog that has since been redesigned. Consecutive frames are treated as a sequence, so it can reason about what changed between them instead of describing four unrelated pictures.</p>
-      <p class="section-lede">It turns itself on when frames exist and the model can take them. No flag.</p>
+      <p class="section-lede">Every line keeps the frame that was on screen when it was said: the slide, the dashboard, the bug in the demo. So an important call becomes something an AI can really work with, <b>what was said and what everyone was looking at</b>.</p>
+      <p class="section-lede"><b>Hand it to your agent.</b> Point Claude Code, Codex, Cursor or any agent that works with files at the recording's folder: the named transcript, an index of every line with its time, speaker and frame (<code>.frames.json</code>), and the frames themselves. It can turn the meeting into tickets with the slide each decision was made on, check the numbers on screen, or write up the bug that was demoed, picture included.</p>
+      <p class="section-lede"><b>Or let whiz do it.</b> The built-in analysis sends the transcript and the frames to a model that can see. It reconciles what is visible with what was said and flags the discrepancies: the number on the slide that nobody read out, the dialog that has since been redesigned. Consecutive frames are a sequence, so it reasons about what changed between them. It turns itself on when frames exist and the model can take them.</p>
     </div>
     <div class="cards" style="margin-top: 0; grid-template-columns: 1fr;">
+      <div class="card">
+        <p class="label">Asking an agent</p>
+        <p><code>Read "Launch Sync.frames.json" and look at its frames. Turn the meeting into tickets, one per decision, each with the slide it was made on.</code></p>
+      </div>
       <div class="card">
         <p class="label">From an analysis</p>
         <p><b>Discrepancy at 04:31.</b> Carol says the export dialog has three options; the frame shows four, with "CSV (legacy)" added. The doc quoted in the meeting is older than the build on screen.</p>
@@ -715,7 +724,7 @@ Carol    4 recordings</pre>
            alt="Whiz for Mac showing a three-person meeting: each line labeled with the speaker's name and color, beside the slide that was on screen, with a player and search.">
     </div>
     <div>
-      <p class="section-lede">Drop a recording in the window. Whiz transcribes it, tells the speakers apart, recognizes voices you named before, captures what was on screen and writes the summary. <b>Everything it needs comes inside the app</b>: no Homebrew, no Python, no terminal. The speech model downloads on first launch.</p>
+      <p class="section-lede">Drop a recording in the window. Whiz transcribes it, tells the speakers apart, recognizes voices you named before, keeps the frame that was on screen for every line, ready for your AI agent, and writes the summary. <b>Everything it needs comes inside the app</b>: no Homebrew, no Python, no terminal. The speech model downloads on first launch.</p>
       <div class="price" id="buy">
         <div class="amount">$39 <small>once</small></div>
         <ul>
@@ -742,6 +751,28 @@ Carol    4 recordings</pre>
       </div>
       <p class="legal"><a href="terms/">Terms</a><a href="privacy/">Privacy</a><a href="refunds/">Refunds</a></p>
     </div>
+  </div>
+  <div class="gallery">
+    <figure>
+      <img src="assets/app-recognized.png" width="1200" height="800" loading="lazy"
+           alt="A run in progress asks: Who is Speaker A? This sounds like Tom. Press Return to confirm. The name Tom is filled in.">
+      <figcaption>It knows voices you named before. A new recording with Tom in it asks only to confirm him.</figcaption>
+    </figure>
+    <figure>
+      <img src="assets/app-summary.png" width="1200" height="800" loading="lazy"
+           alt="The Summary tab: an overview, key topics, decisions made, and action items with owners such as Tom and Arjun.">
+      <figcaption>A summary with the decisions, and every action item with its owner.</figcaption>
+    </figure>
+    <figure>
+      <img src="assets/app-progress.png" width="1200" height="800" loading="lazy"
+           alt="A transcription in progress: extracting audio done, telling speakers apart at 80 percent, with a Stop button.">
+      <figcaption>Every step as it happens, with progress and time left.</figcaption>
+    </figure>
+    <figure>
+      <img src="assets/app-setup-sheet.png" width="1200" height="800" loading="lazy"
+           alt="Get Whiz Ready: the whiz engine is built in, a speech model, speaker detection and AI summaries, all checked.">
+      <figcaption>First launch: one download, and it's ready. The engine is built in.</figcaption>
+    </figure>
   </div>
 </section>
 
