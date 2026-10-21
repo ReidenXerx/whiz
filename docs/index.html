@@ -291,6 +291,11 @@
   .price ul { margin: 14px 0 18px; padding-left: 1.1em; color: var(--muted); }
   .price li { margin-bottom: 4px; }
   .price .soon { font: 500 12px/1.4 var(--mono); color: var(--muted); margin: 10px 0 0; }
+  .price .buy { margin-top: 2px; font-family: var(--body); font-weight: 600; }
+  .license { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--rule); }
+  .license-key { display: grid; gap: 10px; margin: 10px 0; }
+  .license-key code { display: block; padding: 10px 12px; font-size: 12px; line-height: 1.5; word-break: break-all; user-select: all; }
+  .license-key .button { justify-self: start; }
   .legal { display: flex; flex-wrap: wrap; gap: 6px 18px; font-family: var(--mono); font-size: 12.5px; margin-top: 10px; }
 </style>
 </head>
@@ -718,8 +723,20 @@ Carol    4 recordings</pre>
           <li>30-day refund, no questions asked</li>
           <li>Apple silicon, macOS 13.3 or later</li>
         </ul>
-        <!-- Checkout (Paddle) and the notarized download go here once the store is live. -->
+        <!-- The checkout appears only when STORE (script below) has a config for
+             this page: live once Paddle approves the account; ?store=sandbox
+             for test purchases until then. -->
+        <button class="button primary buy" type="button" hidden>Buy Whiz &middot; $39</button>
         <p class="soon">Checkout and download open with the first signed release.</p>
+        <div class="license" hidden aria-live="polite">
+          <h3>Thank you for buying Whiz</h3>
+          <p class="license-status">Getting your license key&hellip;</p>
+          <div class="license-key" hidden>
+            <code></code>
+            <button class="button" type="button">Copy key</button>
+          </div>
+          <p class="note license-help" hidden>In Whiz, open <b>Whiz &rarr; Enter License Key&hellip;</b>: a copied key fills in by itself. Keep this key. If you lose it, write to <a href="mailto:hello@duduphudu.app">hello@duduphudu.app</a> from the email you bought with.</p>
+        </div>
       </div>
       <p class="legal"><a href="terms/">Terms</a><a href="privacy/">Privacy</a><a href="refunds/">Refunds</a></p>
     </div>
@@ -776,6 +793,104 @@ Carol    4 recordings</pre>
 
 </div>
 <script>
+  // Checkout: Paddle.js overlay, then the key from whiz-store (store/ in the
+  // repo). Paddle.js loads only when someone presses Buy, so the page
+  // itself stays free of third-party scripts.
+  (function () {
+    var STORE = {
+      // Filled in when Paddle approves the live account.
+      live: null,
+      sandbox: { environment: "sandbox", token: "test_00d2a514d06732562533aea90fc",
+                 priceId: "pri_01m5fn45ppkbxbawwwsqg3s14v" },
+    };
+    var LICENSE_API = "https://store.duduphudu.app/license";
+    var mode = new URLSearchParams(location.search).get("store") === "sandbox" ? "sandbox" : "live";
+    var config = STORE[mode];
+    var card = document.getElementById("buy");
+    if (!config || !card) return;
+
+    var buy = card.querySelector(".buy");
+    var soon = card.querySelector(".soon");
+    var panel = card.querySelector(".license");
+    var status = panel.querySelector(".license-status");
+    var keyBox = panel.querySelector(".license-key");
+    var help = panel.querySelector(".license-help");
+    buy.hidden = false;
+    soon.textContent = mode === "sandbox" ? "Sandbox checkout: test cards only, no real payment." : "Secure checkout by Paddle.";
+
+    var ready = null;
+    function paddle() {
+      if (ready) return ready;
+      ready = new Promise(function (resolve, reject) {
+        var script = document.createElement("script");
+        script.src = "https://cdn.paddle.com/paddle/v2/paddle.js";
+        script.onload = function () {
+          if (config.environment === "sandbox") Paddle.Environment.set("sandbox");
+          Paddle.Initialize({ token: config.token, eventCallback: onEvent });
+          resolve(Paddle);
+        };
+        script.onerror = function () { ready = null; reject(new Error("Paddle did not load")); };
+        document.head.appendChild(script);
+      });
+      return ready;
+    }
+
+    buy.addEventListener("click", function () {
+      paddle().then(function (P) {
+        P.Checkout.open({ items: [{ priceId: config.priceId, quantity: 1 }],
+                          settings: { displayMode: "overlay", theme: "dark", allowLogout: false } });
+      }, function () {
+        soon.textContent = "The checkout could not load. Check your connection and try again.";
+      });
+    });
+
+    function onEvent(event) {
+      if (event.name !== "checkout.completed" || !event.data) return;
+      var transactionId = event.data.transaction_id;
+      buy.hidden = true;
+      soon.hidden = true;
+      panel.hidden = false;
+      fetchKey(transactionId, 0);
+    }
+
+    // The payment can take a few seconds to settle (202), and Paddle's own
+    // records can lag the checkout by a moment (404); try for about a minute.
+    function fetchKey(transactionId, attempt) {
+      fetch(LICENSE_API + "?transaction_id=" + encodeURIComponent(transactionId))
+        .then(function (response) {
+          if (response.status === 200) return response.json().then(show);
+          if (attempt < 30 && (response.status === 202 || response.status === 404 || response.status >= 500)) {
+            setTimeout(function () { fetchKey(transactionId, attempt + 1); }, 2000);
+            return;
+          }
+          fail(transactionId);
+        }, function () {
+          if (attempt < 30) setTimeout(function () { fetchKey(transactionId, attempt + 1); }, 2000);
+          else fail(transactionId);
+        });
+    }
+
+    function show(license) {
+      status.textContent = "Your license key, for " + license.name + ":";
+      keyBox.querySelector("code").textContent = license.key;
+      keyBox.hidden = false;
+      help.hidden = false;
+      var copy = keyBox.querySelector("button");
+      copy.addEventListener("click", function () {
+        if (navigator.clipboard) navigator.clipboard.writeText(license.key).then(function () { copy.textContent = "Copied"; });
+      });
+    }
+
+    function fail(transactionId) {
+      status.innerHTML = "";
+      status.append("Your payment went through, but the key is taking longer than usual. Write to ");
+      var mail = document.createElement("a");
+      mail.href = "mailto:hello@duduphudu.app?subject=" + encodeURIComponent("Whiz license " + transactionId);
+      mail.textContent = "hello@duduphudu.app";
+      status.append(mail, " with order " + transactionId + " and we will send it right away.");
+    }
+  })();
+
   document.querySelectorAll("[data-copy]").forEach(function (button) {
     button.addEventListener("click", function () {
       var done = function () {

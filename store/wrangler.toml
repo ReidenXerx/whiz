@@ -16,7 +16,7 @@ ALLOWED_ORIGIN = "https://duduphudu.app"
 # and put the printed id here.
 [[kv_namespaces]]
 binding = "LICENSES"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "00e8608197294693853ba6c7ccde211c"
 
 # Secrets, set with `npx wrangler secret put NAME` (never committed):
 #   PADDLE_API_KEY          Paddle API key (sandbox: pdl_sdbx_apikey_…)
