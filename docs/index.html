@@ -132,6 +132,8 @@
   }
 
   * { box-sizing: border-box; }
+  /* .button sets display, which would otherwise beat the hidden attribute. */
+  [hidden] { display: none !important; }
   html { scroll-behavior: smooth; }
   @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
   body {
