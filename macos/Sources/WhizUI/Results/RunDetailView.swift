@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The tabs of a finished run.
 enum DetailTab: String, CaseIterable, Identifiable {
@@ -47,6 +48,8 @@ struct RunDetailView: View {
     /// Bumped when something new was written (a summary made from here),
     /// so the files are read again.
     @State private var reloadToken = 0
+    @State private var exporting = false
+    @State private var exportError: String?
 
     init(record: LastRunRecord) {
         self.record = record
@@ -79,6 +82,11 @@ struct RunDetailView: View {
             results = loaded
         }
         .onDisappear { playback.shutDown() }
+        .alert("Export failed", isPresented: Binding(get: { exportError != nil }, set: { if !$0 { exportError = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(exportError ?? "")
+        }
     }
 
     // MARK: - Header
@@ -98,20 +106,27 @@ struct RunDetailView: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: 12)
-                if let html = results?.html {
-                    Button {
-                        NSWorkspace.shared.open(html)
-                    } label: {
-                        Label("Open in Browser", systemImage: "safari")
-                    }
-                    .help("The HTML transcript the CLI wrote, with frames and search")
-                }
                 Button {
                     revealOutputs()
                 } label: {
                     Label("Show in Finder", systemImage: "folder")
                 }
                 Menu {
+                    Button("PDF for ChatGPT or Claude…") { export(.pdf) }
+                    Button("Markdown for Agents…") { export(.markdown) }
+                } label: {
+                    Label(exporting ? "Exporting…" : "Export for AI", systemImage: "sparkles")
+                }
+                .fixedSize()
+                .disabled(results?.transcript == nil || exporting)
+                .help("The transcript with what was on screen, for an AI to read whole")
+                Menu {
+                    // In here rather than in the header: three buttons there
+                    // cut off the run's own name and date.
+                    if let html = results?.html {
+                        Button("Open HTML Transcript in Browser") { NSWorkspace.shared.open(html) }
+                        Divider()
+                    }
                     Button("Transcribe Again…") { model.prepareRerun(record) }
                     Button("Copy Transcript") { copyTranscript() }
                         .disabled(results?.transcript == nil)
@@ -184,6 +199,58 @@ struct RunDetailView: View {
             NSWorkspace.shared.activateFileViewerSelecting([record.inputURL])
         } else {
             NSWorkspace.shared.activateFileViewerSelecting(existing)
+        }
+    }
+
+    // MARK: - Export for AI
+
+    private enum ExportKind { case pdf, markdown }
+
+    /// Ask where, then write in the background: reading frames and laying
+    /// out pages can take a few seconds on a long recording. The result is
+    /// shown in Finder, ready to drag into a chat or hand to an agent.
+    private func export(_ kind: ExportKind) {
+        guard let transcript = results?.transcript else { return }
+        let stem = record.inputURL.deletingPathExtension().lastPathComponent
+        let panel = NSSavePanel()
+        panel.directoryURL = record.inputURL.deletingLastPathComponent()
+        panel.canCreateDirectories = true
+        switch kind {
+        case .pdf:
+            panel.nameFieldStringValue = "\(stem) for AI.pdf"
+            panel.allowedContentTypes = [.pdf]
+            panel.message = "One file for ChatGPT or Claude: the transcript, and the screen wherever it changed."
+        case .markdown:
+            panel.nameFieldStringValue = "\(stem).ai.md"
+            panel.allowedContentTypes = [.init(filenameExtension: "md") ?? .plainText]
+            panel.message = "For agents that read files. Frame links point at the recording's frames folder."
+        }
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+
+        let title = record.inputURL.lastPathComponent
+        let subtitle = self.subtitle
+        let analysis = results?.analysis
+        exporting = true
+        Task {
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    let frames = AIExport.keyFrames(in: transcript)
+                    switch kind {
+                    case .pdf:
+                        try AIExport.writePDF(title: title, subtitle: subtitle, document: transcript,
+                                              analysis: analysis, frames: frames, to: destination)
+                    case .markdown:
+                        let text = AIExport.markdown(title: title, subtitle: subtitle, document: transcript,
+                                                     analysis: analysis, frames: frames,
+                                                     directory: destination.deletingLastPathComponent())
+                        try text.write(to: destination, atomically: true, encoding: .utf8)
+                    }
+                }.value
+                NSWorkspace.shared.activateFileViewerSelecting([destination])
+            } catch {
+                exportError = error.localizedDescription
+            }
+            exporting = false
         }
     }
 
