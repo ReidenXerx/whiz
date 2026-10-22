@@ -172,6 +172,7 @@ WHIZ_NOTARY_PROFILE=whiz-notary ./build-dmg.sh   # → signed, notarized, staple
 - **While it runs:** a step list with progress and time left, a card that asks you to name unknown speakers, and the full log under *Details*.
 - **Results:** the transcript with speaker colors, search, frames and a built-in player (click a timestamp to play from there), the rendered AI summary, and every file written.
 - **Settings (⌘,):** whiz's own `config.toml` through `whiz config` (model, default language, output formats, speaker detection, AI server and key), plus the remembered voices, each of which can be forgotten. The terminal and the app share one config.
+- **Export for AI:** a run as one file an AI reads whole. A PDF for ChatGPT or Claude holds the named transcript as real text, with each screen that changed placed where it changed. Repeated frames are dropped (a pointer moving is not a change), and the file holds at most 60 images. A Markdown file for agents (Claude Code, Codex, Cursor) links the same frames on disk. The AI summary leads both, marked as derived.
 - **Summarize Now:** a finished run without a summary gets one from its Summary tab (`whiz analyze`).
 
 ## What it does
