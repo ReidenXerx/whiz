@@ -5,9 +5,9 @@
 # One command between "the tests pass" and "the app is in /Applications":
 # builds the release binary, copies the bundle directory around it, puts the
 # transcription engine inside (build-engine.sh: Python + whiz, whisper.cpp,
-# whiz-media — so the app needs nothing installed), stamps the version from
-# pyproject.toml (one version for the project, not two), and codesigns every
-# binary in it.
+# whiz-media — so the app needs nothing installed) and Sparkle (in-app
+# updates), stamps the version from pyproject.toml (one version for the
+# project, not two), and codesigns every binary in it.
 #
 # Signing:
 #   default             ad-hoc (`codesign --sign -`), no identity needed.
@@ -49,13 +49,28 @@ BINARY="$MACOS_DIR/.build/release/$PRODUCT"
 [ -f "$BINARY" ] || { echo "build-app.sh: no release binary at $BINARY" >&2; exit 1; }
 
 rm -rf "$APP"
-mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
+mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$CONTENTS/Frameworks"
 
 cp "$BINARY" "$CONTENTS/MacOS/$APP_NAME"
+# The binary finds Sparkle through its rpaths; SwiftPM's point into .build
+# (@loader_path, and an absolute path on the build Mac). In the bundle it
+# lives in Frameworks/, and no rpath may point outside the app.
+for rpath in $(otool -l "$CONTENTS/MacOS/$APP_NAME" | awk '/LC_RPATH/ {getline; getline; print $2}'); do
+  case "$rpath" in /usr/lib/swift) ;; *) install_name_tool -delete_rpath "$rpath" "$CONTENTS/MacOS/$APP_NAME" ;; esac
+done
+install_name_tool -add_rpath @executable_path/../Frameworks "$CONTENTS/MacOS/$APP_NAME"
+# ditto, not cp -R: a framework is symlinks (Versions/Current) that must
+# stay symlinks for its signature to verify. The XPC services are for
+# sandboxed apps only (Sparkle's docs); Whiz is not sandboxed.
+SPARKLE="$CONTENTS/Frameworks/Sparkle.framework"
+ditto "$MACOS_DIR/.build/release/Sparkle.framework" "$SPARKLE"
+rm -rf "$SPARKLE/XPCServices" "$SPARKLE/Versions/B/XPCServices"
 cp "$MACOS_DIR/bundle/Info.plist" "$CONTENTS/Info.plist"
 # Resources/engine, not MacOS/: on a case-insensitive disk MacOS/whiz and
 # MacOS/Whiz are one file. The app finds it there (WhizLocator.bundledEngine).
 cp -R "$ENGINE" "$CONTENTS/Resources/engine"
+# Whiz > Acknowledgements (build-engine.sh writes it beside the engine).
+cp "$ENGINE/../Acknowledgements.json" "$CONTENTS/Resources/Acknowledgements.json"
 
 # The icon ships in the bundle directory so a fresh clone has it; a missing
 # icns is a warning, not a failure — the app still runs, it just looks
@@ -66,9 +81,11 @@ else
   echo "build-app.sh: warning — no AppIcon.icns in bundle/; run build-icon.sh" >&2
 fi
 
-# Stamp the version Info.plist references. CFBundleVersion stays a build
-# counter the script does not manage — for a local artifact "1" is honest.
+# Stamp the version Info.plist references, into both keys: Sparkle decides
+# "newer" by CFBundleVersion, so it must rise with every release, and the
+# project version already does.
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$CONTENTS/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$CONTENTS/Info.plist"
 
 # --force because a previous build may have left a stale signature on a
 # copied bundle. No entitlements: the app runs the engine as child
@@ -94,6 +111,12 @@ while IFS= read -r -d '' file; do
   fi
 done < <(find "$CONTENTS/Resources/engine" -type f \( -perm -u+x -o -name '*.so' -o -name '*.dylib' \) -print0)
 echo "Signed $count engine binaries."
+
+# Sparkle, inside out as its docs order it: the installer tool and the
+# Updater.app it launches, then the framework that seals them.
+for part in "$SPARKLE/Versions/B/Autoupdate" "$SPARKLE/Versions/B/Updater.app" "$SPARKLE"; do
+  "${SIGN[@]}" "$part" 2>/dev/null || { echo "build-app.sh: could not sign $part" >&2; exit 1; }
+done
 
 if [ -n "$IDENTITY" ]; then
   codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"

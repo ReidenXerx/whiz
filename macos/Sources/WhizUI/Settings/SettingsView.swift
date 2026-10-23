@@ -48,6 +48,8 @@ struct SettingsView: View {
                         .tabItem { Label("whiz", systemImage: "terminal") }
                     LicenseSettings()
                         .tabItem { Label("License", systemImage: "checkmark.seal") }
+                    UpdateSettings()
+                        .tabItem { Label("Updates", systemImage: "arrow.down.circle") }
                 }
             }
         }

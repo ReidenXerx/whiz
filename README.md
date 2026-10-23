@@ -157,6 +157,26 @@ WHIZ_SIGN_IDENTITY="Developer ID Application: Name (TEAMID)" \
 WHIZ_NOTARY_PROFILE=whiz-notary ./build-dmg.sh   # → signed, notarized, stapled DMG
 ```
 
+Installed copies update themselves through [Sparkle](https://sparkle-project.org)
+(Whiz > Check for Updates…; Sparkle asks on the second launch before checking
+automatically). They read `docs/updates/v1.xml`, published at
+`duduphudu.app/whiz/updates/v1.xml`. The feed is per major version, because a
+license covers one: 2.0 gets its own feed, so a 1.x copy is never offered a
+version its key does not open. Publishing an update signs the DMG with the
+update key in the login keychain (backed up in
+`~/.config/whiz-sparkle/update-signing.key`). Lose both, and installed copies
+can never be updated again:
+
+```bash
+./publish-update.sh dist/Whiz-0.15.0.dmg --notes notes.html   # signs it, adds it to docs/updates/v1.xml
+gh release create v0.15.0 dist/Whiz-0.15.0.dmg                 # the download URL the feed points at
+```
+
+Whiz > Acknowledgements lists every open-source component the app ships,
+with its license, plus the models it downloads. `build-engine.sh` generates
+the list from what is actually in the bundle (`bundle/acknowledgements/`),
+and fails the build if a Python package has no license file.
+
 <p>
 <img src="docs/assets/app-compose.png" alt="New Transcription with a customer call chosen: language, two speakers, names, video frames, and AI summary turned on." width="49%">
 <img src="docs/assets/app-setup.png" alt="Get Whiz Ready: the whiz engine is built in; a speech model, speaker detection and AI summaries are all checked." width="49%">

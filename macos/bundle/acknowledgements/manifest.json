@@ -1,0 +1,159 @@
+{
+  "_comment": [
+    "The open-source software Whiz.app carries, and the models it downloads.",
+    "build.py turns this, the Python packages actually installed in the",
+    "engine, and Sparkle's own LICENSE into Contents/Resources/Acknowledgements.json,",
+    "which Whiz shows under Whiz > Acknowledgements.",
+    "",
+    "'files' are relative to this directory; '@name' is a file the build passes",
+    "in (--file name=PATH). 'version' is a literal or '@name' for one the build",
+    "reads from the component itself, so a version shown is the version shipped.",
+    "'python_packages' stands for every package installed in the engine.",
+    "'expect' fails the build when a component changes under a licence text",
+    "copied for one version: refresh the text, then the expectation.",
+    "",
+    "python/ is python-build-standalone's licences/ directory (the -full",
+    "archive of the release build-engine.sh pins), cut to what is linked into",
+    "the bundled libpython: ncurses, libedit and zlib are macOS's own, Tcl/Tk",
+    "is trimmed. Bumping PYTHON_VERSION means re-checking this list."
+  ],
+  "groups": [
+    {
+      "title": "Included in Whiz",
+      "components": [
+        {
+          "name": "Python",
+          "version": "@python",
+          "license": "PSF-2.0",
+          "url": "https://www.python.org",
+          "summary": "Runs the transcription engine. The build is python-build-standalone, by Astral.",
+          "files": ["python/LICENSE.cpython.txt"]
+        },
+        {
+          "name": "OpenSSL",
+          "version": "@openssl",
+          "license": "Apache-2.0",
+          "url": "https://www.openssl.org",
+          "summary": "Part of the bundled Python: secure downloads.",
+          "files": ["python/LICENSE.openssl-3.txt"]
+        },
+        {
+          "name": "SQLite",
+          "version": "@sqlite",
+          "license": "Public domain",
+          "url": "https://www.sqlite.org",
+          "summary": "Part of the bundled Python.",
+          "files": ["python/LICENSE.sqlite.txt"]
+        },
+        {
+          "name": "Expat",
+          "version": "@expat",
+          "license": "MIT",
+          "url": "https://libexpat.github.io",
+          "summary": "Part of the bundled Python: XML parsing.",
+          "files": ["python/LICENSE.expat.txt"]
+        },
+        {
+          "name": "mpdecimal",
+          "version": "@mpdecimal",
+          "license": "BSD-2-Clause",
+          "url": "https://www.bytereef.org/mpdecimal/",
+          "summary": "Part of the bundled Python: decimal arithmetic.",
+          "files": ["python/LICENSE.mpdecimal.txt"]
+        },
+        {
+          "name": "XZ Utils (liblzma)",
+          "license": "0BSD",
+          "url": "https://tukaani.org/xz/",
+          "summary": "Part of the bundled Python: compression.",
+          "files": ["python/LICENSE.liblzma.txt"]
+        },
+        {
+          "name": "bzip2",
+          "license": "bzip2-1.0.6",
+          "url": "https://sourceware.org/bzip2/",
+          "summary": "Part of the bundled Python: compression; unpacks the speaker models.",
+          "files": ["python/LICENSE.bzip2.txt"]
+        },
+        {
+          "name": "libffi",
+          "license": "MIT",
+          "url": "https://sourceware.org/libffi/",
+          "summary": "Part of the bundled Python.",
+          "files": ["python/LICENSE.libffi.txt"]
+        },
+        {
+          "name": "libuuid",
+          "license": "BSD-3-Clause",
+          "url": "https://github.com/util-linux/util-linux",
+          "summary": "Part of the bundled Python.",
+          "files": ["python/LICENSE.libuuid.txt"]
+        },
+        {
+          "name": "whisper.cpp",
+          "version": "@whisper.cpp",
+          "license": "MIT",
+          "url": "https://github.com/ggml-org/whisper.cpp",
+          "summary": "Speech recognition, on your Mac's GPU.",
+          "files": ["@whisper.cpp"]
+        },
+        {
+          "name": "ONNX Runtime",
+          "version": "@onnxruntime",
+          "expect": "1.28.2",
+          "license": "MIT",
+          "url": "https://onnxruntime.ai",
+          "summary": "Runs the speaker-detection models, inside sherpa-onnx.",
+          "files": ["onnxruntime/LICENSE.txt", "onnxruntime/ThirdPartyNotices.txt"]
+        },
+        {
+          "python_packages": {
+            "_comment": "Every package installed in the engine is listed; these say what it is for.",
+            "sherpa-onnx": "Speaker detection and voice recognition.",
+            "rich": "The whiz command's terminal output.",
+            "markdown-it-py": "Used by rich.",
+            "mdurl": "Used by rich.",
+            "pygments": "Used by rich."
+          }
+        },
+        {
+          "name": "Sparkle",
+          "version": "@sparkle",
+          "license": "MIT",
+          "url": "https://sparkle-project.org",
+          "summary": "Updates Whiz from inside the app.",
+          "files": ["@sparkle"]
+        }
+      ]
+    },
+    {
+      "title": "Models Whiz downloads",
+      "components": [
+        {
+          "name": "Whisper",
+          "license": "MIT",
+          "url": "https://github.com/openai/whisper",
+          "summary": "The speech-recognition models, by OpenAI, in the whisper.cpp format. Downloaded from Hugging Face when you choose one."
+        },
+        {
+          "name": "Silero VAD",
+          "license": "MIT",
+          "url": "https://github.com/snakers4/silero-vad",
+          "summary": "Finds the speech in a recording, so silence is not transcribed."
+        },
+        {
+          "name": "pyannote segmentation 3.0",
+          "license": "MIT",
+          "url": "https://huggingface.co/pyannote/segmentation-3.0",
+          "summary": "Finds where each speaker talks. Converted for sherpa-onnx by k2-fsa."
+        },
+        {
+          "name": "3D-Speaker ERes2Net",
+          "license": "Apache-2.0",
+          "url": "https://github.com/modelscope/3D-Speaker",
+          "summary": "Tells voices apart, and recognizes them in later recordings."
+        }
+      ]
+    }
+  ]
+}

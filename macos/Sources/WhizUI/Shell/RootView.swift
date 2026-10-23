@@ -52,6 +52,12 @@ struct RootView: View {
         .onChange(of: model.isRunning) { running in
             if !running { NSApp?.requestUserAttention(.informationalRequest) }
         }
+        // An open sheet stops the quit an update's relaunch needs.
+        .onReceive(NotificationCenter.default.publisher(for: .whizWillRelaunchForUpdate)) { _ in
+            setup.isPresented = false
+            license.isActivationPresented = false
+            model.isPickingFile = false
+        }
         .sheet(isPresented: $setup.isPresented) {
             SetupAssistantView {
                 setupDone = true

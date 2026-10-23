@@ -14,6 +14,7 @@ struct WhizApp: App {
     @StateObject private var model: TranscriptionViewModel
     @StateObject private var settings = SettingsModel()
     @StateObject private var setup = SetupModel()
+    @StateObject private var updater = UpdaterModel()
 
     init() {
         // One license model, shared: the run gate and the views read it.
@@ -32,14 +33,21 @@ struct WhizApp: App {
                 .frame(minWidth: 860, minHeight: 560)
         }
         .defaultSize(width: 1180, height: 780)
-        .commands { WhizCommands(model: model, setup: setup, license: license) }
+        .commands { WhizCommands(model: model, setup: setup, license: license, updater: updater) }
 
         Settings {
             SettingsView()
                 .environmentObject(settings)
                 .environmentObject(setup)
                 .environmentObject(license)
+                .environmentObject(updater)
         }
+
+        Window("Acknowledgements", id: "acknowledgements") {
+            AcknowledgementsView(acknowledgements: .bundled)
+                .frame(minWidth: 640, minHeight: 420)
+        }
+        .defaultSize(width: 820, height: 580)
     }
 }
 
@@ -48,9 +56,17 @@ private struct WhizCommands: Commands {
     @ObservedObject var model: TranscriptionViewModel
     @ObservedObject var setup: SetupModel
     @ObservedObject var license: LicenseModel
+    @ObservedObject var updater: UpdaterModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
         CommandGroup(after: .appInfo) {
+            if updater.isAvailable {
+                Button("Check for Updates…") { updater.checkForUpdates() }
+                    .disabled(!updater.canCheckForUpdates)
+            }
+            Button("Acknowledgements") { openWindow(id: "acknowledgements") }
+            Divider()
             if !license.isLicensed {
                 Button("Buy Whiz…") { NSWorkspace.shared.open(LicenseModel.purchaseURL) }
             }
