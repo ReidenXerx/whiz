@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The update feed Whiz 0.x and 1.x read (SUFeedURL in macos/bundle/Info.plist).
+  Items are added by macos/publish-update.sh, which signs each DMG; do not
+  hand-edit an enclosure. A licence covers one major version, so 2.0 never
+  goes here as an ordinary item: it gets updates/v2.xml, and this feed may
+  announce it with <sparkle:informationalUpdate/>, which only links to the
+  upgrade page.
+-->
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>Whiz</title>
+    <link>https://duduphudu.app/whiz/</link>
+    <description>Updates for Whiz 1.x (and 0.x).</description>
+    <language>en</language>
+    <!-- releases, newest first -->
+  </channel>
+</rss>

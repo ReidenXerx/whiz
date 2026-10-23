@@ -46,5 +46,9 @@
 	<false/>
 	<key>NSSupportsSuddenTermination</key>
 	<false/>
+	<key>SUFeedURL</key>
+	<string>https://duduphudu.app/whiz/updates/v1.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>wtGbRbibmvjMsIrVeG2MQ5n+chbA4jIKZXVm76P8Jus=</string>
 </dict>
 </plist>

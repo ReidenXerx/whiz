@@ -20,6 +20,10 @@ import PackageDescription
 // without ffmpeg. whiz still decides what to extract and when; the helper
 // is a codec behind the same argv-and-exit-status contract as ffmpeg.
 //
+// One dependency, and it is not pipeline logic either: Sparkle, so a buyer
+// gets each new version from inside the app (Check for Updates…) instead of
+// re-downloading it. Pinned exactly; Package.resolved records its checksum.
+//
 // macOS 13 (Ventura) floor: the oldest release with MenuBarExtra and
 // SMAppService, and it still covers Macs back to 2017.
 let package = Package(
@@ -30,10 +34,13 @@ let package = Package(
         .executable(name: "whiz-media", targets: ["WhizMedia"]),
         .executable(name: "whiz-license", targets: ["WhizLicenseTool"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.10.0"),
+    ],
     targets: [
         .executableTarget(
             name: "WhizUI",
-            dependencies: ["WhizLicense"],
+            dependencies: ["WhizLicense", .product(name: "Sparkle", package: "Sparkle")],
             path: "Sources/WhizUI"
         ),
         .testTarget(

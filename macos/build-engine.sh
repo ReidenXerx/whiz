@@ -11,7 +11,10 @@
 #                     place of ffmpeg (see Sources/WhizMedia)
 #   python/           a relocatable CPython (python-build-standalone, via uv)
 #                     with whiz and the pinned engine-requirements.txt
-#   licenses/         the licence of every bundled component
+#
+# and, beside engine/, Acknowledgements.json: every component the app ships
+# (this engine, Sparkle) with its licence, which the app shows under
+# Whiz > Acknowledgements (bundle/acknowledgements/).
 #
 # build-app.sh copies it into Contents/Resources/engine and signs every
 # binary in it. Models are not bundled: the setup assistant downloads them.
@@ -31,8 +34,10 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CACHE="$MACOS_DIR/.engine"
 STAGE="$CACHE/stage/engine"
 
-# Pins. Changing one is a deliberate act: bump it, rebuild, run
-# check-engine.sh. The whisper.cpp hash is of the release tarball.
+# Pins. Changing one is a deliberate act: bump it, rebuild, run the app's
+# setup check. The whisper.cpp hash is of the release tarball. A new
+# Python can link different libraries: re-check the licence texts in
+# bundle/acknowledgements/python/ against its -full archive.
 WHISPER_VERSION="1.9.5"
 WHISPER_SHA256="ff1a9053feb509ff9d7729703355541ae9690073a6b1c40eb692c962e0dc1720"
 PYTHON_VERSION="3.13.13"
@@ -96,7 +101,7 @@ if [ ! -x "$PY_SRC/bin/$PY" ]; then
 fi
 
 echo "Assembling the engine…"
-rm -rf "$CACHE/stage" && mkdir -p "$STAGE/bin" "$STAGE/licenses"
+rm -rf "$CACHE/stage" && mkdir -p "$STAGE/bin"
 cp -R "$PY_SRC" "$STAGE/python"
 PYTHON="$STAGE/python/bin/$PY"
 # uv marks its Pythons as managed; this copy is ours alone.
@@ -105,15 +110,14 @@ rm -f "$STAGE/python/lib/$PY/EXTERNALLY-MANAGED"
 uv pip install --quiet --python "$PYTHON" --require-hashes -r "$REQUIREMENTS"
 uv pip install --quiet --python "$PYTHON" --no-deps "$REPO_ROOT"
 
-# Licences, before trimming removes the dist-info directories they sit in.
-cp "$STAGE/python/lib/$PY/LICENSE.txt" "$STAGE/licenses/Python.txt"
-cp "$WHISPER_SRC/LICENSE" "$STAGE/licenses/whisper.cpp.txt"
-for info in "$STAGE/python/lib/$PY/site-packages/"*.dist-info; do
-  name="$(basename "$info" .dist-info)"; name="${name%-*}"
-  [ "$name" = "pip" ] && continue
-  found="$(find "$info" \( -iname 'LICEN[CS]E*' -o -iname 'COPYING*' \) -type f | head -1)"
-  [ -n "$found" ] && cp "$found" "$STAGE/licenses/$name.txt"
-done
+# Licences, read by the bundled Python from what is actually installed in
+# it. Sparkle is resolved by the swift build above (whiz-media's package).
+"$PYTHON" -I -B "$MACOS_DIR/bundle/acknowledgements/build.py" \
+  --out "$CACHE/stage/Acknowledgements.json" \
+  --file whisper.cpp="$WHISPER_SRC/LICENSE" --version whisper.cpp="$WHISPER_VERSION" \
+  --file sparkle="$MACOS_DIR/.build/artifacts/sparkle/Sparkle/LICENSE" \
+  --resolved "$MACOS_DIR/Package.resolved" \
+  --onnxruntime "$STAGE/python/lib/$PY/site-packages/sherpa_onnx/lib/libonnxruntime.dylib"
 
 # Trim what a transcription never touches: pip (nothing installs into a
 # signed bundle), Tcl/Tk and the GUI-only stdlib, tests, headers, the
