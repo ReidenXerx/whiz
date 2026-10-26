@@ -18,7 +18,7 @@ struct AppStateTests {
 
     @Test("sidebar selections survive a storage round trip")
     func sidebarStorage() {
-        for item in [SidebarItem.compose, .live, .run("/a/b c:d.mov")] {
+        for item in [SidebarItem.compose, .record, .live, .run("/a/b c:d.mov")] {
             #expect(SidebarItem(storageValue: item.storageValue) == item)
         }
         #expect(SidebarItem(storageValue: "run:") == nil)
@@ -33,6 +33,7 @@ struct AppStateTests {
         #expect(TranscriptionViewModel.restorable(.live, history: [record]) == .compose,
                 "no run survives a relaunch")
         #expect(TranscriptionViewModel.restorable(nil, history: []) == .compose)
+        #expect(TranscriptionViewModel.restorable(.record, history: []) == .record)
     }
 
     @Test("the view model restores the persisted selection")

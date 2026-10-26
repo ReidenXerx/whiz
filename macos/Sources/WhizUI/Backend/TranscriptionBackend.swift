@@ -64,6 +64,10 @@ struct TranscriptionRequest: Equatable, Sendable {
     var input: URL
     var language: String?
     var speakers: Int?
+    /// Tell speakers apart even for audio, where the CLI otherwise does not
+    /// (it does for video on its own). The count stays automatic unless
+    /// `speakers` sets one.
+    var diarize = false
     /// Speaker names for the CLI's `--speakers-names`, comma-separated in
     /// one token (the CLI flattens either form). Assigned by total talk time,
     /// most talkative first; extra speakers keep their default label.

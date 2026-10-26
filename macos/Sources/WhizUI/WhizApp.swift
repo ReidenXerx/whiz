@@ -15,12 +15,20 @@ struct WhizApp: App {
     @StateObject private var settings = SettingsModel()
     @StateObject private var setup = SetupModel()
     @StateObject private var updater = UpdaterModel()
+    /// Shared with the app delegate, which finishes a recording on quit.
+    @ObservedObject private var recorder = RecorderModel.shared
 
     init() {
         // One license model, shared: the run gate and the views read it.
         let license = LicenseModel()
         _license = StateObject(wrappedValue: license)
-        _model = StateObject(wrappedValue: TranscriptionViewModel(license: license))
+        let model = TranscriptionViewModel(license: license)
+        _model = StateObject(wrappedValue: model)
+        RecorderModel.shared.onFinished = { [weak model] url in
+            guard let model, !model.isRunning else { return }
+            model.choose(url)
+            model.start()
+        }
     }
 
     var body: some Scene {
@@ -30,10 +38,21 @@ struct WhizApp: App {
                 .environmentObject(settings)
                 .environmentObject(setup)
                 .environmentObject(license)
+                .environmentObject(recorder)
                 .frame(minWidth: 860, minHeight: 560)
         }
         .defaultSize(width: 1180, height: 780)
-        .commands { WhizCommands(model: model, setup: setup, license: license, updater: updater) }
+        .commands { WhizCommands(model: model, setup: setup, license: license, updater: updater, recorder: recorder) }
+
+        // Only while recording: the clock and a Stop button, with the
+        // window closed or behind the call.
+        MenuBarExtra(isInserted: .constant(recorder.isBusy)) {
+            RecordingMenu()
+                .environmentObject(recorder)
+        } label: {
+            Label(RecorderModel.clock(recorder.elapsed), systemImage: "record.circle.fill")
+                .labelStyle(.titleAndIcon)
+        }
 
         Settings {
             SettingsView()
@@ -57,6 +76,7 @@ private struct WhizCommands: Commands {
     @ObservedObject var setup: SetupModel
     @ObservedObject var license: LicenseModel
     @ObservedObject var updater: UpdaterModel
+    @ObservedObject var recorder: RecorderModel
     @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
@@ -84,6 +104,8 @@ private struct WhizCommands: Commands {
             }
             .keyboardShortcut("o")
             .disabled(model.isRunning)
+            Button("New Recording") { model.selection = .record }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
         }
         CommandMenu("Run") {
             Button("Transcribe") { model.start() }
@@ -96,6 +118,36 @@ private struct WhizCommands: Commands {
             Button("Show Progress") { model.selection = .live }
                 .keyboardShortcut("l")
                 .disabled(model.liveRunInput == nil)
+            Divider()
+            Button(recorder.isRecording ? "Stop Recording" : "Start Recording") {
+                if !recorder.isRecording { model.selection = .record }
+                recorder.toggle()
+            }
+            .keyboardShortcut("r", modifiers: [.command, .shift])
+            .disabled(recorder.state == .starting || recorder.state == .stopping)
         }
+    }
+}
+
+/// The menu bar item's menu while recording.
+private struct RecordingMenu: View {
+    @EnvironmentObject private var recorder: RecorderModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Text(recorder.state == .stopping ? "Saving the recording…" : "Recording · \(RecorderModel.clock(recorder.elapsed))")
+        Divider()
+        Button("Stop Recording") {
+            // The transcription that follows shows in the window.
+            if recorder.preferences.transcribeWhenDone { showWindow() }
+            recorder.toggle()
+        }
+        .disabled(!recorder.isRecording)
+        Button("Show Whiz") { showWindow() }
+    }
+
+    private func showWindow() {
+        openWindow(id: "main")
+        NSApp.activate(ignoringOtherApps: true)
     }
 }

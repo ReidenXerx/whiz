@@ -88,10 +88,11 @@ fi
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$CONTENTS/Info.plist"
 
 # --force because a previous build may have left a stale signature on a
-# copied bundle. No entitlements: the app runs the engine as child
+# copied bundle. The engine needs no entitlements: the app runs it as child
 # processes and reads the files they write, which the hardened runtime
 # allows, and every library the bundled Python loads carries the same
-# signature, which library validation requires.
+# signature, which library validation requires. The app itself has one,
+# the microphone (bundle/Whiz.entitlements), for Record.
 #
 # Inside out: each Mach-O in the engine first (the interpreter, its
 # extension modules, onnxruntime, whisper-cli, whiz-media), the app last,
@@ -119,11 +120,11 @@ for part in "$SPARKLE/Versions/B/Autoupdate" "$SPARKLE/Versions/B/Updater.app" "
 done
 
 if [ -n "$IDENTITY" ]; then
-  codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
+  codesign --force --options runtime --timestamp --entitlements "$SCRIPT_DIR/bundle/Whiz.entitlements" --sign "$IDENTITY" "$APP"
   codesign --verify --strict "$APP"
   echo "Wrote $APP ($VERSION) — signed by \"$IDENTITY\" (hardened runtime)."
 else
-  codesign --force --sign - "$APP"
+  codesign --force --entitlements "$SCRIPT_DIR/bundle/Whiz.entitlements" --sign - "$APP"
   codesign --verify "$APP"
   echo "Wrote $APP ($VERSION) — ad-hoc signed, runs on THIS Mac only (not notarized)."
 fi

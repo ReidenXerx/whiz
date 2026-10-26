@@ -114,11 +114,15 @@ final class TranscriptionViewModel: ObservableObject {
     /// The trial and license gate; nil runs ungated (tests that are not
     /// about licensing).
     private let license: LicenseModel?
+    /// True for a call Whiz recorded (see `RecordingPreferences.isRecording`).
+    private let isRecording: (URL) -> Bool
 
     init(lastRunStore: LastRunStore = LastRunStore(),
          optionsStore: OptionsStore = OptionsStore(),
          license: LicenseModel? = nil,
+         isRecording: @escaping (URL) -> Bool = { RecordingPreferences.load().isRecording($0) },
          makeBackend: @escaping () throws -> CLIBackend = { try CLIBackend() }) {
+        self.isRecording = isRecording
         self.lastRunStore = lastRunStore
         self.optionsStore = optionsStore
         self.license = license
@@ -134,6 +138,8 @@ final class TranscriptionViewModel: ObservableObject {
         switch item {
         case .run(let path) where history.contains(where: { $0.inputPath == path }):
             return .run(path)
+        case .record:
+            return .record
         default:
             return .compose
         }
@@ -217,6 +223,9 @@ final class TranscriptionViewModel: ObservableObject {
         var request = TranscriptionRequest(input: input)
         request.language = language.isEmpty ? nil : language
         request.speakers = speakers > 0 ? speakers : nil
+        // A recorded call has more than one voice; the CLI only assumes
+        // that for video.
+        request.diarize = isRecording(input)
         request.speakerNames = speakerNames.trimmingCharacters(in: .whitespaces).isEmpty
             ? nil : speakerNames
         request.screenshots = screenshots.requestValue

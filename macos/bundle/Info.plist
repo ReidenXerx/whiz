@@ -4,6 +4,8 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Whiz</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
@@ -30,8 +32,6 @@
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>Whiz</string>
-	<key>CFBundleDisplayName</key>
-	<string>Whiz</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -42,6 +42,8 @@
 	<string>13.3</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Whiz records your side of a call when you press Record. The recording stays on your Mac.</string>
 	<key>NSSupportsAutomaticTermination</key>
 	<false/>
 	<key>NSSupportsSuddenTermination</key>

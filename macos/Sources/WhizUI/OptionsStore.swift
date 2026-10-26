@@ -55,17 +55,19 @@ struct OptionsStore {
     }
 }
 
-/// What the sidebar has selected: the new-run form, the run in progress (or
-/// the one that just failed), or a finished run from history, keyed by its
+/// What the sidebar has selected: the new-run form, the recorder, the run in
+/// progress (or the one that just failed), or a finished run from history, keyed by its
 /// input path — the same identity `LastRunStore` dedupes on.
 enum SidebarItem: Hashable, Sendable {
     case compose
+    case record
     case live
     case run(String)
 
     var storageValue: String {
         switch self {
         case .compose: return "compose"
+        case .record: return "record"
         case .live: return "live"
         case .run(let path): return "run:" + path
         }
@@ -74,6 +76,7 @@ enum SidebarItem: Hashable, Sendable {
     init?(storageValue: String) {
         switch storageValue {
         case "compose": self = .compose
+        case "record": self = .record
         case "live": self = .live
         default:
             guard storageValue.hasPrefix("run:"), storageValue.count > 4 else { return nil }
