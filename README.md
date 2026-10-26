@@ -194,6 +194,7 @@ and fails the build if a Python package has no license file.
 - **Results:** the transcript with speaker colors, search, frames and a built-in player (click a timestamp to play from there), the rendered AI summary, and every file written.
 - **Settings (⌘,):** whiz's own `config.toml` through `whiz config` (model, default language, output formats, speaker detection, AI server and key), plus the remembered voices, each of which can be forgotten. The terminal and the app share one config.
 - **Export for AI:** a run as one file an AI reads whole. A PDF for ChatGPT or Claude holds the named transcript as real text, with each screen that changed placed where it changed. Repeated frames are dropped (a pointer moving is not a change), and the file holds at most 60 images. A Markdown file for agents (Claude Code, Codex, Cursor) links the same frames on disk. The AI summary leads both, marked as derived.
+- **Agents (Settings → Agents):** connects Claude Desktop or Cursor to your past calls in one click (Whiz adds only its own entry to their config file), or copies the command for Claude Code. Agents can then list, search and read your calls and see the screen at a moment, through `whiz mcp`.
 - **Summarize Now:** a finished run without a summary gets one from its Summary tab (`whiz analyze`).
 
 ## What it does
@@ -358,6 +359,26 @@ whiz speakers list                     # stored profiles (name, dim, samples, pa
 whiz speakers forget Alice             # delete a profile
 whiz speakers match recording.mov --speakers 4   # dry-run: how clusters match stored profiles
 ```
+
+### `whiz library list | add | forget`
+
+Every recording whiz transcribes is added to a library (`~/.config/whiz/library.jsonl`) when the run finishes, wherever the recording lives; `whiz mcp` serves it. The library points at the files each run wrote, copies nothing, and drops a recording whose transcript is deleted.
+
+```bash
+whiz library list                      # newest first: id, date, length, title, speakers
+whiz library add ~/Movies/*.mov        # recordings transcribed before the library existed
+whiz library forget talk.mov           # hide one (its files stay)
+```
+
+### `whiz mcp`
+
+Serves the library to AI agents over the [Model Context Protocol](https://modelcontextprotocol.io) on stdin/stdout, read-only. The tools: `list_calls` (recent first, filter by title, speaker or date), `search_calls` (lines containing all the given words, case and accents ignored, optionally from one speaker), `get_transcript` (`[hh:mm:ss] Speaker: text`, optionally a time range), `get_summary` (the AI summary, if one was made) and `get_frame` (the screen at a moment, as an image).
+
+```bash
+claude mcp add --scope user whiz -- whiz mcp          # Claude Code, with whiz on PATH
+```
+
+For Claude Desktop or Cursor, add `{"mcpServers": {"whiz": {"command": "whiz", "args": ["mcp"]}}}` to their config, with `command` the full path when the client's PATH lacks whiz. Whiz.app does this for you: Settings → Agents. What an agent reads goes to its own AI provider.
 
 ### `whiz analyze <file>`
 

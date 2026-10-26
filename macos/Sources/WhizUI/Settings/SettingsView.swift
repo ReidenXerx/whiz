@@ -44,6 +44,8 @@ struct SettingsView: View {
                         .tabItem { Label("Voices", systemImage: "person.wave.2") }
                     AISettings()
                         .tabItem { Label("AI", systemImage: "sparkles") }
+                    AgentSettings()
+                        .tabItem { Label("Agents", systemImage: "point.3.connected.trianglepath.dotted") }
                     AboutSettings()
                         .tabItem { Label("whiz", systemImage: "terminal") }
                     LicenseSettings()
