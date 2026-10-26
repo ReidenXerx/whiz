@@ -736,8 +736,8 @@ Carol    4 recordings</pre>
           <li>Apple silicon, macOS 13.3 or later</li>
         </ul>
         <!-- The checkout appears only when STORE (script below) has a config for
-             this page: live once Paddle approves the account; ?store=sandbox
-             for test purchases until then. -->
+             this page: live once Paddle approves the account (?store=live
+             previews it until then); ?store=sandbox for test purchases. -->
         <button class="button primary buy" type="button" hidden>Buy Whiz &middot; $39</button>
         <p class="soon">Checkout and download open with the first signed release.</p>
         <div class="license" hidden aria-live="polite">
@@ -832,16 +832,21 @@ Carol    4 recordings</pre>
   // itself stays free of third-party scripts.
   (function () {
     var STORE = {
-      // Filled in when Paddle approves the live account.
-      live: null,
+      // `public` turns on when Paddle approves the account; until then the
+      // live checkout shows only with ?store=live.
+      live: { environment: "production", token: "live_54c9ca0b3f3edea4ab5b136db7f",
+              priceId: "pri_01m5wekasefwc47p46qsg5a19j", public: false,
+              licenseApi: "https://store.duduphudu.app/license" },
       sandbox: { environment: "sandbox", token: "test_00d2a514d06732562533aea90fc",
-                 priceId: "pri_01m5fn45ppkbxbawwwsqg3s14v" },
+                 priceId: "pri_01m5fn45ppkbxbawwwsqg3s14v", public: false,
+                 licenseApi: "https://store-sandbox.duduphudu.app/license" },
     };
-    var LICENSE_API = "https://store.duduphudu.app/license";
-    var mode = new URLSearchParams(location.search).get("store") === "sandbox" ? "sandbox" : "live";
+    var params = new URLSearchParams(location.search);
+    var mode = params.get("store") === "sandbox" ? "sandbox" : "live";
     var config = STORE[mode];
+    var preview = !config.public;
     var card = document.getElementById("buy");
-    if (!config || !card) return;
+    if (!card || (preview && params.get("store") !== mode)) return;
 
     var buy = card.querySelector(".buy");
     var soon = card.querySelector(".soon");
@@ -850,7 +855,9 @@ Carol    4 recordings</pre>
     var keyBox = panel.querySelector(".license-key");
     var help = panel.querySelector(".license-help");
     buy.hidden = false;
-    soon.textContent = mode === "sandbox" ? "Sandbox checkout: test cards only, no real payment." : "Secure checkout by Paddle.";
+    soon.textContent = mode === "sandbox" ? "Sandbox checkout: test cards only, no real payment."
+      : preview ? "Live checkout preview: payments open once Paddle approves the account."
+      : "Secure checkout by Paddle.";
 
     var ready = null;
     function paddle() {
@@ -868,6 +875,10 @@ Carol    4 recordings</pre>
       });
       return ready;
     }
+
+    // Paddle's payment links land here with ?_ptxn=…; Paddle.js opens that
+    // transaction's checkout by itself once initialized.
+    if (params.get("_ptxn")) paddle();
 
     buy.addEventListener("click", function () {
       paddle().then(function (P) {
@@ -890,7 +901,7 @@ Carol    4 recordings</pre>
     // The payment can take a few seconds to settle (202), and Paddle's own
     // records can lag the checkout by a moment (404); try for about a minute.
     function fetchKey(transactionId, attempt) {
-      fetch(LICENSE_API + "?transaction_id=" + encodeURIComponent(transactionId))
+      fetch(config.licenseApi + "?transaction_id=" + encodeURIComponent(transactionId))
         .then(function (response) {
           if (response.status === 200) return response.json().then(show);
           if (attempt < 30 && (response.status === 202 || response.status === 404 || response.status >= 500)) {
