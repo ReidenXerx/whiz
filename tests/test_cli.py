@@ -535,6 +535,12 @@ def test_merge_diarized_success_writes_labeled_outputs(tmp_path, monkeypatch):
     html = (tmp_path / "meeting.mp3.speakers.html").read_text(encoding="utf-8")
     assert "Speaker A" in html
     assert 'class="note"' not in html
+    # The finished run is in the library, for `whiz mcp`.
+    from whiz import library
+    [call] = library.calls()
+    assert call.input == audio.resolve() and sorted(call.speakers()) == ["Speaker A", "Speaker B"]
+    # `library add` finds the same outputs on its own.
+    assert library.discover(audio) == (call.base, call.whisper_json)
 
 
 def test_transcribe_fallback_warns_discarded_speakers_names(tmp_path, monkeypatch, capsys):

@@ -71,6 +71,7 @@ struct RootView: View {
             await settings.reload()
             await setup.refresh()
             if !setupDone { setup.isPresented = true }
+            await LibraryImport.runOnce(history: model.recentRuns, executable: WhizLocator.find())
         }
     }
 

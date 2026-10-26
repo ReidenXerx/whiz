@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import logging
 import os
 import re
@@ -39,6 +40,7 @@ from whiz import models as M
 from whiz import screenshots as SC
 from whiz import ai as AI
 from whiz import profiles as P
+from whiz import library as L
 from whiz import ui
 
 # whisper-cli output-format flags. "html" is whiz-only (post-merge, not a
@@ -1271,7 +1273,22 @@ def cmd_transcribe(args: argparse.Namespace) -> int:
     with contextlib.ExitStack() as stack:
         if not args.dry_run:
             stack.callback(_remove_intermediate_audio, wav, in_path, keep_wav, quiet=True)
-        return _run_transcribe(args, config, built, stack)
+        rc = _run_transcribe(args, config, built, stack)
+    if not args.dry_run:
+        of_base = built[5]
+        _remember(in_path, of_base,
+                  _find_whisper_json(of_base, _naming_wav(in_path, wav), of_passed=bool(args.output)))
+    return rc
+
+
+def _remember(in_path: Path, of_base: Path, whisper_json: Path | None) -> None:
+    """Add the run to the library (whiz mcp, search) — whatever it wrote,
+    even on a degraded exit. Never fails the run: the transcript exists
+    either way."""
+    try:
+        L.remember(in_path, of_base, whisper_json)
+    except OSError as exc:
+        ui.muted(f"Could not add this recording to the library ({L.library_path()}): {exc}")
 
 
 def _run_transcribe(
@@ -2185,6 +2202,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     ui.wrote("Wrote analysis", out_path)
     # A leftover from an earlier failed run would read as current.
     _analysis_partial_path(of_base).unlink(missing_ok=True)
+    _remember(in_path, of_base, L.discover(in_path)[1])
     # On a terminal the response is the point of the command. Over a pipe it
     # is already in .analysis.md, and echoing model-written text into the
     # stream the macOS UI parses let a reply line like "✓ Decision: ship
@@ -2524,6 +2542,8 @@ def _run_merge(args: argparse.Namespace, stack: contextlib.ExitStack) -> int:
         written.extend(str(p) for p in fallback_written)
         kept_outputs.extend(fallback_kept)
     ui.summary(written)
+    if written or kept_outputs:
+        _remember(in_path, of_base, json_path)
     if not written:
         if kept_outputs:
             # Everything this run would have written already existed and was
@@ -2697,6 +2717,58 @@ def _run_speakers_match(args: argparse.Namespace, stack: contextlib.ExitStack) -
 
 
 # ---------- config ----------
+
+def cmd_library_list(args: argparse.Namespace) -> int:
+    calls = L.calls()
+    if args.json:
+        print(json.dumps([{
+            "id": c.id, "input": str(c.input), "title": c.title,
+            "recorded": c.recorded().isoformat(timespec="seconds"),
+            "duration": round(c.duration, 1), "speakers": c.speakers(),
+            "has_summary": c.has_summary, "has_frames": c.has_frames,
+        } for c in calls], ensure_ascii=False, indent=2))
+        return 0
+    if not calls:
+        ui.muted(f"The library is empty ({L.library_path()}). Transcribed recordings are added as they finish; "
+                 "add earlier ones with: whiz library add <recording>…")
+        return 0
+    for c in calls:
+        speakers = ", ".join(c.speakers()) or "-"
+        print(f"{c.id}  {c.recorded().astimezone():%Y-%m-%d %H:%M}  {_fmt_elapsed(c.duration):>8}  {c.title}  ({speakers})")
+    return 0
+
+
+def cmd_library_add(args: argparse.Namespace) -> int:
+    """Register recordings transcribed before the library existed."""
+    failed = 0
+    for file in args.files:
+        in_path = Path(file).expanduser()
+        if not in_path.exists():
+            ui.status(f"No such file: {in_path}", kind="warn")
+            failed += 1
+            continue
+        base, whisper_json = L.discover(in_path)
+        call = L.remember(in_path, base, whisper_json)
+        if call is None:
+            ui.status(f"No transcript beside {in_path.name}: transcribe it first", kind="warn")
+            failed += 1
+        else:
+            ui.status(f"Added {in_path.name}", kind="ok", detail=call.id)
+    return 1 if failed else 0
+
+
+def cmd_library_forget(args: argparse.Namespace) -> int:
+    """Hide a recording from the library (its files stay)."""
+    L.forget(Path(args.file).expanduser())
+    ui.status(f"Forgot {Path(args.file).name}; its files are untouched", kind="ok")
+    return 0
+
+
+def cmd_mcp(args: argparse.Namespace) -> int:
+    from whiz import mcp
+
+    return mcp.serve()
+
 
 def cmd_config_show(args: argparse.Namespace) -> int:
     config = cfg.load()
@@ -3094,6 +3166,21 @@ def build_parser() -> argparse.ArgumentParser:
     sm.add_argument("--cluster-threshold", type=float, default=None, help="Clustering threshold when auto-detecting (default 0.9)")
     sm.add_argument("--no-auto-diarization-setup", dest="no_auto_diarization_setup", action="store_true", help="Don't auto-install sherpa-onnx / auto-download diarization models when diarization is enabled and missing (one-time setup, ~90 MB)")
     sm.set_defaults(func=cmd_speakers_match)
+
+    # library + mcp
+    lb = sub.add_parser("library", aliases=["lib"], help="The recordings whiz has transcribed (what `whiz mcp` serves)")
+    lbsub = lb.add_subparsers(dest="library_command", required=True)
+    lbl = lbsub.add_parser("list", aliases=["ls"], help="List transcribed recordings, newest first")
+    lbl.add_argument("--json", action="store_true", help="Print the list as JSON")
+    lbl.set_defaults(func=cmd_library_list)
+    lba = lbsub.add_parser("add", help="Add recordings transcribed before the library existed")
+    lba.add_argument("files", nargs="+", help="The recordings (not their transcripts)")
+    lba.set_defaults(func=cmd_library_add)
+    lbf = lbsub.add_parser("forget", aliases=["rm"], help="Remove a recording from the library (its files stay)")
+    lbf.add_argument("file", help="The recording")
+    lbf.set_defaults(func=cmd_library_forget)
+    mc = sub.add_parser("mcp", help="Serve past calls to AI agents (Claude, Cursor…) over MCP on stdin/stdout")
+    mc.set_defaults(func=cmd_mcp)
 
     # dictate
     dt = sub.add_parser("dictate", aliases=["d"], help="Moved to Mynah (github.com/ReidenXerx/mynah)")
