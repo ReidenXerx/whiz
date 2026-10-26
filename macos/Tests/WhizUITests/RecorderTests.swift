@@ -1,4 +1,5 @@
-import AVFoundation
+// AVAssetTrack is Sendable only in newer SDKs than CI's.
+@preconcurrency import AVFoundation
 import Foundation
 import Testing
 @testable import WhizUI
