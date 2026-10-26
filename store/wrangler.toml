@@ -1,24 +1,42 @@
 # whiz-store: Paddle payment → Whiz license key. See src/worker.js.
+#
+# Two deployments of the same code, one per Paddle environment, each with
+# its own secrets, its own webhook destination and its own KV, so a test
+# purchase can never touch a real one:
+#   npx wrangler deploy                 live      → store.duduphudu.app
+#   npx wrangler deploy --env sandbox   sandbox   → store-sandbox.duduphudu.app
 name = "whiz-store"
 main = "src/worker.js"
 compatibility_date = "2026-10-01"
 
-# store.duduphudu.app: Paddle's webhook destination and what the thank-you
-# page asks for its key. The zone is already on this Cloudflare account.
+# Paddle's webhook destination and what the thank-you page asks for its
+# key. The zone is already on this Cloudflare account.
 routes = [{ pattern = "store.duduphudu.app", custom_domain = true }]
 
 [vars]
-PADDLE_ENV = "sandbox"          # "production" once the live account is approved
+PADDLE_ENV = "production"
 ALLOWED_ORIGIN = "https://duduphudu.app"
 
-# Issued keys by transaction id. Create once with
-#   npx wrangler kv namespace create LICENSES
-# and put the printed id here.
+# Issued keys by transaction id. Created with
+#   npx wrangler kv namespace create LICENSES_LIVE
 [[kv_namespaces]]
 binding = "LICENSES"
-id = "00e8608197294693853ba6c7ccde211c"
+id = "e9d8484ecbbe4a42a91359e3d4b89a5a"
 
-# Secrets, set with `npx wrangler secret put NAME` (never committed):
-#   PADDLE_API_KEY          Paddle API key (sandbox: pdl_sdbx_apikey_…)
-#   PADDLE_WEBHOOK_SECRET   the notification destination's secret (pdl_ntfset_…)
+# Secrets, set per deployment with `npx wrangler secret put NAME [--env sandbox]`
+# (never committed):
+#   PADDLE_API_KEY          Paddle API key: pdl_live_apikey_… / pdl_sdbx_apikey_…
+#   PADDLE_WEBHOOK_SECRET   that environment's notification destination secret
 #   LICENSE_SIGNING_KEY     contents of ~/.config/whiz-license/signing.key
+
+[env.sandbox]
+name = "whiz-store-sandbox"
+routes = [{ pattern = "store-sandbox.duduphudu.app", custom_domain = true }]
+
+[env.sandbox.vars]
+PADDLE_ENV = "sandbox"
+ALLOWED_ORIGIN = "https://duduphudu.app"
+
+[[env.sandbox.kv_namespaces]]
+binding = "LICENSES"
+id = "00e8608197294693853ba6c7ccde211c"

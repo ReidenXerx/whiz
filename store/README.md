@@ -17,17 +17,19 @@ npm test        # node --test; no dependencies
 
 ## Deploy
 
-All of this runs on the Cloudflare account that holds `duduphudu.app`.
+All of this runs on the Cloudflare account that holds `duduphudu.app`. The same code is deployed twice, once per Paddle environment, each with its own KV, secrets and webhook destination, so a test purchase never touches a real one:
 
-```bash
-npx wrangler login
-npx wrangler kv namespace create LICENSES        # put the id into wrangler.toml
-npx wrangler secret put PADDLE_API_KEY           # pdl_sdbx_apikey_… (sandbox) / pdl_live_apikey_…
-npx wrangler secret put PADDLE_WEBHOOK_SECRET    # the notification destination's secret
-npx wrangler secret put LICENSE_SIGNING_KEY      # contents of ~/.config/whiz-license/signing.key
-npx wrangler deploy                              # → https://store.duduphudu.app
-```
+| | Live | Sandbox |
+|---|---|---|
+| Worker | `whiz-store` | `whiz-store-sandbox` |
+| Host | `store.duduphudu.app` | `store-sandbox.duduphudu.app` |
+| Deploy | `npx wrangler deploy` | `npx wrangler deploy --env sandbox` |
+| Keys it issues | `whiz` | `whiz-sandbox` (the app refuses them) |
 
-Then, in Paddle, add a notification destination at `https://store.duduphudu.app/paddle/webhook` for `transaction.completed`. Its secret is `PADDLE_WEBHOOK_SECRET`.
+Each deployment needs three secrets (`npx wrangler secret put NAME`, plus `--env sandbox` for the sandbox one; pipe them in, never paste them anywhere):
 
-Sandbox and live use separate keys, secrets and destinations. Going live means setting `PADDLE_ENV = "production"` and putting in the live secrets.
+- `PADDLE_API_KEY`: that environment's API key (`pdl_live_apikey_…` / `pdl_sdbx_apikey_…`), with read access to transactions and customers.
+- `PADDLE_WEBHOOK_SECRET`: the secret of that environment's notification destination, `https://<host>/paddle/webhook` for `transaction.completed`.
+- `LICENSE_SIGNING_KEY`: the contents of `~/.config/whiz-license/signing.key`, the same for both.
+
+The site (`docs/index.html`, `STORE`) points each checkout at its own host.
