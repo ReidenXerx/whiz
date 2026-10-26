@@ -224,6 +224,8 @@ final class CLIBackend: TranscriptionBackend, @unchecked Sendable {
         }
         if let speakers = request.speakers, speakers > 0 {
             argv += ["--speakers", String(speakers)]
+        } else if request.diarize {
+            argv.append("--speakers")
         }
         // One comma-joined token: the CLI flattens either form, and a single
         // token keeps argv readable in the log.

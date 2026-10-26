@@ -8,6 +8,7 @@ struct RootView: View {
     @EnvironmentObject private var settings: SettingsModel
     @EnvironmentObject private var setup: SetupModel
     @EnvironmentObject private var license: LicenseModel
+    @EnvironmentObject private var recorder: RecorderModel
     @ObservedObject private var router = FileOpenRouter.shared
     /// Set once the assistant has been finished or skipped; until then it
     /// opens on launch.
@@ -77,7 +78,7 @@ struct RootView: View {
     /// section, so the file name is not printed twice.
     private var title: String {
         switch model.selection {
-        case .compose: return "Whiz"
+        case .compose, .record: return "Whiz"
         case .live: return model.isRunning ? "Transcribing" : "Last Run"
         case .run: return "Whiz"
         }
@@ -88,6 +89,8 @@ struct RootView: View {
         switch model.selection {
         case .compose:
             ComposeView()
+        case .record:
+            RecordView()
         case .live:
             if model.liveRunInput != nil {
                 LiveRunView()
@@ -113,6 +116,8 @@ private struct SidebarView: View {
         List(selection: selection) {
             Label("New Transcription", systemImage: "plus.circle")
                 .tag(SidebarItem.compose)
+            RecordRow()
+                .tag(SidebarItem.record)
 
             if let input = model.liveRunInput {
                 Section(model.isRunning ? "In Progress" : "Last Run") {
@@ -159,6 +164,29 @@ private struct SidebarView: View {
     /// List selection is optional; the model's is not.
     private var selection: Binding<SidebarItem?> {
         Binding(get: { model.selection }, set: { if let item = $0 { model.selection = item } })
+    }
+}
+
+/// "Record a Call", or the recording's clock while one runs.
+private struct RecordRow: View {
+    @EnvironmentObject private var recorder: RecorderModel
+
+    var body: some View {
+        if recorder.isBusy {
+            Label {
+                HStack {
+                    Text("Recording")
+                    Spacer()
+                    Text(RecorderModel.clock(recorder.elapsed))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+            } icon: {
+                Image(systemName: "record.circle.fill").foregroundStyle(.red)
+            }
+        } else {
+            Label("Record a Call", systemImage: "record.circle")
+        }
     }
 }
 
@@ -246,6 +274,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// One window; closing it should not leave a windowless app in the Dock
-    /// that the user then has to quit separately.
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    /// that the user then has to quit separately — unless a recording is
+    /// running, which goes on in the menu bar.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        MainActor.assumeIsolated { !RecorderModel.shared.isBusy }
+    }
+
+    /// Quitting mid-recording finishes the file first, so the call is kept.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        MainActor.assumeIsolated {
+            let recorder = RecorderModel.shared
+            guard recorder.isBusy else { return .terminateNow }
+            Task { @MainActor in
+                while recorder.state == .starting { try? await Task.sleep(for: .milliseconds(50)) }
+                await recorder.stop(transcribe: false)
+                // A stop already under way (from the menu bar) finishes too.
+                while recorder.isBusy { try? await Task.sleep(for: .milliseconds(50)) }
+                sender.reply(toApplicationShouldTerminate: true)
+            }
+            return .terminateLater
+        }
+    }
 }

@@ -116,6 +116,18 @@ struct CLIArgumentTests {
         #expect(!CLIBackend.arguments(for: request).contains("--speakers"))
     }
 
+    @Test("a recorded call is diarized with an automatic count; a set count wins")
+    func diarizeAudio() {
+        var request = TranscriptionRequest(input: URL(fileURLWithPath: "/tmp/call.m4a"))
+        request.diarize = true
+        let argv = CLIBackend.arguments(for: request)
+        #expect(argv.filter { $0 == "--speakers" }.count == 1)
+        #expect(argv.last == "--speakers", "bare: the CLI's const=0, auto-detect")
+        request.speakers = 2
+        #expect(CLIBackend.arguments(for: request).firstIndex(of: "--speakers")
+            .map { CLIBackend.arguments(for: request)[$0 + 1] } == "2")
+    }
+
     @Test("an empty speaker-names field sends no flag, not an empty name")
     func emptyNamesMeansAuto() {
         // Empty means "CLI decides" for every field; a literal empty-string
