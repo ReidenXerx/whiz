@@ -2488,6 +2488,88 @@ def test_doctor_ai_probe_is_opt_in(monkeypatch, tmp_path):
     assert ai["reachable"] and ai["model_available"] and ai["models"] == ["qwen3:8b"]
 
 
+def _ollama_env(monkeypatch, tmp_path, *, app=False, cli_path=None, running=False):
+    """No models listed at Ollama's address; Ollama itself only where asked for."""
+    _doctor_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli.AI, "list_ollama_models", lambda url, timeout: [])
+    monkeypatch.setattr(cli.AI, "server_answers", lambda url: running)
+    apps = tmp_path / "Applications"
+    if app:
+        (apps / "Ollama.app").mkdir(parents=True)
+    monkeypatch.setattr(cli, "_OLLAMA_APPS", (str(apps / "Ollama.app"),))
+    monkeypatch.setattr(cli, "_OLLAMA_CLIS", (str(cli_path) if cli_path else str(tmp_path / "no-ollama"),))
+    return cli.cfg.Config(ai_model="qwen3:8b", ai_base_url="http://localhost:11434/v1")
+
+
+def test_doctor_tells_an_installed_ollama_from_a_missing_one(monkeypatch, tmp_path):
+    # The setup assistant said "Install Ollama" to a Mac that had it, only
+    # not running: the report now carries what is installed and whether it answers.
+    config = _ollama_env(monkeypatch, tmp_path, app=True)
+    ai = cli._doctor_report(config, check_ai=True)["ai"]
+    assert ai["reachable"] is False
+    assert ai["ollama"] == {"app": str(tmp_path / "Applications" / "Ollama.app"), "cli": None,
+                            "homebrew": False, "running": False}
+    assert cli._ollama_hint(ai["ollama"]) == ("not running", "open -a Ollama")
+
+    (tmp_path / "none").mkdir()
+    config = _ollama_env(monkeypatch, tmp_path / "none")
+    ollama = cli._doctor_report(config, check_ai=True)["ai"]["ollama"]
+    assert ollama["app"] is None and ollama["cli"] is None
+    assert cli._ollama_hint(ollama)[0] == "not installed"
+
+
+def test_doctor_knows_a_homebrew_ollama_by_its_cellar(monkeypatch, tmp_path):
+    keg = tmp_path / "Cellar" / "ollama" / "0.9.0" / "bin"
+    keg.mkdir(parents=True)
+    (keg / "ollama").write_text("")
+    link = tmp_path / "bin" / "ollama"
+    link.parent.mkdir()
+    link.symlink_to(keg / "ollama")
+    config = _ollama_env(monkeypatch, tmp_path, cli_path=link)
+    ollama = cli._doctor_report(config, check_ai=True)["ai"]["ollama"]
+    assert ollama["cli"] == str(link) and ollama["homebrew"] is True
+    assert cli._ollama_hint(ollama) == ("not running", "brew services start ollama")
+
+
+def test_doctor_says_a_running_ollama_needs_a_model(monkeypatch, tmp_path):
+    config = _ollama_env(monkeypatch, tmp_path, app=True, running=True)
+    ollama = cli._doctor_report(config, check_ai=True)["ai"]["ollama"]
+    assert ollama["running"] is True
+    assert cli._ollama_hint(ollama)[0] == "no models"
+
+
+@pytest.mark.parametrize("base_url", ["http://gpu-box:11434/v1", "http://localhost:1234/v1",
+                                      "https://ollama.com/v1", "http://localhost:bad/v1"])
+def test_doctor_leaves_other_servers_alone(monkeypatch, tmp_path, base_url):
+    _ollama_env(monkeypatch, tmp_path, app=True)
+    config = cli.cfg.Config(ai_model="m", ai_base_url=base_url)
+    assert "ollama" not in cli._doctor_report(config, check_ai=True)["ai"]
+
+
+def test_doctor_text_names_the_ollama_fix(monkeypatch, tmp_path, capsys):
+    config = _ollama_env(monkeypatch, tmp_path, app=True)
+    monkeypatch.setattr(cli.cfg, "load", lambda: config)
+    cli.cmd_doctor(SimpleNamespace(json=False, ai=True))
+    out = capsys.readouterr()
+    text = out.out + out.err
+    assert "not running" in text and "open -a Ollama" in text
+
+
+def test_server_answers_counts_any_http_status(monkeypatch):
+    import urllib.error
+
+    def refuse(url, timeout):
+        raise urllib.error.URLError("refused")
+
+    def not_found(url, timeout):
+        raise urllib.error.HTTPError(url, 404, "nope", {}, None)
+
+    monkeypatch.setattr(cli.AI.urllib.request, "urlopen", refuse)
+    assert cli.AI.server_answers("http://localhost:11434/v1") is False
+    monkeypatch.setattr(cli.AI.urllib.request, "urlopen", not_found)
+    assert cli.AI.server_answers("http://localhost:11434/v1") is True
+
+
 def test_doctor_flags_a_quantized_fallback_but_stays_ready(monkeypatch, tmp_path, capsys):
     # NS-15: the only model on disk is quantized — it runs, so the doctor is
     # ready, but it says so and names the unquantized download.
