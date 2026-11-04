@@ -1395,6 +1395,25 @@ def list_ollama_models(base_url: str, *, timeout: int = 10) -> list[str]:
     return _get_json(_chat_base(base_url) + "/models", timeout) or []
 
 
+def server_answers(base_url: str, *, timeout: int = 3) -> bool:
+    """True if anything answers HTTP at the server root of ``base_url``.
+
+    ``list_ollama_models`` returns ``[]`` both for a server with no models and
+    for no server at all; this tells the two apart. Any HTTP status counts as
+    an answer: only a refused or timed-out connection means nothing is there.
+    """
+    root = base_url.rstrip("/")
+    if root.endswith("/v1"):
+        root = root[:-3]
+    try:
+        with urllib.request.urlopen(root + "/api/version", timeout=timeout):  # noqa: S310 - local server
+            return True
+    except urllib.error.HTTPError:
+        return True
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
 def probe_model(base_url: str, model: str, api_key: str = "", *, timeout: int = 30) -> tuple[bool, str]:
     """Send a trivial chat completion to check ``model`` is actually usable.
 

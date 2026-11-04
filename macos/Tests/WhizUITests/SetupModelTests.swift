@@ -222,6 +222,48 @@ struct SetupModelTests {
         #expect(setup.report?.ai.models == ["m1"], "the probe result must not be blanked")
     }
 
+    @Test("an installed Ollama is started, not offered for download")
+    func ollamaFixes() throws {
+        typealias Ollama = DoctorReport.AI.Ollama
+        let app = Ollama(app: "/Applications/Ollama.app", cli: "/usr/local/bin/ollama", homebrew: false, running: false)
+        #expect(SetupModel.ollamaFix(app, hasBrew: true) == .openApp(URL(fileURLWithPath: "/Applications/Ollama.app")))
+        let formula = Ollama(app: nil, cli: "/opt/homebrew/bin/ollama", homebrew: true, running: false)
+        #expect(SetupModel.ollamaFix(formula, hasBrew: true) == .brewServices)
+        #expect(SetupModel.ollamaFix(formula, hasBrew: false) == .terminal)
+        #expect(SetupModel.ollamaFix(Ollama(app: nil, cli: nil, homebrew: false, running: false), hasBrew: true) == .install)
+        #expect(SetupModel.ollamaFix(Ollama(app: app.app, cli: nil, homebrew: false, running: true), hasBrew: true) == .pullModel,
+                "a running server with no models needs a model, not a start")
+
+        let report = try DoctorReport.decode("""
+        {"version": "0.14.0", "checks": {}, "ready": true, "ai": {"configured": true, "base_url": "http://localhost:11434/v1",
+         "model": "q", "reachable": false, "models": [], "model_available": false,
+         "ollama": {"app": null, "cli": "/opt/homebrew/bin/ollama", "homebrew": true, "running": false}}}
+        """)
+        #expect(report.ai.ollama == formula)
+    }
+
+    @Test("Open Ollama opens the app, then checks until the server answers")
+    func openOllamaApp() async throws {
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let opened = directory.appendingPathComponent("opened").path
+        let whiz = try script(directory, "whiz", """
+        if [ -f '\(opened)' ]; then RUNNING=true; else RUNNING=false; fi
+        printf '{"version": "1", "checks": {}, "ready": true, "ai": {"configured": true, "base_url": "http://localhost:11434/v1", "model": "q", "reachable": false, "models": [], "model_available": false, "ollama": {"app": "/Applications/Ollama.app", "cli": null, "homebrew": false, "running": %s}}}\\n' "$RUNNING"
+        """)
+        var openedURLs: [URL] = []
+        let setup = SetupModel(locateWhiz: { whiz }, locateTool: { _ in nil }, openFile: { url in
+            openedURLs.append(url)
+            FileManager.default.createFile(atPath: opened, contents: nil)
+        })
+        await setup.checkAI()
+        #expect(setup.ollamaFix == .openApp(URL(fileURLWithPath: "/Applications/Ollama.app")))
+        setup.startOllama()
+        #expect(openedURLs == [URL(fileURLWithPath: "/Applications/Ollama.app")])
+        try await waitFor { setup.report?.ai.ollama?.running == true && !setup.isStartingOllama }
+        #expect(setup.ollamaFix == .pullModel)
+    }
+
     @Test("every offered speech model resolves to an unquantized download name")
     func modelChoices() {
         #expect(SpeechModelChoice.all.map(\.name) == ["turbo", "large-v3", "small"])

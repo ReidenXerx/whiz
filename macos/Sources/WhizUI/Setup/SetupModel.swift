@@ -16,12 +16,22 @@ struct DoctorReport: Decodable, Equatable, Sendable {
     }
 
     struct AI: Decodable, Equatable, Sendable {
+        /// Ollama on this Mac, reported only when its own address listed no
+        /// models: installed or not, and whether its server answers.
+        struct Ollama: Decodable, Equatable, Sendable {
+            var app: String?
+            var cli: String?
+            var homebrew: Bool
+            var running: Bool
+        }
+
         var configured: Bool
         var baseUrl: String
         var model: String
         var reachable: Bool?
         var models: [String]?
         var modelAvailable: Bool?
+        var ollama: Ollama?
     }
 
     var version: String
@@ -87,6 +97,8 @@ final class SetupModel: ObservableObject {
     @Published private(set) var failures: [SetupItem: String] = [:]
     /// The AI server probe, run on demand (it touches the network).
     @Published private(set) var isCheckingAI = false
+    /// Ollama was started from the assistant; checking until it answers.
+    @Published private(set) var isStartingOllama = false
     /// The assistant sheet; ⌘-menu and the compose banner open it.
     @Published var isPresented = false
     /// The Homebrew installer was started in Terminal; the assistant says
@@ -159,6 +171,33 @@ final class SetupModel: ObservableObject {
         }
     }
 
+    /// What the AI step offers when Ollama's own address listed no models.
+    enum OllamaFix: Equatable {
+        /// Running, but nothing pulled yet.
+        case pullModel
+        /// Ollama.app: opening it starts the server.
+        case openApp(URL)
+        /// The Homebrew formula: `brew services start ollama`.
+        case brewServices
+        /// Only a bare `ollama` binary: `ollama serve` in Terminal.
+        case terminal
+        case install
+    }
+
+    /// Nil for any other server, or a whiz too old to say.
+    var ollamaFix: OllamaFix? {
+        guard let ai = report?.ai, ai.reachable == false, let ollama = ai.ollama else { return nil }
+        return Self.ollamaFix(ollama, hasBrew: hasBrew)
+    }
+
+    nonisolated static func ollamaFix(_ ollama: DoctorReport.AI.Ollama, hasBrew: Bool) -> OllamaFix {
+        if ollama.running { return .pullModel }
+        if let app = ollama.app { return .openApp(URL(fileURLWithPath: app)) }
+        if ollama.homebrew, hasBrew { return .brewServices }
+        if ollama.cli != nil { return .terminal }
+        return .install
+    }
+
     /// The three parts a plain transcription cannot run without.
     var isReady: Bool { whizExecutable != nil && report?.ready == true }
 
@@ -198,6 +237,36 @@ final class SetupModel: ObservableObject {
         isCheckingAI = true
         defer { isCheckingAI = false }
         await loadReport(arguments: ["doctor", "--json", "--ai"], whiz: whiz)
+    }
+
+    /// Start the Ollama the doctor found, then look again until it answers.
+    /// A bare binary is not started from here: `ollama serve` runs in the
+    /// foreground, and only a Terminal window can keep it alive.
+    func startOllama() {
+        switch ollamaFix {
+        case .openApp(let app)?:
+            failures[.ai] = nil
+            openFile(app)
+            Task { await waitForAIServer() }
+        case .brewServices?:
+            perform(.ai, steps: [Step(title: "Starting Ollama") { [weak self] in
+                self?.locateTool("brew").map { ($0, ["services", "start", "ollama"]) }
+            }], then: { [weak self] in await self?.waitForAIServer() })
+        default:
+            return
+        }
+    }
+
+    /// A server takes a moment to come up: ask a few times, then leave the
+    /// rest to Check Again.
+    private func waitForAIServer(attempts: Int = 5, interval: Duration = .seconds(2)) async {
+        isStartingOllama = true
+        defer { isStartingOllama = false }
+        for _ in 0..<attempts {
+            try? await Task.sleep(for: interval)
+            await checkAI()
+            if report?.ai.reachable == true || report?.ai.ollama?.running == true { return }
+        }
     }
 
     private func loadReport(arguments: [String], whiz: URL) async {
@@ -331,7 +400,8 @@ final class SetupModel: ObservableObject {
     /// Run steps in order, streaming progress into `task`; stop at the first
     /// failure; re-check afterwards — the doctor, not an exit code, decides
     /// what is done.
-    private func perform(_ item: SetupItem, steps: [Step]) {
+    /// `then` runs after the doctor re-check, and only when no step failed.
+    private func perform(_ item: SetupItem, steps: [Step], then: (@MainActor () async -> Void)? = nil) {
         guard task == nil else { return }
         failures[item] = nil
         task = RunningTask(item: item, title: steps.first?.title ?? "Working…", percent: nil, detail: "")
@@ -349,6 +419,7 @@ final class SetupModel: ObservableObject {
             task = nil
             backend = nil
             await refresh()
+            if failures[item] == nil { await then?() }
         }
     }
 

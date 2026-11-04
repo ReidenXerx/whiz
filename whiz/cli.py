@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 from pathlib import Path
 
 from whiz import __version__
@@ -1714,6 +1715,52 @@ def _tool_path(configured: str, *names: str) -> str | None:
     return None
 
 
+# Where Ollama lives when it is not on PATH: the Mac app, and the CLI from
+# Homebrew or from the app (which links it into /usr/local/bin).
+_OLLAMA_APPS = ("/Applications/Ollama.app", "~/Applications/Ollama.app")
+_OLLAMA_CLIS = ("/opt/homebrew/bin/ollama", "/usr/local/bin/ollama")
+_OLLAMA_PORT = 11434
+
+
+def _local_ollama(base_url: str) -> dict | None:
+    """Is Ollama on this machine, and running? For a server that listed no models.
+
+    Only for Ollama's own address (localhost:11434); any other server is not
+    ours to diagnose, so None. ``running`` separates "installed but not
+    started" from "started, but no model pulled": both list no models, but
+    only the second answers HTTP.
+    """
+    try:
+        parts = urllib.parse.urlsplit(base_url)
+        local = parts.hostname in ("localhost", "127.0.0.1", "::1") and parts.port == _OLLAMA_PORT
+    except ValueError:
+        return None
+    if not local:
+        return None
+    cli = _tool_path("", "ollama") or next((p for p in _OLLAMA_CLIS if Path(p).exists()), None)
+    app = next((str(p) for p in (Path(a).expanduser() for a in _OLLAMA_APPS) if p.exists()), None)
+    return {
+        "app": app,
+        "cli": cli,
+        # A Homebrew formula is started with `brew services`; the app starts its own server.
+        "homebrew": bool(cli) and "/Cellar/" in str(Path(cli).resolve()),
+        "running": AI.server_answers(base_url),
+    }
+
+
+def _ollama_hint(ollama: dict) -> tuple[str, str]:
+    """The doctor's (state, how to fix) for a local Ollama that listed no models."""
+    if ollama["running"]:
+        return "no models", "ollama pull <model>  (cloud models also need: ollama signin)"
+    if ollama["app"]:
+        return "not running", "open -a Ollama"
+    if ollama["homebrew"]:
+        return "not running", "brew services start ollama"
+    if ollama["cli"]:
+        return "not running", "ollama serve"
+    return "not installed", "https://ollama.com/download"
+
+
 def _doctor_report(config: cfg.Config, *, check_ai: bool = False) -> dict:
     """What a run needs, and whether this machine has it.
 
@@ -1762,6 +1809,10 @@ def _doctor_report(config: cfg.Config, *, check_ai: bool = False) -> dict:
         ai["reachable"] = bool(names)
         ai["models"] = names
         ai["model_available"] = bool(config.ai_model) and config.ai_model in names
+        if not names and config.ai_base_url:
+            ollama = _local_ollama(config.ai_base_url)
+            if ollama is not None:
+                ai["ollama"] = ollama
 
     report = {
         "version": __version__,
@@ -1821,11 +1872,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         rows.append([label, state, str(detail)])
     ai = report["ai"]
     if ai["configured"]:
-        if "reachable" in ai:
+        detail = f"{ai['model']} @ {ai['base_url']}"
+        if "ollama" in ai:
+            state, detail = _ollama_hint(ai["ollama"])
+        elif "reachable" in ai:
             state = "ok" if ai["model_available"] else ("model missing" if ai["reachable"] else "unreachable")
         else:
             state = "configured"
-        rows.append(["AI summary", state, f"{ai['model']} @ {ai['base_url']}"])
+        rows.append(["AI summary", state, detail])
     else:
         rows.append(["AI summary", "optional", "whiz config set ai_model=<model>"])
     ui.table(f"whiz {report['version']}", [("Part", "left"), ("Status", "left"), ("Where / how to fix", "left")], rows)

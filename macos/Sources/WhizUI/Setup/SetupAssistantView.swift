@@ -462,10 +462,11 @@ private struct AIItem: View {
 
     var body: some View {
         ChecklistItem(item: .ai, number: setup.number(of: .ai), title: "AI summaries", optional: true, summary: summary) {
-            if setup.isCheckingAI {
+            if setup.isCheckingAI || setup.isStartingOllama {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    Text("Looking for your AI server…").foregroundStyle(.secondary)
+                    Text(setup.isStartingOllama ? "Starting Ollama…" : "Looking for your AI server…")
+                        .foregroundStyle(.secondary)
                 }
             } else if let ai = setup.report?.ai, ai.reachable == true, let models = ai.models, !models.isEmpty {
                 HStack(spacing: 10) {
@@ -484,11 +485,36 @@ private struct AIItem: View {
                 }
                 .onAppear { selected = ai.modelAvailable == true ? ai.model : (models.first ?? "") }
             } else if setup.report?.ai.reachable == false {
-                HStack(spacing: 10) {
-                    Link("Get Ollama", destination: URL(string: "https://ollama.com/download")!)
-                    Button("Check Again") { Task { await setup.checkAI() } }
-                    Text("or set another server in Settings ▸ AI")
-                        .font(.caption).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 10) {
+                        switch setup.ollamaFix {
+                        case .openApp?:
+                            Button("Open Ollama") { setup.startOllama() }
+                        case .brewServices?:
+                            Button("Start Ollama") { setup.startOllama() }
+                                .disabled(setup.task != nil)
+                        case .pullModel?:
+                            Link("Find a Model", destination: URL(string: "https://ollama.com/search")!)
+                        case .terminal?:
+                            EmptyView()
+                        case .install?, nil:
+                            Link("Get Ollama", destination: URL(string: "https://ollama.com/download")!)
+                        }
+                        Button("Check Again") { Task { await setup.checkAI() } }
+                        Text("or set another server in Settings ▸ AI")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    switch setup.ollamaFix {
+                    case .brewServices?:
+                        note("Runs `brew services start ollama`: Ollama starts now and at every login.")
+                    case .terminal?:
+                        note("Start it in Terminal with `ollama serve`, then check again.")
+                    case .pullModel?:
+                        note("In Terminal: `ollama pull` and the model's name.")
+                    default:
+                        EmptyView()
+                    }
+                    WhatToCheck()
                 }
             } else {
                 Button("Look for an AI Server") { Task { await setup.checkAI() } }
@@ -500,14 +526,51 @@ private struct AIItem: View {
         }
     }
 
+    private func note(_ text: LocalizedStringKey) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
     private var summary: String {
         guard let ai = setup.report?.ai else {
             return "A summary and action items after each transcript, from a model you run (such as Ollama)."
         }
         if ai.modelAvailable == true { return "Using \(ai.model) at \(ai.baseUrl)." }
         if ai.reachable == true { return "Found a server at \(ai.baseUrl). Choose the model to summarize with." }
-        if ai.reachable == false { return "No AI server answered at \(ai.baseUrl). Install Ollama and pull a model, or skip this." }
+        if ai.reachable == false {
+            switch setup.ollamaFix {
+            case .pullModel?:
+                return "Ollama is running, but has no models yet. Pull one, or skip this."
+            case .openApp?, .brewServices?, .terminal?:
+                return "Ollama is installed but not running, so nothing answered at \(ai.baseUrl)."
+            case .install?, nil:
+                return "No AI server answered at \(ai.baseUrl). Install Ollama and pull a model, or skip this."
+            }
+        }
         return "A summary and action items after each transcript, from a model you run (such as Ollama)."
+    }
+}
+
+/// The usual reasons an AI server does not answer, for when the buttons
+/// above are not enough.
+private struct WhatToCheck: View {
+    var body: some View {
+        DisclosureGroup("What to check") {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("• Ollama is running: `ollama list` answers in Terminal.")
+                Text("• The address in Settings ▸ AI is the server's. Ollama's is `http://localhost:11434/v1`.")
+                Text("• A model is pulled: `ollama pull` and its name. Cloud models also need `ollama signin`.")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.top, 4)
+        }
+        .font(.callout)
     }
 }
 
