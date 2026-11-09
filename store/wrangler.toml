@@ -15,7 +15,7 @@ routes = [{ pattern = "store.duduphudu.app", custom_domain = true }]
 
 [vars]
 PADDLE_ENV = "production"
-ALLOWED_ORIGIN = "https://duduphudu.app"
+ALLOWED_ORIGIN = "https://duduphudu.dev,https://duduphudu.app"
 
 # Issued keys by transaction id. Created with
 #   npx wrangler kv namespace create LICENSES_LIVE
@@ -35,7 +35,7 @@ routes = [{ pattern = "store-sandbox.duduphudu.app", custom_domain = true }]
 
 [env.sandbox.vars]
 PADDLE_ENV = "sandbox"
-ALLOWED_ORIGIN = "https://duduphudu.app"
+ALLOWED_ORIGIN = "https://duduphudu.dev,https://duduphudu.app"
 
 [[env.sandbox.kv_namespaces]]
 binding = "LICENSES"

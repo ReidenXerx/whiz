@@ -12,7 +12,7 @@
 // Bindings (wrangler.toml): LICENSES (KV). Secrets (`wrangler secret put`,
 // never in the repo): PADDLE_API_KEY, PADDLE_WEBHOOK_SECRET,
 // LICENSE_SIGNING_KEY (the base64 seed from whiz-license keygen).
-// Vars: PADDLE_ENV ("sandbox" | "production"), ALLOWED_ORIGIN.
+// Vars: PADDLE_ENV ("sandbox" | "production"), ALLOWED_ORIGIN (comma-separated).
 
 import { importSigningKey, issue } from "./license.js";
 import { getTransaction, verifySignature } from "./paddle.js";
@@ -27,8 +27,8 @@ export default {
     try {
       if (request.method === "POST" && url.pathname === "/paddle/webhook") return await webhook(request, env);
       if (url.pathname === "/license") {
-        if (request.method === "OPTIONS") return cors(env, new Response(null, { status: 204 }));
-        if (request.method === "GET") return cors(env, await lookup(url, env));
+        if (request.method === "OPTIONS") return cors(request, env, new Response(null, { status: 204 }));
+        if (request.method === "GET") return cors(request, env, await lookup(url, env));
       }
       return json({ error: "not found" }, 404);
     } catch (error) {
@@ -122,8 +122,19 @@ function json(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 }
 
-function cors(env, response) {
-  response.headers.set("Access-Control-Allow-Origin", env.ALLOWED_ORIGIN ?? "https://duduphudu.app");
+/**
+ * ALLOWED_ORIGIN is a comma-separated list: the store site and the old
+ * product page both ask for keys. A listed Origin is echoed back; anything
+ * else gets the first entry, which a browser then refuses.
+ */
+export function allowedOrigin(request, env) {
+  const allowed = (env.ALLOWED_ORIGIN ?? "https://duduphudu.app").split(",").map((o) => o.trim()).filter(Boolean);
+  const origin = request.headers.get("Origin");
+  return allowed.includes(origin) ? origin : allowed[0];
+}
+
+function cors(request, env, response) {
+  response.headers.set("Access-Control-Allow-Origin", allowedOrigin(request, env));
   response.headers.set("Access-Control-Allow-Methods", "GET, OPTIONS");
   response.headers.set("Vary", "Origin");
   return response;
