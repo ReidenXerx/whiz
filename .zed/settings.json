@@ -4,25 +4,6 @@
       "url": "http://127.0.0.1:39100/mcp"
     }
   },
-  "agent": {
-    "profiles": {
-      "zed-gitnexus": {
-        "name": "Zed + GitNexus",
-        "tools": {
-          "grep": false,
-          "fetch": false
-        },
-        "enable_all_context_servers": false,
-        "context_servers": {
-          "gitnexus": {
-            "tools": {
-              "*": true
-            }
-          }
-        }
-      }
-    }
-  },
   "language_models": {
     "ollama": {
       "available_models": [

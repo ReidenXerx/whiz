@@ -41,6 +41,8 @@ htmlcov/
 
 # whiz local config (uncomment to ignore)
 # ~/.config/whiz/uv.lock
+# wrangler's local state (store/)
+store/.wrangler/
 
 # bearing — generated local state (safe to remove via bearing-uninstall)
 .bearing/.gitnexus-*
@@ -48,6 +50,7 @@ htmlcov/
 .bearing/.task-core.md
 .bearing/task-cores/
 *.bearing-backup
+*.bearing-new
 .bearing/manifest.json
 .bearing/hooks.local.json
 .gitnexus/
@@ -56,5 +59,3 @@ htmlcov/
 docs/ARCHITECTURE.gitnexus.md
 .agents/skills/
 # --- end bearing ---
-# wrangler's local state (store/)
-store/.wrangler/
