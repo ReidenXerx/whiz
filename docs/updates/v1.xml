@@ -14,5 +14,22 @@
     <description>Updates for Whiz 1.x (and 0.x).</description>
     <language>en</language>
     <!-- releases, newest first -->
+    <item>
+      <title>Whiz 0.15.0</title>
+      <pubDate>Fri, 27 Nov 2026 15:28:58 +0000</pubDate>
+      <sparkle:version>0.15.0</sparkle:version>
+      <sparkle:shortVersionString>0.15.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>13.3</sparkle:minimumSystemVersion>
+      <description><![CDATA[
+<ul>
+<li><b>Mixed-language calls:</b> each stretch is transcribed in the language actually spoken, so a call that switches between languages no longer comes out garbled.</li>
+<li><b>Repeated lines repaired:</b> a stretch where the transcript repeats one line over and over is re-transcribed, or reduced to one line with a warning.</li>
+<li><b>Frames always come with the HTML transcript:</b> turn frames on and you get the page to see them in.</li>
+<li><b>Recording permission:</b> Whiz no longer refuses to record after you allowed it, and no longer asks over and over.</li>
+<li><b>How it ran:</b> see how long each step of a transcription took.</li>
+</ul>
+      ]]></description>
+      <enclosure url="https://github.com/ReidenXerx/whiz/releases/download/v0.15.0/Whiz-0.15.0.dmg" type="application/x-apple-diskimage" sparkle:edSignature="qATygquGo3NTNELT03YmEW46xJtQ0b0wbckJZNC56oNRtZI0PGiQaWQgQpiZIhprN5xl1OEUQaWm7SlCXBLYCQ==" length="61767016" />
+    </item>
   </channel>
 </rss>
