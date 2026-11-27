@@ -116,6 +116,16 @@ test("webhook: a signed transaction.completed issues the key", async () => {
   } finally { restore(); }
 });
 
+test("license: the store site and the old product page may both read keys", async () => {
+  const env = environment({ ALLOWED_ORIGIN: "https://duduphudu.dev,https://duduphudu.app" });
+  const ask = (origin) => worker.fetch(new Request(`https://store.duduphudu.app/license?transaction_id=${TXN}`,
+    { method: "OPTIONS", headers: origin ? { Origin: origin } : {} }), env);
+  assert.equal((await ask("https://duduphudu.dev")).headers.get("Access-Control-Allow-Origin"), "https://duduphudu.dev");
+  assert.equal((await ask("https://duduphudu.app")).headers.get("Access-Control-Allow-Origin"), "https://duduphudu.app");
+  assert.equal((await ask("https://evil.example")).headers.get("Access-Control-Allow-Origin"), "https://duduphudu.dev");
+  assert.equal((await ask(null)).headers.get("Access-Control-Allow-Origin"), "https://duduphudu.dev");
+});
+
 test("webhook: a bad signature is refused (non-2xx, so Paddle retries) and issues nothing", async () => {
   const env = environment();
   const response = await worker.fetch(signed(JSON.stringify({ event_type: "transaction.completed", data: { id: TXN } }), "wrong"), env);
