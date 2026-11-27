@@ -42,6 +42,7 @@ from whiz import ai as AI
 from whiz import profiles as P
 from whiz import library as L
 from whiz import ui
+from whiz import languages as LG
 
 # whisper-cli output-format flags. "html" is whiz-only (post-merge, not a
 # whisper-cli flag) — handled in _write_labeled_outputs via merge.format_speakers_html.
@@ -128,7 +129,7 @@ _WHISPER_PROGRESS_RE = re.compile(
 )
 
 
-def _run_whisper_streaming(cmd: list[str]) -> subprocess.Popen:
+def _run_whisper_streaming(cmd: list[str], progress=None) -> subprocess.Popen:
     """Run whisper-cli, streaming its stdout/stderr line-by-line to our stderr.
 
     Each line is prefixed with elapsed time since the process started so long
@@ -143,6 +144,9 @@ def _run_whisper_streaming(cmd: list[str]) -> subprocess.Popen:
     it stays a dim ``progress: N%`` line. Swallowing it also keeps the raw
     callback noise out of logs on BOTH branches — the raw line is whisper's
     internal trace, not run output the user needs.
+
+    ``progress`` replaces ``ui.progress`` as the receiver of whisper's
+    percentage — the per-language runs map theirs onto the whole recording.
     """
     import time
 
@@ -163,7 +167,7 @@ def _run_whisper_streaming(cmd: list[str]) -> subprocess.Popen:
         with ui.streaming_progress(cmd) as write:
             for line in proc.stdout:
                 if (m := _WHISPER_PROGRESS_RE.search(line)) and ":" in line:
-                    ui.progress(int(m.group(1)))
+                    (progress or ui.progress)(int(m.group(1)))
                     continue
                 elapsed = time.monotonic() - start
                 write(line, elapsed)
@@ -1291,6 +1295,159 @@ def _remember(in_path: Path, of_base: Path, whisper_json: Path | None) -> None:
         ui.muted(f"Could not add this recording to the library ({L.library_path()}): {exc}")
 
 
+# whisper-cli flag → whiz format name, for the formats whisper writes itself.
+_FORMAT_BY_FLAG = {flag: fmt for fmt, flag in OUTPUT_FLAGS.items() if not flag.startswith("__")}
+
+
+def _cmd_value(cmd: list[str], flag: str) -> str | None:
+    """The value after ``flag`` in a whisper-cli argv (the last one wins,
+    as in whisper-cli)."""
+    value = None
+    for i, arg in enumerate(cmd[:-1]):
+        if arg == flag:
+            value = cmd[i + 1]
+    return value
+
+
+def _cmd_without(cmd: list[str], valued: set[str], bare: set[str]) -> list[str]:
+    """``cmd`` without the given flags (and, for ``valued``, their values)."""
+    out: list[str] = []
+    skip = False
+    for arg in cmd:
+        if skip:
+            skip = False
+        elif arg in valued:
+            skip = True
+        elif arg not in bare:
+            out.append(arg)
+    return out
+
+
+def _language_plan(workspace, cmd: list[str], diar_segments) -> list[LG.Span] | None:
+    """The recording's language spans, or None when detection found nothing
+    to go on. ``workspace`` makes the audio workspace on first use. Tests
+    stub this (it runs whisper-cli on the audio)."""
+    work = workspace()
+    model = _cmd_value(cmd, "-m") or ""
+    threads = _cmd_value(cmd, "-t") or str(_auto_threads())
+
+    def detect(windows: list[LG.Window], progress=None) -> None:
+        clips = [work.clip(w.start, w.end, "window") for w in windows]
+        try:
+            detected = LG.detect_languages(cmd[0], model, threads, clips, progress=progress)
+        finally:
+            for c in clips:
+                c.unlink(missing_ok=True)
+        for w, d in zip(windows, detected):
+            if d:
+                w.language, w.confidence = d
+
+    windows = LG.windows_for(work.duration, diar_segments, work.quietest)
+    # A tile diarization found (almost) no speech in has no language to
+    # hear; it takes its neighbours'.
+    detect([w for w in windows if w.speech is None or w.speech >= LG.MIN_WINDOW_SECONDS],
+           progress=ui.progress)
+    langs = LG.smooth(windows)
+    if not langs:
+        return None
+    cuts = LG.refine(windows, langs, detect) if len(set(langs)) > 1 else {}
+    return LG.spans_for(windows, langs, work.duration, work.quietest, cuts)
+
+
+def _transcribe(cmd: list[str], config: cfg.Config, diar_segments, stack: contextlib.ExitStack) -> int:
+    """Run whisper-cli for the recording; returns its exit code.
+
+    With the language on "auto", the language is first detected stretch by
+    stretch (whiz/languages.py): one language → the usual run, told that
+    language; several → each stretch decoded in its own and stitched. Then
+    repetition loops in the result are decoded again (or collapsed). Any
+    failure in those extra steps falls back to whisper-cli's own behaviour
+    with a warning — never to no transcript.
+    """
+    source = Path(_cmd_value(cmd, "-f") or "")
+    base = _cmd_value(cmd, "-of") or str(source)
+    formats = [_FORMAT_BY_FLAG[a] for a in cmd if a in _FORMAT_BY_FLAG]
+    json_kind = "-ojf" if "json-full" in formats else "-oj"
+    # Everything but the input, language and outputs: the per-stretch runs
+    # add their own, and write into the workspace (no -of).
+    base_cmd = _cmd_without(cmd, {"-f", "-l", "-of"}, set(_FORMAT_BY_FLAG))
+    language = _cmd_value(cmd, "-l") or "auto"
+    work: LG.Workspace | None = None
+
+    def workspace() -> LG.Workspace:
+        nonlocal work
+        if work is None:
+            work = LG.Workspace.create(source, lambda: aud.find_ffmpeg(config.ffmpeg), stack)
+        return work
+
+    def run(argv: list[str], progress) -> int:
+        return _run_whisper_streaming(argv, progress=progress).returncode
+
+    spans: list[LG.Span] | None = None
+    if language == "auto" and source.exists():
+        ui.phase("detecting languages")
+        try:
+            spans = _language_plan(workspace, cmd, diar_segments)
+        except Exception as e:  # noqa: BLE001
+            ui.status(f"Warning: language detection skipped: {e}", kind="warn",
+                      detail="Transcribing with whisper's own detection (from the first 30 seconds).")
+            spans = None
+
+    ui.phase("transcribing")
+    doc: dict | None = None
+    if spans and len({s.language for s in spans}) > 1:
+        ui.info(f"Languages: {LG.describe(spans)}")
+        try:
+            doc = LG.transcribe_spans(workspace(), spans, base_cmd, json_kind, run, ui.progress)
+            LG.write_outputs(doc, base, formats)
+            rc = 0
+        except Exception as e:  # noqa: BLE001
+            ui.status(f"Warning: per-language transcription failed: {e}", kind="warn",
+                      detail="Transcribing the whole recording in one language instead.")
+            spans, doc = None, None
+    if doc is None:
+        if spans:
+            language = spans[0].language
+            ui.info(f"Language: {language} (detected across the recording)")
+            cmd = _cmd_without(cmd, {"-l"}, set()) + ["-l", language]
+        rc = _run_whisper_streaming(cmd).returncode
+        if rc != 0:
+            return rc
+        json_path = Path(base + ".json")
+        if not json_path.exists():
+            return rc  # no JSON asked for: nothing to check for loops
+        try:
+            doc = json.loads(json_path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            return rc  # the merge step reports an unreadable JSON
+
+    if not LG.find_loops(doc.get("transcription") or []):
+        return rc
+    detected = (doc.get("result") or {}).get("language") or "en"
+
+    def language_at(t: float) -> str:
+        for s in spans or []:
+            if s.start <= t < s.end:
+                return s.language
+        return language if language != "auto" else detected
+
+    ui.phase("repairing repeated lines")
+    try:
+        reports = LG.repair_loops(doc, workspace(), base_cmd, language_at, json_kind, run, ui.progress)
+    except Exception as e:  # noqa: BLE001
+        ui.status(f"Warning: could not re-check repeated lines: {e}", kind="warn")
+        return rc
+    for r in reports:
+        stretch = f"{LG.clock(r.start)}–{LG.clock(r.end)}"
+        if r.repaired:
+            ui.info(f"Re-transcribed {stretch}: one line had repeated {r.lines} times.")
+        else:
+            ui.status(f"Warning: {stretch} kept repeating one line ({r.lines} times) and was reduced to one.",
+                      kind="warn", detail="That stretch may be silence, music, or speech too unclear to transcribe.")
+    LG.write_outputs(doc, base, formats)
+    return rc
+
+
 def _run_transcribe(
     args: argparse.Namespace,
     config: cfg.Config,
@@ -1348,9 +1505,7 @@ def _run_transcribe(
             ui.phase("diarizing")
             diar_segments = _run_diarize_or_fallback(diar_wav, config, args)
 
-        ui.phase("transcribing")
-        proc = _run_whisper_streaming(cmd)
-        rc = proc.returncode
+        rc = _transcribe(cmd, config, diar_segments if diarize_enabled else None, stack)
 
     # --- Merge diarization with whisper output ---
     written: list[str] = []
