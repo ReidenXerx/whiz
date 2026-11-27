@@ -233,6 +233,45 @@ struct RecordingPreferencesTests {
         UserDefaults(suiteName: "test.recording.\(UUID().uuidString)")!
     }
 
+    @Test("a stale 'not allowed' is checked with ScreenCaptureKit before Whiz refuses to record")
+    func staleScreenAnswerIsRechecked() async {
+        var probes = 0
+        let model = RecorderModel(defaults: makeSuite(), screenAccessProbe: { probes += 1; return true })
+        // The test runner has no Screen Recording permission, so the
+        // launch-time check says no, as it did for a switch turned on later.
+        #expect(await model.confirmScreenAccess())
+        #expect(model.screenAllowed)
+        // A later refresh keeps what ScreenCaptureKit confirmed.
+        model.refreshPermissions()
+        #expect(model.screenAllowed)
+        #expect(await model.confirmScreenAccess())
+        #expect(probes <= 1)
+    }
+
+    @Test("when ScreenCaptureKit also refuses, Whiz still asks for the permission")
+    func refusedScreenAccessStaysRefused() async {
+        let model = RecorderModel(defaults: makeSuite(), screenAccessProbe: { false })
+        model.refreshPermissions()
+        guard !model.screenAllowed else { return }   // a Mac that granted the runner: nothing to test
+        #expect(await model.confirmScreenAccess() == false)
+        #expect(model.screenAllowed == false)
+    }
+
+    @Test("the Record view probes only once Whiz has asked for the permission")
+    func refreshProbesOnlyAfterAsking() async {
+        let defaults = makeSuite()
+        var probes = 0
+        let model = RecorderModel(defaults: defaults, screenAccessProbe: { probes += 1; return true })
+        model.refreshPermissions()
+        guard !model.screenAllowed else { return }
+        await model.refreshScreenAccess()
+        #expect(probes == 0, "never asked: a probe could make macOS ask unprompted")
+        defaults.set(true, forKey: RecorderModel.screenAskedKey)
+        await model.refreshScreenAccess()
+        #expect(probes == 1)
+        #expect(model.screenAllowed)
+    }
+
     @Test("preferences survive a round trip; a fresh Mac gets the defaults")
     func roundTrip() {
         let defaults = makeSuite()
