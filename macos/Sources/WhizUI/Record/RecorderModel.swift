@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import Combine
 import CoreGraphics
+import ScreenCaptureKit
 
 /// What the Record view remembers between recordings.
 struct RecordingPreferences: Codable, Equatable, Sendable {
@@ -102,13 +103,19 @@ final class RecorderModel: ObservableObject {
     var onFinished: ((URL) -> Void)?
 
     private let defaults: UserDefaults
+    /// Asks ScreenCaptureKit whether capture is allowed right now.
+    private let screenAccessProbe: @MainActor () async -> Bool
+    /// ScreenCaptureKit said yes during this launch.
+    private var screenConfirmed = false
     private var recorder: CallRecorder?
     private var ticker: Task<Void, Never>?
     private var activity: NSObjectProtocol?
     private var deviceObservers: [NSObjectProtocol] = []
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard,
+         screenAccessProbe: @escaping @MainActor () async -> Bool = RecorderModel.screenCaptureWorks) {
         self.defaults = defaults
+        self.screenAccessProbe = screenAccessProbe
         preferences = RecordingPreferences.load(from: defaults)
         refreshDevices()
         refreshPermissions()
@@ -140,8 +147,37 @@ final class RecorderModel: ObservableObject {
     }
 
     func refreshPermissions() {
-        screenAllowed = CGPreflightScreenCaptureAccess()
+        screenAllowed = screenConfirmed || CGPreflightScreenCaptureAccess()
         microphoneAccess = AVCaptureDevice.authorizationStatus(for: .audio)
+    }
+
+    /// `CGPreflightScreenCaptureAccess` answers once per launch: a switch
+    /// turned on in System Settings stays "no" until Whiz restarts, and on
+    /// recent macOS it can say "no" with the permission granted. Before
+    /// refusing, ask ScreenCaptureKit, which checks the permission as it is.
+    func confirmScreenAccess() async -> Bool {
+        if screenAllowed { return true }
+        guard await screenAccessProbe() else { return false }
+        screenConfirmed = true
+        screenAllowed = true
+        return true
+    }
+
+    /// For the Record view: clears a stale "needs permission" note, once
+    /// Whiz has asked for the permission (probing before then could make
+    /// macOS ask unprompted).
+    func refreshScreenAccess() async {
+        refreshPermissions()
+        if !screenAllowed && defaults.bool(forKey: Self.screenAskedKey) {
+            _ = await confirmScreenAccess()
+        }
+    }
+
+    static let screenAskedKey = "dev.reidenxerx.whiz.recording.screenAsked"
+
+    /// Listing what can be captured fails unless the permission is granted.
+    static func screenCaptureWorks() async -> Bool {
+        (try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)) != nil
     }
 
     private static func discoverMicrophones() -> [Device] {
@@ -175,6 +211,7 @@ final class RecorderModel: ObservableObject {
 
     /// The first time, macOS asks; after that only System Settings can.
     func requestScreenAccess() {
+        defaults.set(true, forKey: Self.screenAskedKey)
         if !CGRequestScreenCaptureAccess() {
             NSWorkspace.shared.open(Self.screenSettingsURL)
         }
@@ -219,11 +256,14 @@ final class RecorderModel: ObservableObject {
                 return
             }
         }
-        if sources.needsScreenCapture && !screenAllowed {
-            requestScreenAccess()
-            if !screenAllowed {
-                errorMessage = "Whiz needs permission to record the call's audio\(sources.display != nil ? " and the screen" : ""). Allow Whiz in System Settings → Privacy & Security → Screen & System Audio Recording, then quit and reopen it."
-                return
+        if sources.needsScreenCapture {
+            defaults.set(true, forKey: Self.screenAskedKey)
+            if !(await confirmScreenAccess()) {
+                requestScreenAccess()
+                if !(await confirmScreenAccess()) {
+                    errorMessage = "Whiz needs permission to record the call's audio\(sources.display != nil ? " and the screen" : ""). Allow Whiz in System Settings → Privacy & Security → Screen & System Audio Recording, then press Record again."
+                    return
+                }
             }
         }
 

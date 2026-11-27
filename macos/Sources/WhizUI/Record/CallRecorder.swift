@@ -264,11 +264,11 @@ final class CallRecorder: NSObject, @unchecked Sendable {
         if nsError.domain == SCStreamErrorDomain {
             switch SCStreamError.Code(rawValue: nsError.code) {
             case .userDeclined:
-                return "Whiz is not allowed to record the screen and system audio. Allow it in System Settings → Privacy & Security → Screen & System Audio Recording, then quit and reopen Whiz."
+                return "Whiz is not allowed to record the screen and system audio. Allow it in System Settings → Privacy & Security → Screen & System Audio Recording, then try again. If it still refuses, quit and reopen Whiz."
             case .userStopped:
                 return "Recording was stopped from the menu bar."
             case .noDisplayList, .missingEntitlements:
-                return "Whiz is not allowed to record the screen and system audio. Allow it in System Settings → Privacy & Security → Screen & System Audio Recording, then quit and reopen Whiz."
+                return "Whiz is not allowed to record the screen and system audio. Allow it in System Settings → Privacy & Security → Screen & System Audio Recording, then try again. If it still refuses, quit and reopen Whiz."
             default:
                 break
             }

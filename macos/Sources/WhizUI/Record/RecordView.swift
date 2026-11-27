@@ -46,11 +46,11 @@ struct RecordView: View {
         }
         .onAppear {
             recorder.refreshDevices()
-            recorder.refreshPermissions()
+            Task { await recorder.refreshScreenAccess() }
         }
         // Back from System Settings with the switch turned on.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            recorder.refreshPermissions()
+            Task { await recorder.refreshScreenAccess() }
         }
     }
 
