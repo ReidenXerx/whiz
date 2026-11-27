@@ -28,8 +28,17 @@ struct LastRunRecord: Codable, Equatable, Sendable, Identifiable {
     /// before the field existed decode without it (synthesized Codable reads
     /// a missing optional key as nil).
     var duration: Double? = nil
+    /// The stages the run went through and how long each took, for the
+    /// Files tab's "How it ran". Nil for runs recorded before it existed.
+    var steps: [StoredStep]? = nil
 
     var inputURL: URL { URL(fileURLWithPath: inputPath) }
+}
+
+struct StoredStep: Codable, Equatable, Sendable {
+    /// The step as the run view titled it ("Transcribing speech").
+    var title: String
+    var duration: Double
 }
 
 /// The persisted half of `Artifact`. Exists because `Artifact.kind` is a
@@ -119,13 +128,14 @@ struct LastRunStore {
     /// real one.
     @discardableResult
     func saveReturning(artifacts: [Artifact], input: URL, finishedAt: Date = .init(),
-                       duration: Double? = nil) -> LastRunRecord? {
+                       duration: Double? = nil, steps: [StoredStep] = []) -> LastRunRecord? {
         guard !artifacts.isEmpty else { return nil }
         let record = LastRunRecord(
             inputPath: input.path,
             finishedAt: finishedAt,
             artifacts: artifacts.map { StoredArtifact(label: $0.label, url: $0.url) },
-            duration: duration
+            duration: duration,
+            steps: steps.isEmpty ? nil : steps
         )
         prepend(toHistory: record)
         return record
