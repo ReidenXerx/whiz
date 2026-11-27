@@ -176,7 +176,9 @@ final class RecorderModel: ObservableObject {
     static let screenAskedKey = "dev.reidenxerx.whiz.recording.screenAsked"
 
     /// Listing what can be captured fails unless the permission is granted.
-    static func screenCaptureWorks() async -> Bool {
+    /// Nonisolated: the content never leaves this function, only the answer
+    /// does (older SDKs don't mark SCShareableContent Sendable).
+    nonisolated static func screenCaptureWorks() async -> Bool {
         (try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)) != nil
     }
 
