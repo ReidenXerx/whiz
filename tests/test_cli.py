@@ -1100,6 +1100,39 @@ def test_transcribe_auto_diarization_setup_success_writes_speakers_html(tmp_path
     assert "skipping speaker labels" not in err  # the skip hint is obsolete now
 
 
+def test_transcribe_frames_write_html_without_html_in_outputs(tmp_path, monkeypatch, capsys):
+    """Frames are seen in the HTML transcript: a video run with frames on
+    writes .speakers.html even when the configured outputs (the default
+    srt,json) don't list html — the Mac app's "Frames: On" relies on it."""
+    events: list[str] = []
+    _fresh_machine_stubs(monkeypatch, events)
+    video = tmp_path / "recording.mov"
+    video.write_bytes(b"fake video")
+    (tmp_path / "recording.wav.json").write_text(_WHISPER_JSON, encoding="utf-8")
+    monkeypatch.setattr(
+        cli.D, "run_diarization",
+        lambda wav, config, num_speakers=0, threshold=0.9: [
+            DiarSegment(start=0.0, end=3.0, speaker=0),
+        ],
+    )
+    frames_dir = tmp_path / "recording.frames"
+    frames_dir.mkdir()
+    monkeypatch.setattr(
+        cli, "_extract_and_manifest_screenshots",
+        lambda in_path, merged, of_base, ffmpeg, width, dry_run: (frames_dir, tmp_path / "recording.frames.json", False),
+    )
+    assert "html" not in cli.cfg.Config().outputs
+    args = _transcribe_args(video, outputs="", speakers=None)
+    args.screenshots, args.no_screenshots = True, False  # what the app sends for "Frames: On"
+
+    rc = cli.cmd_transcribe(args)
+
+    assert rc == 0
+    html = (tmp_path / "recording.speakers.html").read_text(encoding="utf-8")
+    assert "Speaker A" in html
+    assert "Wrote HTML transcript" in " ".join(capsys.readouterr().err.split())
+
+
 def test_transcribe_auto_diarization_skips_after_failed_setup(tmp_path, monkeypatch, capsys):
     """Setup failed + merely auto-enabled diarization: the run still
     completes, and the hint says the setup is incomplete and offers
