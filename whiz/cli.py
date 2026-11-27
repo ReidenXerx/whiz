@@ -1510,13 +1510,16 @@ def _run_transcribe(
     # --- Merge diarization with whisper output ---
     written: list[str] = []
     kept_outputs: list[Path] = []
-    want_html = _outputs_include(args, config, "html")
-    # The degraded (unlabeled) fallback honors only an EXPLICIT --outputs
-    # html; config-supplied html keeps master's skip when diarization
-    # yields nothing (a typed flag is a promise; a config default describes
-    # the success path).
-    explicit_html = _outputs_explicitly_include(args, "html")
     want_frames = screenshots and aud.needs_extraction(in_path)
+    # Frames are seen in the HTML transcript, so asking for frames asks for
+    # it — with or without "html" among the configured outputs. Like a typed
+    # --outputs html, that request holds on a degraded run too.
+    want_html = _outputs_include(args, config, "html") or want_frames
+    # The degraded (unlabeled) fallback honors only an EXPLICIT --outputs
+    # html (or frames); config-supplied html keeps master's skip when
+    # diarization yields nothing (a typed flag is a promise; a config
+    # default describes the success path).
+    explicit_html = _outputs_explicitly_include(args, "html") or want_frames
     whisper_segs: list[MR.WhisperSeg] = []
     json_missing = False
     if (diarize_enabled or want_frames or want_html) and rc == 0:
@@ -2474,12 +2477,14 @@ def _run_merge(args: argparse.Namespace, stack: contextlib.ExitStack) -> int:
     thr = args.cluster_threshold if args.cluster_threshold is not None else config.cluster_threshold
     ui.muted(f"Diarize: num_speakers={num_sp or 'auto'} cluster_threshold={thr}")
 
-    want_html = _outputs_include(args, config, "html")
-    # Degraded outputs honor only an EXPLICIT --outputs html (a typed flag
-    # is a promise; config-supplied html describes the success path and
-    # keeps master's skip when diarization yields nothing).
-    explicit_html = _outputs_explicitly_include(args, "html")
     want_frames = screenshots and aud.needs_extraction(in_path)
+    # Frames are seen in the HTML transcript, so asking for frames asks for
+    # it (same rule as `whiz transcribe`).
+    want_html = _outputs_include(args, config, "html") or want_frames
+    # Degraded outputs honor only an EXPLICIT --outputs html or frames (a
+    # typed flag is a promise; config-supplied html describes the success
+    # path and keeps master's skip when diarization yields nothing).
+    explicit_html = _outputs_explicitly_include(args, "html") or want_frames
     # L (wave-1 audit): config-supplied html on a run that will produce no
     # speaker labels is skipped — say so and NAME the format, instead of
     # leaving the user wondering why no HTML appeared.

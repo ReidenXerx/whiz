@@ -155,6 +155,8 @@ final class RecorderModel: ObservableObject {
     /// turned on in System Settings stays "no" until Whiz restarts, and on
     /// recent macOS it can say "no" with the permission granted. Before
     /// refusing, ask ScreenCaptureKit, which checks the permission as it is.
+    /// Only when the user presses Record: a refused check makes macOS show
+    /// its permission alert, so checking on its own would nag.
     func confirmScreenAccess() async -> Bool {
         if screenAllowed { return true }
         guard await screenAccessProbe() else { return false }
@@ -162,18 +164,6 @@ final class RecorderModel: ObservableObject {
         screenAllowed = true
         return true
     }
-
-    /// For the Record view: clears a stale "needs permission" note, once
-    /// Whiz has asked for the permission (probing before then could make
-    /// macOS ask unprompted).
-    func refreshScreenAccess() async {
-        refreshPermissions()
-        if !screenAllowed && defaults.bool(forKey: Self.screenAskedKey) {
-            _ = await confirmScreenAccess()
-        }
-    }
-
-    static let screenAskedKey = "dev.reidenxerx.whiz.recording.screenAsked"
 
     /// Listing what can be captured fails unless the permission is granted.
     /// Nonisolated: the content never leaves this function, only the answer
@@ -213,7 +203,6 @@ final class RecorderModel: ObservableObject {
 
     /// The first time, macOS asks; after that only System Settings can.
     func requestScreenAccess() {
-        defaults.set(true, forKey: Self.screenAskedKey)
         if !CGRequestScreenCaptureAccess() {
             NSWorkspace.shared.open(Self.screenSettingsURL)
         }
@@ -259,13 +248,11 @@ final class RecorderModel: ObservableObject {
             }
         }
         if sources.needsScreenCapture {
-            defaults.set(true, forKey: Self.screenAskedKey)
+            // One check per press: when it fails, macOS has just shown its
+            // own alert, and asking again would stack a second one.
             if !(await confirmScreenAccess()) {
-                requestScreenAccess()
-                if !(await confirmScreenAccess()) {
-                    errorMessage = "Whiz needs permission to record the call's audio\(sources.display != nil ? " and the screen" : ""). Allow Whiz in System Settings → Privacy & Security → Screen & System Audio Recording, then press Record again."
-                    return
-                }
+                errorMessage = "Whiz needs permission to record the call's audio\(sources.display != nil ? " and the screen" : ""). Allow Whiz in System Settings → Privacy & Security → Screen & System Audio Recording, then press Record again. If Whiz is already switched on there, remove it with the − button and press Record to allow it again."
+                return
             }
         }
 

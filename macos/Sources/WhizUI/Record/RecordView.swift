@@ -46,11 +46,11 @@ struct RecordView: View {
         }
         .onAppear {
             recorder.refreshDevices()
-            Task { await recorder.refreshScreenAccess() }
         }
-        // Back from System Settings with the switch turned on.
+        // Back from System Settings with the switch turned on. Only the quiet
+        // check here: the thorough one makes macOS show an alert when refused.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            Task { await recorder.refreshScreenAccess() }
+            recorder.refreshPermissions()
         }
     }
 

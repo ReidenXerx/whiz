@@ -257,19 +257,14 @@ struct RecordingPreferencesTests {
         #expect(model.screenAllowed == false)
     }
 
-    @Test("the Record view probes only once Whiz has asked for the permission")
-    func refreshProbesOnlyAfterAsking() async {
-        let defaults = makeSuite()
+    @Test("opening Whiz or coming back to it never runs the check that makes macOS ask")
+    func refreshNeverProbes() async {
         var probes = 0
-        let model = RecorderModel(defaults: defaults, screenAccessProbe: { probes += 1; return true })
+        let model = RecorderModel(defaults: makeSuite(), screenAccessProbe: { probes += 1; return false })
+        model.refreshDevices()
         model.refreshPermissions()
-        guard !model.screenAllowed else { return }
-        await model.refreshScreenAccess()
-        #expect(probes == 0, "never asked: a probe could make macOS ask unprompted")
-        defaults.set(true, forKey: RecorderModel.screenAskedKey)
-        await model.refreshScreenAccess()
-        #expect(probes == 1)
-        #expect(model.screenAllowed)
+        model.refreshPermissions()
+        #expect(probes == 0, "a refused probe shows the macOS permission alert")
     }
 
     @Test("preferences survive a round trip; a fresh Mac gets the defaults")
