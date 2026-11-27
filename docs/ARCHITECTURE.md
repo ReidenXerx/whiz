@@ -45,6 +45,7 @@ One Python package, ~6,000 lines, no compiled parts:
 |---|---|
 | `cli.py` | command surface: `transcribe`, `merge`, `analyze`, `models`, `config`, `speakers`, `upgrade`, the `dictate` stub; video-input defaults (speakers/screenshots/name-speakers auto-on) |
 | `audio.py` | ffmpeg extraction to 16 kHz mono PCM WAV — the only container whisper-cli accepts |
+| `languages.py` | per-stretch language detection when the language is "auto" (whisper-cli's own `-l auto` decides once, from the first 30 s): 30 s windows, switches refined to ~10 s, each span decoded in its own language and stitched onto one timeline; the repetition-loop guard (a line repeated in a row is decoded again with `-mc 0`, or collapsed) |
 | `models.py` | ggml model discovery, alias resolution (`turbo`, `large-v3`), download; the NS-15 preference order |
 | `diarize.py` | sherpa-onnx diarization (pyannote segmentation + 3D-Speaker embedding), model download, the fingerprinted result cache |
 | `merge.py` | maximum-temporal-overlap assignment of whisper segments to diarization speakers; labeled SRT/TXT/HTML emission |
@@ -86,6 +87,14 @@ transcribe ──► audio.py ──► whisper-cli ──► diarize.py ──�
                                                                   ▼
 analyze ──► ai.py (frames + transcript ──► map-reduce ──► .analysis.md)
 ```
+
+Inside the whisper-cli step (`cli._transcribe`): with the language on
+"auto", `languages.py` first asks whisper-cli for each 30 s window's
+language (`-dl`, an encoder pass each); one language means the usual run
+told that language, several mean one run per language over its spans,
+stitched into the same `<stem>.wav.json`/`.srt` the later steps read. Every
+run is then checked for repetition loops. Any failure there falls back to
+whisper-cli's own behaviour with a warning, never to no transcript.
 
 `whiz merge` re-runs only the diarization + merge against an existing whisper
 JSON, reusing the diarization cache, so tuning speaker count/threshold/names

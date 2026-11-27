@@ -671,12 +671,55 @@ struct FilesView: View {
                     }
                     .card(padding: 0)
                 }
+                if let steps = record.steps, !steps.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        SectionLabel("How it ran")
+                        VStack(spacing: 0) {
+                            ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
+                                if index > 0 { Divider().padding(.leading, 44) }
+                                StepTimeRow(symbol: "checkmark.circle.fill", title: step.title,
+                                            time: Format.clock(step.duration), emphasis: false)
+                            }
+                            if let total = record.duration {
+                                Divider()
+                                StepTimeRow(symbol: "clock", title: "Total",
+                                            time: Format.clock(total), emphasis: true)
+                            }
+                        }
+                        .card(padding: 0)
+                    }
+                }
             }
             .padding(.horizontal, 32)
             .padding(.vertical, 24)
             .frame(maxWidth: Theme.readingWidth)
             .frame(maxWidth: .infinity)
         }
+    }
+}
+
+/// One finished stage and how long it took.
+private struct StepTimeRow: View {
+    let symbol: String
+    let title: String
+    let time: String
+    let emphasis: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: symbol)
+                .foregroundStyle(emphasis ? Color.secondary : Color.green)
+                .frame(width: 20)
+            Text(title)
+                .fontWeight(emphasis ? .semibold : .regular)
+            Spacer()
+            Text(time)
+                .monospacedDigit()
+                .fontWeight(emphasis ? .semibold : .regular)
+                .foregroundStyle(emphasis ? Color.primary : Color.secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
     }
 }
 

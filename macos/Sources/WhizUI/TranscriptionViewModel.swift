@@ -294,7 +294,10 @@ final class TranscriptionViewModel: ObservableObject {
             // window never advertises a run that wrote nothing.
             if !artifacts.isEmpty {
                 lastRun = lastRunStore.saveReturning(
-                    artifacts: artifacts, input: input, duration: lastDuration)
+                    artifacts: artifacts, input: input, duration: lastDuration,
+                    steps: steps.compactMap { step in
+                        step.duration.map { StoredStep(title: step.title, duration: $0) }
+                    })
                 recentRuns = lastRunStore.loadHistory()
             }
             // A clean run with results now lives in history: show it there.
@@ -385,7 +388,9 @@ struct PhaseStep: Identifiable, Equatable, Sendable {
     static let friendlyTitles: [String: String] = [
         "extracting audio": "Extracting audio",
         "diarizing": "Telling speakers apart",
+        "detecting languages": "Detecting languages",
         "transcribing": "Transcribing speech",
+        "repairing repeated lines": "Fixing repeated lines",
         "merging speakers": "Matching words to speakers",
         "capturing frames": "Capturing video frames",
         "writing HTML transcript": "Writing the HTML transcript",

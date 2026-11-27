@@ -46,6 +46,27 @@ struct LastRunStoreTests {
         #expect(store.load() == returned)
     }
 
+    @Test("stage times are kept with the run, and older records still load")
+    func stepsRoundTrip() throws {
+        let suite = makeSuite()
+        let store = LastRunStore(defaults: suite)
+        let steps = [StoredStep(title: "Detecting languages", duration: 71.5),
+                     StoredStep(title: "Transcribing speech", duration: 402)]
+        let saved = store.saveReturning(artifacts: makeArtifacts(), input: URL(fileURLWithPath: "/tmp/a.mov"),
+                                        duration: 480, steps: steps)
+        #expect(saved?.steps == steps)
+        #expect(store.load()?.steps == steps)
+        // No steps given: nothing stored, not an empty list.
+        #expect(store.saveReturning(artifacts: makeArtifacts(), input: URL(fileURLWithPath: "/tmp/b.mov"))?.steps == nil)
+
+        // A record written before steps existed decodes, with none.
+        let old = #"[{"inputPath":"/tmp/c.mov","finishedAt":0,"artifacts":[]}]"#
+        suite.set(Data(old.utf8), forKey: LastRunStore.historyKey)
+        let history = store.loadHistory()
+        #expect(history.count == 1)
+        #expect(history.first?.steps == nil)
+    }
+
     @Test("an empty run does not erase the previous record")
     func emptyRunKeepsPrevious() {
         // A stopped or failed run writes nothing; the previous run's results
